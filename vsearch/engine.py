@@ -132,18 +132,18 @@ class VideoSearchEngine:
                     "similarity_score": float(raw_similarities[idx]),
                     "normalized_score": float(normalized_scores[idx]),
                 })
-                if len(results) >= top_k:
+                if top_k is not None and top_k > 0 and len(results) >= top_k:
                     break
         return results
 
-    def search_text(self, text_query, embeddings, timestamps, top_k=5, raw_floor=0.15, norm_threshold=0.75, model_id=None):
+    def search_text(self, text_query, embeddings, timestamps, top_k=5, raw_floor=0.25, norm_threshold=0.75, model_id=None):
         """Encode text query and run ranked similarity matching."""
         if model_id is not None:
             self._load_model(model_id, verbose=False)
         query_vec = self._encode_text(text_query)
         return self._rank_results(query_vec, embeddings, timestamps, top_k, raw_floor, norm_threshold)
 
-    def search_image(self, ref_image_path, embeddings, timestamps, top_k=5, raw_floor=0.15, norm_threshold=0.75, model_id=None):
+    def search_image(self, ref_image_path, embeddings, timestamps, top_k=5, raw_floor=0.25, norm_threshold=0.75, model_id=None):
         """Encode reference image query and run ranked similarity matching."""
         if model_id is not None:
             self._load_model(model_id, verbose=False)

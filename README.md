@@ -19,6 +19,12 @@
 # 4. Search with reference image:
 #    vsearch search cache.npz -i reference.jpg
 #
+# 5. Save search results to a text file:
+#    vsearch search cache.npz -t "a person running" -s /tmp/results
+#
+# 6. Save matched frames as images:
+#    vsearch search cache.npz -t "a person running" -f /tmp/frames --video /path/to/video.mp4
+#
 # ## Model Variants
 #
 # The tool supports multiple CLIP model variants via the `--model` flag:
@@ -50,12 +56,15 @@
 #   cache       Path to pre-computed embeddings cache (.npz) (required)
 #   -t, --text        Natural language search prompt
 #   -i, --image       Path to reference image file for visual similarity matching
-#   -k, --top-k       Maximum number of top results to return (default: 5)
+#   -k, --top-k       Maximum number of top results to return (default: all)
 #   --json            Output results in strict JSON format to stdout for AI agent consumption
-#   --raw-floor       Absolute noise floor for raw similarity (default: 0.15)
+#   --raw-floor       Absolute noise floor for raw similarity (default: 0.25)
 #   --norm-threshold  Normalized score threshold (default: 0.75)
 #   --model           CLIP model variant (default: openai/clip-vit-base-patch32)
 #   --verbose, -v     Enable verbose progress output
+#   --save-results, -s  Save results to text file. If directory, auto-generates {video_name}_search_results_YYYYMMDD_HHMMSS.txt
+#   --save-frames, -f   Directory to save matched frame images as {video_name}_{HHMMSS}.jpg
+#   --video           Path to original video file (required with --save-frames)
 #
 # ## Expected JSON Output Schema (`--json` flag)
 #
@@ -85,7 +94,7 @@
 #
 # 2. **Query phase** (`vsearch search`): Loads the cached embeddings, encodes the query
 #    (text or image) with the same CLIP model, computes cosine similarity via dot product,
-#    applies min-max normalization and dual-threshold filtering (normalized >= 0.75 AND raw >= 0.15),
+#    applies min-max normalization and dual-threshold filtering (normalized >= 0.75 AND raw >= 0.25),
 #    sorts by score descending, and returns the top-k matching timestamps.
 #
 # ## Target Environment
