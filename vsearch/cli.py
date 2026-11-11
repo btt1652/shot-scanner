@@ -62,7 +62,7 @@ def main():
     p_index.add_argument("--output", "-o", default=".", help="Path to save the output cache archive (.npz). If a directory, auto-generates filename: {video_name}_{model_name}.npz")
     p_index.add_argument("--sample-rate", "-r", type=int, default=1, help="Frame sampling interval in seconds (default: 1)")
     p_index.add_argument("--model", default="openai/clip-vit-base-patch32", help="CLIP model variant (default: openai/clip-vit-base-patch32)")
-    p_index.add_argument("--verbose", action="store_true", help="Enable verbose progress output")
+    p_index.add_argument("--verbose", "-v", action="store_true", help="Enable verbose progress output")
     p_index.set_defaults(func=cmd_index)
 
     p_search = sub.add_parser("search", help="Query a pre-computed cache")
@@ -74,7 +74,7 @@ def main():
     p_search.add_argument("--raw-floor", type=float, default=0.15, help="Absolute noise floor for raw similarity (default: 0.15)")
     p_search.add_argument("--norm-threshold", type=float, default=0.75, help="Normalized score threshold (default: 0.75)")
     p_search.add_argument("--model", default="openai/clip-vit-base-patch32", help="CLIP model variant (default: openai/clip-vit-base-patch32)")
-    p_search.add_argument("--verbose", action="store_true", help="Enable verbose progress output")
+    p_search.add_argument("--verbose", "-v", action="store_true", help="Enable verbose progress output")
     p_search.set_defaults(func=cmd_search)
 
     args = parser.parse_args()

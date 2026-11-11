@@ -54,7 +54,7 @@
 #   --raw-floor       Absolute noise floor for raw similarity (default: 0.15)
 #   --norm-threshold  Normalized score threshold (default: 0.75)
 #   --model           CLIP model variant (default: openai/clip-vit-base-patch32)
-#   --verbose         Enable verbose progress output
+#   --verbose, -v     Enable verbose progress output
 #
 # ## Expected JSON Output Schema (`--json` flag)
 #
