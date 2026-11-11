@@ -19,6 +19,17 @@
 # 4. Search with reference image:
 #    vsearch search -c cache.npz -i reference.jpg
 #
+# ## Model Variants
+#
+# The tool supports multiple CLIP model variants via the `--model` flag:
+#
+# - `openai/clip-vit-base-patch32` (default) - Good balance of speed and accuracy
+# - `openai/clip-vit-base-patch16` - Smaller, faster on CPU (~400MB)
+# - `openai/clip-vit-large-patch14` - Larger, more accurate (~1.3GB, needs more memory)
+#
+# Example:
+#    vsearch index -v myvideo.mp4 -o cache.npz --model openai/clip-vit-base-patch16
+#
 # ## Commands
 #
 # ### `index`
@@ -28,6 +39,8 @@
 #   -v, --video       Path to input video file (required)
 #   -o, --output      Path to save the output cache archive (.npz) (required)
 #   -r, --sample-rate  Frame sampling interval in seconds (default: 1)
+#   --model           CLIP model variant (default: openai/clip-vit-base-patch32)
+#   --verbose         Enable verbose progress output
 #
 # ### `search`
 # Query a pre-computed cache using either a text prompt or a reference image path.
@@ -40,6 +53,8 @@
 #   --json            Output results in strict JSON format to stdout for AI agent consumption
 #   --raw-floor       Absolute noise floor for raw similarity (default: 0.15)
 #   --norm-threshold  Normalized score threshold (default: 0.75)
+#   --model           CLIP model variant (default: openai/clip-vit-base-patch32)
+#   --verbose         Enable verbose progress output
 #
 # ## Expected JSON Output Schema (`--json` flag)
 #
