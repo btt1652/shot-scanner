@@ -23,6 +23,15 @@ class VideoSearchEngine:
         self.processor = CLIPProcessor.from_pretrained(model_id)
         self.model = CLIPModel.from_pretrained(model_id).to(self.device)
 
+    def _load_model(self, model_id, verbose=False):
+        """Load a different CLIP model variant."""
+        from transformers import CLIPModel, CLIPProcessor
+        self.processor = CLIPProcessor.from_pretrained(model_id)
+        self.model = CLIPModel.from_pretrained(model_id).to(self.device)
+        self.model_id = model_id
+        if verbose:
+            print(f"Loaded model: {model_id}", file=sys.stderr, flush=True)
+
     def _encode_image(self, img):
         """Encode a single PIL image -> L2-normalized feature vector."""
         inputs = self.processor(images=[img], return_tensors="pt").to(self.device)
@@ -40,13 +49,15 @@ class VideoSearchEngine:
         norm = np.linalg.norm(vec)
         return vec / norm if norm > 0 else vec
 
-    def extract_and_encode(self, video_path, sample_rate_sec=1, batch_size=BATCH_SIZE, verbose=False):
+    def extract_and_encode(self, video_path, sample_rate_sec=1, batch_size=BATCH_SIZE, verbose=False, model_id=None):
         """Extract frames via OpenCV and return L2-normalized image embeddings + timestamps.
 
         Streams frames one-at-a-time so very long videos don't exhaust memory.
         Progress is written to stderr for easy monitoring (only when verbose=True).
         """
         import sys as _sys
+        if model_id is not None:
+            self._load_model(model_id, verbose=verbose)
         cap = cv2.VideoCapture(video_path)
         if not cap.isOpened():
             raise IOError(f"Cannot open video file: {video_path}")
@@ -125,12 +136,18 @@ class VideoSearchEngine:
                     break
         return results
 
-    def search_text(self, text_query, embeddings, timestamps, top_k=5, raw_floor=0.15, norm_threshold=0.75):
+    def search_text(self, text_query, embeddings, timestamps, top_k=5, raw_floor=0.15, norm_threshold=0.75, model_id=None):
         """Encode text query and run ranked similarity matching."""
+        if model_id is not None:
+            self._load_model(model_id, verbose=False)
         query_vec = self._encode_text(text_query)
         return self._rank_results(query_vec, embeddings, timestamps, top_k, raw_floor, norm_threshold)
 
-    def search_image(self, ref_image_path, embeddings, timestamps, top_k=5, raw_floor=0.15, norm_threshold=0.75):
+    def search_image(self, ref_image_path, embeddings, timestamps, top_k=5, raw_floor=0.15, norm_threshold=0.75, model_id=None):
         """Encode reference image query and run ranked similarity matching."""
-        query_vec = self._encode_image(ref_image_path)
+        if model_id is not None:
+            self._load_model(model_id, verbose=False)
+        from PIL import Image as PILImage
+        img = PILImage.open(ref_image_path).convert("RGB")
+        query_vec = self._encode_image(img)
         return self._rank_results(query_vec, embeddings, timestamps, top_k, raw_floor, norm_threshold)
