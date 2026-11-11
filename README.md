@@ -10,8 +10,8 @@
 # 1. Install dependencies:
 #    pip install -r requirements.txt
 #
-# 2. Index a video file:
-#    vsearch index -v myvideo.mp4 -o cache.npz
+# 2. Index a video file (video path is first positional arg):
+#    vsearch index myvideo.mp4 -o cache.npz
 #
 # 3. Search the cache with text:
 #    vsearch search -c cache.npz -t "a person running"
@@ -36,12 +36,11 @@
 # Process a local video file, extract keyframes, compute embeddings, and save a compressed archive.
 #
 # Flags:
-#   -v, --video       Path to input video file (required)
-#   -o, --output      Path to save the output cache archive (.npz) (default: .)
+#   -v, --video VIDEO     Path to input video file (required)
+#   -o, --output OUTPUT    Path to save the output cache archive (.npz) (default: current directory).
 #                     If a directory, auto-generates filename: {video_name}_{model_name}.npz
-#   -r, --sample-rate  Frame sampling interval in seconds (default: 1)
-#   --model           CLIP model variant (default: openai/clip-vit-base-patch32)
-#   --verbose         Enable verbose progress output
+#   -r, --sample-rate SAMPLE_RATE  Frame sampling interval in seconds (default: 1)
+#   --model MODEL           CLIP model variant (default: openai/clip-vit-base-patch32)
 #
 # ### `search`
 # Query a pre-computed cache using either a text prompt or a reference image path.

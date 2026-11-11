@@ -58,7 +58,7 @@ def main():
     sub = parser.add_subparsers(dest="command", required=True)
 
     p_index = sub.add_parser("index", help="Extract keyframes and build a .npz cache")
-    p_index.add_argument("--video", "-v", required=True, help="Path to input video file")
+    p_index.add_argument("video", help="Path to input video file")
     p_index.add_argument("--output", "-o", default=".", help="Path to save the output cache archive (.npz). If a directory, auto-generates filename: {video_name}_{model_name}.npz")
     p_index.add_argument("--sample-rate", "-r", type=int, default=1, help="Frame sampling interval in seconds (default: 1)")
     p_index.add_argument("--model", default="openai/clip-vit-base-patch32", help="CLIP model variant (default: openai/clip-vit-base-patch32)")
@@ -66,7 +66,7 @@ def main():
     p_index.set_defaults(func=cmd_index)
 
     p_search = sub.add_parser("search", help="Query a pre-computed cache")
-    p_search.add_argument("--cache", "-c", required=True, help="Path to pre-computed embeddings cache (.npz)")
+    p_search.add_argument("cache", help="Path to pre-computed embeddings cache (.npz)")
     p_search.add_argument("--text", "-t", default=None, help="Natural language search prompt")
     p_search.add_argument("--image", "-i", default=None, help="Path to reference image file")
     p_search.add_argument("--top-k", "-k", type=int, default=5, help="Maximum number of top results (default: 5)")
