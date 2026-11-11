@@ -1,2 +1,5 @@
-opencv-contrib-python>=4.8.0,<5.0.0
+torch>=2.1.0
+transformers
+opencv-python>=4.8.0,<5.0.0
 numpy>=1.24.0
+Pillow>=9.1.0
