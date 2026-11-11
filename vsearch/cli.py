@@ -11,18 +11,27 @@ from .engine import VideoSearchEngine, BATCH_SIZE
 
 def cmd_index(args):
     verbose = bool(getattr(args, "verbose", False))
-    engine = VideoSearchEngine()
+    engine = VideoSearchEngine(model_id=args.model)
     embeddings, timestamps = engine.extract_and_encode(
         args.video, args.sample_rate, BATCH_SIZE, verbose=verbose
     )
-    np.savez_compressed(args.output, embeddings=embeddings, timestamps=timestamps)
+    
+    # Auto-generate filename if output is a directory
+    import os
+    output_path = args.output
+    if os.path.isdir(output_path):
+        video_name = os.path.splitext(os.path.basename(args.video))[0]
+        model_name = args.model.split("/")[-1]  # e.g., clip-vit-base-patch32
+        output_path = os.path.join(output_path, f"{video_name}_{model_name}.npz")
+    
+    np.savez_compressed(output_path, embeddings=embeddings, timestamps=timestamps)
     if verbose:
-        print(f"Cache saved to {args.output}", file=sys.stderr)
+        print(f"Cache saved to {output_path}", file=sys.stderr)
 
 
 def cmd_search(args):
     verbose = bool(getattr(args, "verbose", False))
-    engine = VideoSearchEngine()
+    engine = VideoSearchEngine(model_id=args.model)
     data = np.load(args.cache, allow_pickle=False)
     embeddings = data["embeddings"]
     timestamps = data["timestamps"]
@@ -52,6 +61,7 @@ def main():
     p_index.add_argument("--video", "-v", required=True, help="Path to input video file")
     p_index.add_argument("--output", "-o", required=True, help="Path to save the output cache archive (.npz)")
     p_index.add_argument("--sample-rate", "-r", type=int, default=1, help="Frame sampling interval in seconds (default: 1)")
+    p_index.add_argument("--model", default="openai/clip-vit-base-patch32", help="CLIP model variant (default: openai/clip-vit-base-patch32)")
     p_index.add_argument("--verbose", action="store_true", help="Enable verbose progress output")
     p_index.set_defaults(func=cmd_index)
 
@@ -63,6 +73,7 @@ def main():
     p_search.add_argument("--json", action="store_true", help="Output results in strict JSON format")
     p_search.add_argument("--raw-floor", type=float, default=0.15, help="Absolute noise floor for raw similarity (default: 0.15)")
     p_search.add_argument("--norm-threshold", type=float, default=0.75, help="Normalized score threshold (default: 0.75)")
+    p_search.add_argument("--model", default="openai/clip-vit-base-patch32", help="CLIP model variant (default: openai/clip-vit-base-patch32)")
     p_search.add_argument("--verbose", action="store_true", help="Enable verbose progress output")
     p_search.set_defaults(func=cmd_search)
 
