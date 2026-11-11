@@ -59,7 +59,7 @@ def main():
 
     p_index = sub.add_parser("index", help="Extract keyframes and build a .npz cache")
     p_index.add_argument("--video", "-v", required=True, help="Path to input video file")
-    p_index.add_argument("--output", "-o", required=True, help="Path to save the output cache archive (.npz)")
+    p_index.add_argument("--output", "-o", default=".", help="Path to save the output cache archive (.npz). If a directory, auto-generates filename: {video_name}_{model_name}.npz")
     p_index.add_argument("--sample-rate", "-r", type=int, default=1, help="Frame sampling interval in seconds (default: 1)")
     p_index.add_argument("--model", default="openai/clip-vit-base-patch32", help="CLIP model variant (default: openai/clip-vit-base-patch32)")
     p_index.add_argument("--verbose", action="store_true", help="Enable verbose progress output")

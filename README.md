@@ -37,7 +37,7 @@
 #
 # Flags:
 #   -v, --video       Path to input video file (required)
-#   -o, --output      Path to save the output cache archive (.npz) (required)
+#   -o, --output      Path to save the output cache archive (.npz) (default: .)
 #                     If a directory, auto-generates filename: {video_name}_{model_name}.npz
 #   -r, --sample-rate  Frame sampling interval in seconds (default: 1)
 #   --model           CLIP model variant (default: openai/clip-vit-base-patch32)
