@@ -14,10 +14,10 @@
 #    vsearch index myvideo.mp4 -o cache.npz
 #
 # 3. Search the cache with text:
-#    vsearch search -c cache.npz -t "a person running"
+#    vsearch search cache.npz -t "a person running"
 #
 # 4. Search with reference image:
-#    vsearch search -c cache.npz -i reference.jpg
+#    vsearch search cache.npz -i reference.jpg
 #
 # ## Model Variants
 #
@@ -28,7 +28,7 @@
 # - `openai/clip-vit-large-patch14` - Larger, more accurate (~1.3GB, needs more memory)
 #
 # Example:
-#    vsearch index -v myvideo.mp4 -o cache.npz --model openai/clip-vit-base-patch16
+#    vsearch index myvideo.mp4 -o cache.npz --model openai/clip-vit-base-patch16
 #
 # ## Commands
 #
@@ -36,17 +36,18 @@
 # Process a local video file, extract keyframes, compute embeddings, and save a compressed archive.
 #
 # Flags:
-#   -v, --video VIDEO     Path to input video file (required)
+#   video       Path to input video file (required)
 #   -o, --output OUTPUT    Path to save the output cache archive (.npz) (default: current directory).
 #                     If a directory, auto-generates filename: {video_name}_{model_name}.npz
 #   -r, --sample-rate SAMPLE_RATE  Frame sampling interval in seconds (default: 1)
 #   --model MODEL           CLIP model variant (default: openai/clip-vit-base-patch32)
+#   --verbose, -v     Enable verbose progress output
 #
 # ### `search`
 # Query a pre-computed cache using either a text prompt or a reference image path.
 #
 # Flags:
-#   -c, --cache       Path to pre-computed embeddings cache (.npz) (required)
+#   cache       Path to pre-computed embeddings cache (.npz) (required)
 #   -t, --text        Natural language search prompt
 #   -i, --image       Path to reference image file for visual similarity matching
 #   -k, --top-k       Maximum number of top results to return (default: 5)
