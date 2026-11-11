@@ -129,7 +129,7 @@ class VideoSearchEngine:
                 results.append({
                     "timestamp_seconds": ts,
                     "timestamp_formatted": f"{int(ts)//60:02d}:{int(ts)%60:02d}",
-                    "similarity_score": float(raw_similarities[idx]),
+                    "score": float(raw_similarities[idx]),
                     "normalized_score": float(normalized_scores[idx]),
                 })
                 if top_k is not None and top_k > 0 and len(results) >= top_k:

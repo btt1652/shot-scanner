@@ -23,7 +23,7 @@ def cmd_index(args):
     if os.path.isdir(output_path):
         video_name = os.path.splitext(os.path.basename(args.video))[0]
         model_name = args.model.split("/")[-1]  # e.g., clip-vit-base-patch32
-        output_path = os.path.join(output_path, f"{video_name}_{model_name}.npz")
+        output_path = os.path.join(output_path, f"{video_name}_{model_name}_{args.sample_rate}s.npz")
 
     video_name = os.path.splitext(os.path.basename(args.video))[0]
     np.savez_compressed(
@@ -42,7 +42,7 @@ def _format_results_text(results):
     for r in results:
         lines.append(
             f"{r['timestamp_seconds']:.1f}s  {r['timestamp_formatted']}  "
-            f"sim={r['similarity_score']:.4f}  norm={r['normalized_score']:.4f}"
+            f"score={r['score']:.4f}  norm={r['normalized_score']:.4f}"
         )
     return "\n".join(lines)
 
@@ -88,7 +88,7 @@ def _save_matched_frames(results, video_path, output_dir, video_name, verbose=Fa
     for r in results:
         ts = r["timestamp_seconds"]
         ts_str = f"{int(ts)//3600:02d}{int(ts)%3600//60:02d}{int(ts)%60:02d}"
-        out_path = os.path.join(output_dir, f"{video_name}_{ts_str}.jpg")
+        out_path = os.path.join(output_dir, f"{video_name}_{ts_str}_{r['score']:.4f}_{r['normalized_score']:.4f}.jpg")
         if _extract_frame_at(video_path, ts, out_path):
             saved += 1
             if verbose:
@@ -159,12 +159,12 @@ def main():
     p_search.add_argument("--image", "-i", default=None, help="Path to reference image file")
     p_search.add_argument("--top-k", "-k", type=int, default=-1, help="Maximum number of top results to return (default: all)")
     p_search.add_argument("--json", action="store_true", help="Output results in strict JSON format")
-    p_search.add_argument("--raw-floor", type=float, default=0.25, help="Absolute noise floor for raw similarity (default: 0.25)")
-    p_search.add_argument("--norm-threshold", type=float, default=0.75, help="Normalized score threshold (default: 0.75)")
+    p_search.add_argument("--raw-floor", type=float, default=0, help="Absolute noise floor for raw similarity (default: 0)")
+    p_search.add_argument("--norm-threshold", type=float, default=0.9, help="Normalized score threshold (default: 0.9)")
     p_search.add_argument("--model", default="openai/clip-vit-base-patch32", help="CLIP model variant (default: openai/clip-vit-base-patch32)")
     p_search.add_argument("--verbose", "-v", action="store_true", help="Enable verbose progress output")
     p_search.add_argument("--save-results", "-s", default=None, help="Save results to text file. If directory, auto-generates {video_name}_search_results_YYYYMMDD_HHMMSS.txt")
-    p_search.add_argument("--save-frames", "-f", default=None, help="Directory to save matched frame images as {video_name}_{HHMMSS}.jpg")
+    p_search.add_argument("--save-frames", "-f", default=None, help="Directory to save matched frame images as {video_name}_{HHMMSS}_{score}.jpg")
     p_search.add_argument("--video", default=None, help="Path to original video file (required with --save-frames)")
     p_search.set_defaults(func=cmd_search)
 

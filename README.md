@@ -44,7 +44,7 @@
 # Flags:
 #   video       Path to input video file (required)
 #   -o, --output OUTPUT    Path to save the output cache archive (.npz) (default: current directory).
-#                     If a directory, auto-generates filename: {video_name}_{model_name}.npz
+#                     If a directory, auto-generates filename: {video_name}_{model_name}_{sample_rate}.npz
 #   -r, --sample-rate SAMPLE_RATE  Frame sampling interval in seconds (default: 1)
 #   --model MODEL           CLIP model variant (default: openai/clip-vit-base-patch32)
 #   --verbose, -v     Enable verbose progress output
@@ -58,12 +58,12 @@
 #   -i, --image       Path to reference image file for visual similarity matching
 #   -k, --top-k       Maximum number of top results to return (default: all)
 #   --json            Output results in strict JSON format to stdout for AI agent consumption
-#   --raw-floor       Absolute noise floor for raw similarity (default: 0.25)
-#   --norm-threshold  Normalized score threshold (default: 0.75)
+#   --raw-floor       Absolute noise floor for raw similarity (default: 0)
+#   --norm-threshold  Normalized score threshold (default: 0.9)
 #   --model           CLIP model variant (default: openai/clip-vit-base-patch32)
 #   --verbose, -v     Enable verbose progress output
 #   --save-results, -s  Save results to text file. If directory, auto-generates {video_name}_search_results_YYYYMMDD_HHMMSS.txt
-#   --save-frames, -f   Directory to save matched frame images as {video_name}_{HHMMSS}.jpg
+#   --save-frames, -f   Directory to save matched frame images as {video_name}_{HHMMSS}_{score}_{norm_score}.jpg
 #   --video           Path to original video file (required with --save-frames)
 #
 # ## Expected JSON Output Schema (`--json` flag)
@@ -94,7 +94,7 @@
 #
 # 2. **Query phase** (`vsearch search`): Loads the cached embeddings, encodes the query
 #    (text or image) with the same CLIP model, computes cosine similarity via dot product,
-#    applies min-max normalization and dual-threshold filtering (normalized >= 0.75 AND raw >= 0.25),
+#    applies min-max normalization and dual-threshold filtering (normalized >= 0.9 AND raw >= 0),
 #    sorts by score descending, and returns the top-k matching timestamps.
 #
 # ## Target Environment
