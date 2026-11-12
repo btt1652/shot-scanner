@@ -1,6 +1,6 @@
 [index]
 output_dir = "."
-model = "openai/clip-vit-base-patch32"
+model = "openai/clip-vit-large-patch14"
 sample_rate = 1
 
 [search]

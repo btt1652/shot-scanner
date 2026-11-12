@@ -145,27 +145,28 @@ def _save_matched_frames(results, npz_name, video_path, output_dir, verbose=Fals
 
 
 def _validate_results_with_ollama(results, query, frame_b64s, npz_name, model_id="clef-flash", ollama_endpoint="http://localhost:11434/v1/systemone", threshold=0.5, verbose=False):
-    """Use Ollama's decision capability to validate frames top-down.
+    """Use Ollama's decision capability to validate frames individually.
 
-    Frames are checked from highest score to lowest. If a frame fails
-    validation (score < threshold), that frame and all lower-score frames are
-    discarded. If the highest-score frame fails, all results are discarded.
+    Every frame in `frame_b64s` is validated against the Ollama decision model.
+    Only frames whose result passes the threshold are kept; failing frames are
+    discarded while passing frames are retained with their original metadata.
+    The returned list preserves the original result order for passing frames only.
     """
-    try:
-        frame_iter = iter(frame_b64s)
-        first_b64 = next(frame_iter)
-    except StopIteration:
+    if not frame_b64s:
         print("Warning: No frames were extracted. Skipping Ollama validation.", file=sys.stderr)
         return results
 
-    # Process first frame immediately, then remaining via generator
-    chain = [first_b64]
+    # Validate each frame independently and collect passing results
+    passed_results = []
+    frame_iter = iter(frame_b64s)
 
-    def _chain():
-        yield first_b64
-        yield from frame_iter
+    for r in results:
+        try:
+            frame_b64 = next(frame_iter)
+        except StopIteration:
+            print("Warning: Frame extraction ended early. Stopping validation.", file=sys.stderr)
+            break
 
-    for i, frame_b64 in enumerate(_chain()):
         payload = {
             "model": model_id,
             "state": f"A user is searching for: {query}",
@@ -180,7 +181,7 @@ def _validate_results_with_ollama(results, query, frame_b64s, npz_name, model_id
 
         # Ollama request
         if verbose:
-            print(f"Ollama request sent for frame {i+1} (model: {model_id})", file=sys.stderr)
+            print(f"Ollama request sent for frame at {r['timestamp_seconds']:.1f}s (model: {model_id})", file=sys.stderr)
 
         try:
             req = urllib.request.Request(
@@ -192,17 +193,16 @@ def _validate_results_with_ollama(results, query, frame_b64s, npz_name, model_id
                 res_json = json.loads(response.read().decode("utf-8"))
 
             valid_score = res_json["answers"]["is_valid"]["noul"]
-            print(f"Ollama decision score for frame {i+1}: {valid_score:.4f}", file=sys.stderr)
+            print(f"Ollama decision score for frame at {r['timestamp_seconds']:.1f}s: {valid_score:.4f}", file=sys.stderr)
 
-            if valid_score < threshold:
-                print(f"Warning: Frame {i+1} failed Ollama decision check (score: {valid_score:.4f}, threshold: {threshold:.2f}). Discarding this frame and all lower-score results.", file=sys.stderr)
-                # Discard this frame and all lower-score results
-                return results[:i]
+            if valid_score >= threshold:
+                passed_results.append(r)
+            else:
+                print(f"Frame at {r['timestamp_seconds']:.1f}s did NOT pass Ollama validation (score: {valid_score:.4f} < threshold: {threshold:.2f}). Discarded.", file=sys.stderr)
         except Exception as e:
-            print(f"Error validating frame {i+1}: {e}", file=sys.stderr)
-            break
+            print(f"Error validating frame at {r['timestamp_seconds']:.1f}s: {e}. Discarded.", file=sys.stderr)
 
-    return results
+    return passed_results
 
 
 def cmd_search(args):

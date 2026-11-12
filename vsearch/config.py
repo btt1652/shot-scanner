@@ -32,7 +32,7 @@ def default_config() -> dict:
         "search": {
             "top_k": -1,
             "raw_floor": 0.25,
-            "norm_threshold": 0.75,
+            "norm_threshold": 0.85,
             "json_output": False,
             "save_frames": None,
             "video": None,

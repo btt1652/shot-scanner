@@ -50,8 +50,9 @@ cache.npz + query (text/image) → Load embeddings → Encode query → Similari
 - Ranks by similarity (highest first)
 - **Frame extraction**: For each ranked result, extracts frame from cached `video_path`
 - **Validation**: If `--decision-model-validate` enabled, checks each frame with Ollama decision model
-  - Results fail validation (score < `decision_model_threshold`) are discarded
-  - Validation stops at first failure — all lower-score results are discarded
+  - Each frame is validated independently against the query
+  - Results that fail validation (score < `decision_model_threshold`) are discarded
+  - Passing results are retained with their original timestamps and scores
   - Configurable via `decision_model_threshold` in `config.toml` or `--decision-model-threshold` CLI flag
 
 ### Output formats
@@ -174,7 +175,7 @@ Flags:
 - `--verbose, -v` - Enable verbose progress output
 - `--save-frames, -f` - Directory to save matched frame images as `{cache_name}_{seconds_milliseconds}_{score}_{norm_score}.jpg` (e.g., `{cache_name}_252.300_{score}_{norm_score}.jpg`)
 - `--video` - Path to original video file (required with --save-frames if not recorded in cache, or if video was moved)
-- `--decision-model-validate` - Use local Ollama decision model to validate top-K selected frames. Results that fail validation are discarded from match results.
+- `--decision-model-validate` - Use local Ollama decision model to validate top-K selected frames. Each frame is checked independently; results that fail validation are discarded from match results.
 - `--decision-model-threshold` - Ollama decision model threshold (default: 0.5). Results with score < threshold are discarded.
 - `--ollama-endpoint` - Ollama API endpoint (default: http://localhost:11434/v1/systemone)
 - `--ollama-model` - Ollama model name for decision validation. Config key: `ollama_decision_model`.
