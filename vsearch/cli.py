@@ -106,10 +106,11 @@ def _save_matched_frames(results, npz_name, video_path, output_dir, verbose=Fals
 
 
 def _validate_results_with_ollama(results, query, frame_paths, npz_name, model_id="clef-flash", ollama_endpoint="http://localhost:11434/v1/systemone"):
-    """Use Ollama's decision capability to validate the top frames.
+    """Use Ollama's decision capability to validate frames top-down.
 
-    Results that fail validation (score < 0.5) are discarded from match results.
-    Only top-K selected frames are sent for validation.
+    Frames are checked from highest score to lowest. If a frame fails
+    validation (score < 0.5), that frame and all lower-score frames are
+    discarded. If the highest-score frame fails, all results are discarded.
     """
     if not frame_paths:
         print("Warning: No frames were saved. Skipping Ollama validation.", file=sys.stderr)
@@ -118,56 +119,50 @@ def _validate_results_with_ollama(results, query, frame_paths, npz_name, model_i
     # Limit to a reasonable number for Ollama
     top_n = min(len(frame_paths), 10)
     selected_frames = frame_paths[:top_n]
-    
-    images_base64 = []
-    for path in selected_frames:
-        with open(path, "rb") as f:
-            images_base64.append(base64.b64encode(f.read()).decode('utf-8'))
 
-    payload = {
-        "model": model_id,
-        "state": f"A user is searching for: {query}",
-        "images": images_base64,
-        "questions": {
-            "is_valid": {
-                "type": "noul",
-                "instructions": f"Does the image match the query: {query}?"
+    # Check frames top-down (highest score first)
+    for i, frame_path in enumerate(selected_frames):
+        try:
+            with open(frame_path, "rb") as f:
+                image_b64 = base64.b64encode(f.read()).decode('utf-8')
+        except Exception as e:
+            print(f"Error reading frame {frame_path}: {e}", file=sys.stderr)
+            continue
+
+        payload = {
+            "model": model_id,
+            "state": f"A user is searching for: {query}",
+            "images": [image_b64],
+            "questions": {
+                "is_valid": {
+                    "type": "noul",
+                    "instructions": f"Does the image match the query: {query}?"
+                }
             }
         }
-    }
 
-    try:
-        req = urllib.request.Request(
-            ollama_endpoint,
-            data=json.dumps(payload).encode("utf-8"),
-            headers={"Content-Type": "application/json"}
-        )
-        with urllib.request.urlopen(req) as response:
-            res_json = json.loads(response.read().decode("utf-8"))
-            
-        valid_score = res_json["answers"]["is_valid"]["noul"]
-        print(f"Ollama decision score for top {top_n} frames: {valid_score:.4f}", file=sys.stderr)
-        
-        if valid_score < 0.5:
-            print(f"Warning: Ollama decision model indicates results may not match query (score: {valid_score:.4f})", file=sys.stderr)
-            # Discard results that fail validation - remove results whose frames
-            # were among the top validated frames but score below threshold
-            filtered_results = []
-            for r in results:
-                ts = r["timestamp_seconds"]
-                ts_str = f"{int(ts)//3600:02d}{int(ts)%3600//60:02d}{int(ts)%60:02d}"
-                # Check if this result's timestamp matches any validated frame
-                frame_name = f"{npz_name}_{ts_str}_"
-                matched_frame = any(frame_name in fp for fp in selected_frames)
-                if matched_frame:
-                    print(f"Discarding result at {ts:.1f}s: failed Ollama validation", file=sys.stderr)
-                    continue
-                filtered_results.append(r)
-            print(f"Discarded {len(results) - len(filtered_results)} result(s) that failed Ollama validation.", file=sys.stderr)
-            return filtered_results
-    except Exception as e:
-        print(f"Error connecting to Ollama at {ollama_endpoint}: {e}", file=sys.stderr)
-        print("Ensure Ollama is running and 'clef-flash' model is pulled.", file=sys.stderr)
+        try:
+            req = urllib.request.Request(
+                ollama_endpoint,
+                data=json.dumps(payload).encode("utf-8"),
+                headers={"Content-Type": "application/json"}
+            )
+            with urllib.request.urlopen(req) as response:
+                res_json = json.loads(response.read().decode("utf-8"))
+
+            valid_score = res_json["answers"]["is_valid"]["noul"]
+            print(f"Ollama decision score for frame {i+1}/{top_n} at {frame_path}: {valid_score:.4f}", file=sys.stderr)
+
+            if valid_score < 0.5:
+                print(f"Warning: Frame {i+1} failed Ollama decision check (score: {valid_score:.4f}). Discarding this frame and all lower-score results.", file=sys.stderr)
+                # Discard this frame and all lower-score results
+                # Results are sorted by score (highest first), so we keep only
+                # results before this index
+                return results[:i]
+        except Exception as e:
+            print(f"Error connecting to Ollama at {ollama_endpoint}: {e}", file=sys.stderr)
+            print("Ensure Ollama is running and 'clef-flash' model is pulled.", file=sys.stderr)
+            break
 
     return results
 
