@@ -105,11 +105,11 @@ def _save_matched_frames(results, npz_name, video_path, output_dir, verbose=Fals
     return saved, frame_paths
 
 
-def _validate_results_with_ollama(results, query, frame_paths, npz_name, model_id="clef-flash", ollama_endpoint="http://localhost:11434/v1/systemone"):
+def _validate_results_with_ollama(results, query, frame_paths, npz_name, model_id="clef-flash", ollama_endpoint="http://localhost:11434/v1/systemone", threshold=0.5):
     """Use Ollama's decision capability to validate frames top-down.
 
     Frames are checked from highest score to lowest. If a frame fails
-    validation (score < 0.5), that frame and all lower-score frames are
+    validation (score < threshold), that frame and all lower-score frames are
     discarded. If the highest-score frame fails, all results are discarded.
     When top_k is unlimited (e.g., -1), all extracted frames are validated.
     """
@@ -155,8 +155,8 @@ def _validate_results_with_ollama(results, query, frame_paths, npz_name, model_i
             valid_score = res_json["answers"]["is_valid"]["noul"]
             print(f"Ollama decision score for frame {i+1}/{top_n} at {frame_path}: {valid_score:.4f}", file=sys.stderr)
 
-            if valid_score < 0.5:
-                print(f"Warning: Frame {i+1} failed Ollama decision check (score: {valid_score:.4f}). Discarding this frame and all lower-score results.", file=sys.stderr)
+            if valid_score < threshold:
+                print(f"Warning: Frame {i+1} failed Ollama decision check (score: {valid_score:.4f}, threshold: {threshold:.2f}). Discarding this frame and all lower-score results.", file=sys.stderr)
                 # Discard this frame and all lower-score results
                 # Results are sorted by score (highest first), so we keep only
                 # results before this index
@@ -186,6 +186,7 @@ def cmd_search(args):
     validate = cfg_val("decision_model_validate", "decision_model_validate")
     ollama_endpoint = cfg_val("ollama_endpoint", "ollama_endpoint")
     ollama_model = cfg_val("ollama_decision_model", "ollama_model")
+    decision_model_threshold = cfg_val("decision_model_threshold", "decision_model_threshold")
 
     data = np.load(args.cache, allow_pickle=False)
     embeddings = data["embeddings"]
@@ -262,7 +263,7 @@ def cmd_search(args):
 
     # Perform Ollama validation if requested
     if validate and frame_paths:
-        results = _validate_results_with_ollama(results, query, frame_paths, npz_name, model_id=ollama_model, ollama_endpoint=ollama_endpoint)
+        results = _validate_results_with_ollama(results, query, frame_paths, npz_name, model_id=ollama_model, ollama_endpoint=ollama_endpoint, threshold=decision_model_threshold)
 
     # Output to stdout (JSON or text)
     if json_output:
@@ -299,6 +300,7 @@ def main():
     p_search.add_argument("--save-frames", "-f", default=None, help="Directory to save matched frame images as {cache_name}_{HHMMSS}_{score}_{norm_score}.jpg")
     p_search.add_argument("--video", default=None, help="Path to original video file (required with --save-frames)")
     p_search.add_argument("--decision-model-validate", action="store_true", default=None, help="Use local Ollama decision model to validate top results. Results failing validation are discarded from match results.")
+    p_search.add_argument("--decision-model-threshold", type=float, default=None, help="Ollama decision model threshold (default: 0.5). Results with score < threshold are discarded.")
     p_search.add_argument("--ollama-endpoint", default=None, help="Ollama API endpoint (default: http://localhost:11434/v1/systemone)")
     p_search.add_argument("--ollama-model", default=None, help="Ollama model name for validation (default: clef-flash)")
     p_search.set_defaults(func=cmd_search)

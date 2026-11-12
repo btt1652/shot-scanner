@@ -14,3 +14,4 @@ video = ""
 decision_model_validate = false
 ollama_endpoint = "http://localhost:11434/v1/systemone"
 ollama_decision_model = "clef-flash"
+decision_model_threshold = 0.5
