@@ -128,7 +128,7 @@ Flags:
 - `cache` - Path to pre-computed embeddings cache (.npz) (required)
 - `-t, --text` - Natural language search prompt
 - `-i, --image` - Path to reference image file for visual similarity matching
-- `-k, --top-k` - Maximum number of top results to return (default: all)
+- `-k, --top-k` - Maximum number of top results to return (default: all). Use `0` for no results, `-1` for unlimited.
 - `--json` - Output results in strict JSON format to stdout for AI agent consumption
 - `--raw-floor` - Absolute noise floor for raw similarity (default: 0.25)
 - `--norm-threshold` - Normalized score threshold (default: 0.75)
@@ -136,7 +136,7 @@ Flags:
 - `--save-results, -s` - Save results to text file. If directory, auto-generates `{cache_name}_search_results_YYYYMMDD_HHMMSS.txt`
 - `--save-frames, -f` - Directory to save matched frame images as `{cache_name}_{HHMMSS}_{score}_{norm_score}.jpg`
 - `--video` - Path to original video file (required with --save-frames if not recorded in cache, or if video was moved)
-- `--validate` - Use local Ollama (clef-flash) to validate the top results
+- `--decision-model-validate` - Use local Ollama decision model to validate top-K selected frames. Results that fail validation are discarded from match results.
 - `--ollama-endpoint` - Ollama API endpoint (default: http://localhost:11434/v1/systemone)
 - `--ollama-model` - Ollama model name for decision validation (default: clef-flash)
 - `--decision-model-validate` - Use local Ollama decision model to validate top-K selected frames. Results that fail validation are discarded from match results.
