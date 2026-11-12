@@ -185,7 +185,7 @@ def cmd_search(args):
     video_path = cfg_val("video", "video")
     validate = cfg_val("decision_model_validate", "decision_model_validate")
     ollama_endpoint = cfg_val("ollama_endpoint", "ollama_endpoint")
-    ollama_model = cfg_val("ollama_model", "ollama_model")
+    ollama_model = cfg_val("ollama_decision_model", "ollama_model")
 
     data = np.load(args.cache, allow_pickle=False)
     embeddings = data["embeddings"]
