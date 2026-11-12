@@ -13,7 +13,7 @@ import os
 import tomllib
 from pathlib import Path
 
-CONFIG_DIR = Path(__file__).resolve().parent.parent / ".vsearch"
+CONFIG_DIR = Path(__file__).resolve().parent.parent
 CONFIG_FILE = CONFIG_DIR / "config.toml"
 
 # Config is always loaded from the repo directory (.vsearch/config.toml)
