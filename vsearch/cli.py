@@ -1,6 +1,7 @@
 """Command-line interface for vsearch."""
 
 import argparse
+import io
 import json
 import os
 import sys
@@ -68,11 +69,11 @@ def _save_results_to_file(results, output_path, query, npz_name):
     return output_path
 
 
-def _extract_frame_at(video_path, timestamp, output_path):
-    """Extract a single frame from video at given timestamp and save as JPEG."""
+def _extract_frame_base64(video_path, timestamp):
+    """Extract a single frame from video at given timestamp and return base64-encoded JPEG."""
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
-        return False
+        return ""
     fps = cap.get(cv2.CAP_PROP_FPS)
     if fps is None or fps <= 0:
         fps = 30.0
@@ -81,9 +82,27 @@ def _extract_frame_at(video_path, timestamp, output_path):
     ret, frame = cap.read()
     cap.release()
     if not ret:
-        return False
-    cv2.imwrite(output_path, frame)
-    return True
+        return ""
+    img = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    buf = io.BytesIO()
+    cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 85])[1]
+    return base64.b64encode(buf.getvalue()).decode("utf-8")
+
+
+def _extract_frames_in_memory(results, video_path, verbose=False):
+    """Extract frames for each result into base64 JPEG strings (no disk writes)."""
+    frames_b64 = []
+    if not video_path:
+        return frames_b64
+    for r in results:
+        ts = r["timestamp_seconds"]
+        ts_str = f"{int(ts)//3600:02d}{int(ts)%3600//60:02d}{int(ts)%60:02d}"
+        frame_b64 = _extract_frame_base64(video_path, ts)
+        if frame_b64:
+            frames_b64.append(frame_b64)
+        elif verbose:
+            print(f"Failed to extract frame at {ts:.1f}s", file=sys.stderr)
+    return frames_b64
 
 
 def _save_matched_frames(results, npz_name, video_path, output_dir, verbose=False):
@@ -105,7 +124,27 @@ def _save_matched_frames(results, npz_name, video_path, output_dir, verbose=Fals
     return saved, frame_paths
 
 
-def _validate_results_with_ollama(results, query, frame_paths, npz_name, model_id="clef-flash", ollama_endpoint="http://localhost:11434/v1/systemone", threshold=0.5):
+
+def _save_matched_frames(results, npz_name, video_path, output_dir, verbose=False):
+    """Extract and save matched frames as JPEG images."""
+    os.makedirs(output_dir, exist_ok=True)
+    saved = 0
+    frame_paths = []
+    for r in results:
+        ts = r["timestamp_seconds"]
+        ts_str = f"{int(ts)//3600:02d}{int(ts)%3600//60:02d}{int(ts)%60:02d}"
+        out_path = os.path.join(output_dir, f"{npz_name}_{ts_str}_{r['score']:.4f}_{r['normalized_score']:.4f}.jpg")
+        if _extract_frame_at(video_path, ts, out_path):
+            saved += 1
+            frame_paths.append(out_path)
+            if verbose:
+                print(f"  Saved frame at {ts:.1f}s -> {out_path}", file=sys.stderr)
+        elif verbose:
+            print(f"  Failed to extract frame at {ts:.1f}s", file=sys.stderr)
+    return saved, frame_paths
+
+
+def _validate_results_with_ollama(results, query, frame_b64s, npz_name, model_id="clef-flash", ollama_endpoint="http://localhost:11434/v1/systemone", threshold=0.5):
     """Use Ollama's decision capability to validate frames top-down.
 
     Frames are checked from highest score to lowest. If a frame fails
@@ -113,28 +152,21 @@ def _validate_results_with_ollama(results, query, frame_paths, npz_name, model_i
     discarded. If the highest-score frame fails, all results are discarded.
     When top_k is unlimited (e.g., -1), all extracted frames are validated.
     """
-    if not frame_paths:
-        print("Warning: No frames were saved. Skipping Ollama validation.", file=sys.stderr)
+    if not frame_b64s:
+        print("Warning: No frames were extracted. Skipping Ollama validation.", file=sys.stderr)
         return results
 
     # Check all extracted frames (corresponding to the top-k results)
     # When top_k is unlimited (e.g., -1), all results are validated.
-    selected_frames = frame_paths
+    selected_frames = frame_b64s
 
     # Check all frames top-down (highest score first)
     top_n = len(selected_frames)
-    for i, frame_path in enumerate(selected_frames):
-        try:
-            with open(frame_path, "rb") as f:
-                image_b64 = base64.b64encode(f.read()).decode('utf-8')
-        except Exception as e:
-            print(f"Error reading frame {frame_path}: {e}", file=sys.stderr)
-            continue
-
+    for i, frame_b64 in enumerate(selected_frames):
         payload = {
             "model": model_id,
             "state": f"A user is searching for: {query}",
-            "images": [image_b64],
+            "images": [frame_b64],
             "questions": {
                 "is_valid": {
                     "type": "noul",
@@ -153,17 +185,14 @@ def _validate_results_with_ollama(results, query, frame_paths, npz_name, model_i
                 res_json = json.loads(response.read().decode("utf-8"))
 
             valid_score = res_json["answers"]["is_valid"]["noul"]
-            print(f"Ollama decision score for frame {i+1}/{top_n} at {frame_path}: {valid_score:.4f}", file=sys.stderr)
+            print(f"Ollama decision score for frame {i+1}/{top_n}: {valid_score:.4f}", file=sys.stderr)
 
             if valid_score < threshold:
                 print(f"Warning: Frame {i+1} failed Ollama decision check (score: {valid_score:.4f}, threshold: {threshold:.2f}). Discarding this frame and all lower-score results.", file=sys.stderr)
                 # Discard this frame and all lower-score results
-                # Results are sorted by score (highest first), so we keep only
-                # results before this index
                 return results[:i]
         except Exception as e:
-            print(f"Error connecting to Ollama at {ollama_endpoint}: {e}", file=sys.stderr)
-            print("Ensure Ollama is running and 'clef-flash' model is pulled.", file=sys.stderr)
+            print(f"Error validating frame {i+1}: {e}", file=sys.stderr)
             break
 
     return results
@@ -242,28 +271,28 @@ def cmd_search(args):
         if verbose:
             print(f"Results saved to {out_path}", file=sys.stderr)
 
-    # Save matched frames if requested OR if validation is enabled
-    saved_count = 0
+    # Extract frames in-memory (for validation only) or save to disk
+    frame_b64s = []
     frame_paths = []
     if save_frames or validate:
         if not video_path:
             print("--video is required when using --save-frames or --validate", file=sys.stderr)
             sys.exit(2)
-        if not save_frames:
-            print("Warning: --validate requires --save-frames to provide a directory for images.", file=sys.stderr)
-            if not os.path.exists(save_frames) and save_frames is not None:
-                print(f"Directory {save_frames} does not exist.", file=sys.stderr)
-                sys.exit(1)
-        
-        saved_count, frame_paths = _save_matched_frames(results, npz_name, video_path, save_frames, verbose)
+
+        # Always extract frames in memory for validation (no disk writes)
+        frame_b64s = _extract_frames_in_memory(results, video_path, verbose)
+
+        if save_frames:
+            os.makedirs(save_frames, exist_ok=True)
+            saved_count, frame_paths = _save_matched_frames(results, npz_name, video_path, save_frames, verbose)
+            if verbose:
+                print(f"Saved {saved_count} frame(s) to {save_frames}", file=sys.stderr)
         if verbose:
-            print(f"Saved {saved_count} frame(s) to {save_frames}", file=sys.stderr)
-        if verbose:
-            print(f"Saved {saved_count} frame(s) to {save_frames}", file=sys.stderr)
+            print(f"Extracted {len(frame_b64s)} frame(s) in memory", file=sys.stderr)
 
     # Perform Ollama validation if requested
-    if validate and frame_paths:
-        results = _validate_results_with_ollama(results, query, frame_paths, npz_name, model_id=ollama_model, ollama_endpoint=ollama_endpoint, threshold=decision_model_threshold)
+    if validate and frame_b64s:
+        results = _validate_results_with_ollama(results, query, frame_b64s, npz_name, model_id=ollama_model, ollama_endpoint=ollama_endpoint, threshold=decision_model_threshold)
 
     # Output to stdout (JSON or text)
     if json_output:
