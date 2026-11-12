@@ -309,28 +309,28 @@ def cmd_search(args):
         print("search requires either --text or --image", file=sys.stderr)
         sys.exit(2)
 
-    # Extract frames in-memory (for validation only) or save to disk
-    frame_b64s = []
-    frame_paths = []
-    if save_frames or validate:
+    # Perform Ollama validation first (so failing frames are discarded before saving)
+    if validate:
         if not video_path:
-            print("--video is required when using --save-frames or --validate", file=sys.stderr)
+            print("--video is required when using --decision-model-validate", file=sys.stderr)
             sys.exit(2)
 
-        # Extract frames in-memory lazily for validation (no disk writes)
+        # Extract frames lazily and validate top-down
         frame_b64_gen = _extract_frames_lazy(results, video_path, verbose)
-
-        if save_frames:
-            os.makedirs(save_frames, exist_ok=True)
-            saved_count, frame_paths = _save_matched_frames(results, npz_name, video_path, save_frames, verbose)
-            if verbose:
-                print(f"Saved {saved_count} frame(s) to {save_frames}", file=sys.stderr)
         if verbose:
             print(f"Extracting frames in memory for validation...", file=sys.stderr)
-
-    # Perform Ollama validation if requested
-    if validate and frame_b64_gen:
         results = _validate_results_with_ollama(results, query, frame_b64_gen, npz_name, model_id=ollama_model, ollama_endpoint=ollama_endpoint, threshold=decision_model_threshold, verbose=verbose)
+
+    # Save frames for remaining (validated) results only
+    if save_frames:
+        if not video_path:
+            print("--video is required when using --save-frames", file=sys.stderr)
+            sys.exit(2)
+
+        os.makedirs(save_frames, exist_ok=True)
+        saved_count, frame_paths = _save_matched_frames(results, npz_name, video_path, save_frames, verbose)
+        if verbose:
+            print(f"Saved {saved_count} frame(s) to {save_frames}", file=sys.stderr)
 
     # Output to stdout (JSON or text)
     if json_output:
