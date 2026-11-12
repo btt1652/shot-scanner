@@ -138,9 +138,10 @@ Flags:
 - `--video` - Path to original video file (required with --save-frames if not recorded in cache, or if video was moved)
 - `--validate` - Use local Ollama (clef-flash) to validate the top results
 - `--ollama-endpoint` - Ollama API endpoint (default: http://localhost:11434/v1/systemone)
-- `--ollama-model` - Ollama model name for validation (default: clef-flash)
+- `--ollama-model` - Ollama model name for decision validation (default: clef-flash)
+- `--decision-model-validate` - Use local Ollama decision model to validate top-K selected frames. Results that fail validation are discarded from match results.
 
-**Auto video path:** If `--save-frames` or `--validate` is used, vsearch looks for `video_path` stored in the `.npz` cache from the indexing step. If the cached video path exists, it is used automatically — you don't need to pass `--video`. If the video was moved and the cached path no longer exists, vsearch exits with an error and you must provide `--video` with the new path.
+**Auto video path:** If `--save-frames` or `--decision-model-validate` is used, vsearch looks for `video_path` stored in the `.npz` cache from the indexing step. If the cached video path exists, it is used automatically — you don't need to pass `--video`. If the video was moved and the cached path no longer exists, vsearch exits with an error and you must provide `--video` with the new path.
 
 ## Expected JSON Output Schema (`--json` flag)
 

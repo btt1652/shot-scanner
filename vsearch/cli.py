@@ -105,8 +105,12 @@ def _save_matched_frames(results, npz_name, video_path, output_dir, verbose=Fals
     return saved, frame_paths
 
 
-def _validate_results_with_ollama(results, query, frame_paths, model_id="clef-flash", ollama_endpoint="http://localhost:11434/v1/systemone"):
-    """Use Ollama's decision capability to validate the top frames."""
+def _validate_results_with_ollama(results, query, frame_paths, npz_name, model_id="clef-flash", ollama_endpoint="http://localhost:11434/v1/systemone"):
+    """Use Ollama's decision capability to validate the top frames.
+
+    Results that fail validation (score < 0.5) are discarded from match results.
+    Only top-K selected frames are sent for validation.
+    """
     if not frame_paths:
         print("Warning: No frames were saved. Skipping Ollama validation.", file=sys.stderr)
         return results
@@ -142,10 +146,25 @@ def _validate_results_with_ollama(results, query, frame_paths, model_id="clef-fl
             res_json = json.loads(response.read().decode("utf-8"))
             
         valid_score = res_json["answers"]["is_valid"]["noul"]
-        print(f"Ollama validation score for top {top_n} frames: {valid_score:.4f}", file=sys.stderr)
+        print(f"Ollama decision score for top {top_n} frames: {valid_score:.4f}", file=sys.stderr)
         
         if valid_score < 0.5:
-            print(f"Warning: Ollama signaled that the top results may not be valid (score: {valid_score:.4f})", file=sys.stderr)
+            print(f"Warning: Ollama decision model indicates results may not match query (score: {valid_score:.4f})", file=sys.stderr)
+            # Discard results that fail validation - remove results whose frames
+            # were among the top validated frames but score below threshold
+            filtered_results = []
+            for r in results:
+                ts = r["timestamp_seconds"]
+                ts_str = f"{int(ts)//3600:02d}{int(ts)%3600//60:02d}{int(ts)%60:02d}"
+                # Check if this result's timestamp matches any validated frame
+                frame_name = f"{npz_name}_{ts_str}_"
+                matched_frame = any(frame_name in fp for fp in selected_frames)
+                if matched_frame:
+                    print(f"Discarding result at {ts:.1f}s: failed Ollama validation", file=sys.stderr)
+                    continue
+                filtered_results.append(r)
+            print(f"Discarded {len(results) - len(filtered_results)} result(s) that failed Ollama validation.", file=sys.stderr)
+            return filtered_results
     except Exception as e:
         print(f"Error connecting to Ollama at {ollama_endpoint}: {e}", file=sys.stderr)
         print("Ensure Ollama is running and 'clef-flash' model is pulled.", file=sys.stderr)
@@ -167,7 +186,7 @@ def cmd_search(args):
     save_results = cfg_val("save_results", "save_results")
     save_frames = cfg_val("save_frames", "save_frames")
     video_path = cfg_val("video", "video")
-    validate = cfg_val("validate", "validate")
+    validate = cfg_val("decision_model_validate", "decision_model_validate")
     ollama_endpoint = cfg_val("ollama_endpoint", "ollama_endpoint")
     ollama_model = cfg_val("ollama_model", "ollama_model")
 
@@ -246,7 +265,7 @@ def cmd_search(args):
 
     # Perform Ollama validation if requested
     if validate and frame_paths:
-        results = _validate_results_with_ollama(results, query, frame_paths, model_id=ollama_model, ollama_endpoint=ollama_endpoint)
+        results = _validate_results_with_ollama(results, query, frame_paths, npz_name, model_id=ollama_model, ollama_endpoint=ollama_endpoint)
 
     # Output to stdout (JSON or text)
     if json_output:
@@ -282,7 +301,7 @@ def main():
     p_search.add_argument("--save-results", "-s", default=None, help="Save results to text file. If directory, auto-generates {cache_name}_search_results_YYYYMMDD_HHMMSS.txt")
     p_search.add_argument("--save-frames", "-f", default=None, help="Directory to save matched frame images as {cache_name}_{HHMMSS}_{score}_{norm_score}.jpg")
     p_search.add_argument("--video", default=None, help="Path to original video file (required with --save-frames)")
-    p_search.add_argument("--validate", action="store_true", default=None, help="Use local Ollama (clef-flash) to validate the top results")
+    p_search.add_argument("--decision-model-validate", action="store_true", default=None, help="Use local Ollama decision model to validate top results. Results failing validation are discarded from match results.")
     p_search.add_argument("--ollama-endpoint", default=None, help="Ollama API endpoint (default: http://localhost:11434/v1/systemone)")
     p_search.add_argument("--ollama-model", default=None, help="Ollama model name for validation (default: clef-flash)")
     p_search.set_defaults(func=cmd_search)

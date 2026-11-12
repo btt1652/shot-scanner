@@ -37,7 +37,7 @@ def default_config() -> dict:
             "save_results": None,
             "save_frames": None,
             "video": None,
-            "validate": False,
+            "decision_model_validate": False,
             "ollama_endpoint": "http://localhost:11434/v1/systemone",
             "ollama_model": "clef-flash"
         }
