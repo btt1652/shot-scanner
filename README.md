@@ -36,7 +36,7 @@ A lightweight, fully offline command-line interface (CLI) tool designed to extra
 
 ## Config File
 
-vsearch uses a configuration file at `~/.vsearch/config.toml` to store default values. Settings are grouped into three sections:
+vsearch uses a configuration file at `config.toml` in the repo root to store default values. Settings are grouped into three sections:
 
 ### `[global]`
 Shared defaults applied to both modes.
@@ -62,7 +62,7 @@ Search-mode defaults (used when running `vsearch search`):
 
 **CLI flags always override config values when specified.** If a flag is not given, the config value is used. If neither is set, the built-in default applies.
 
-Example `~/.vsearch/config.toml`:
+Example `config.toml`:
 ```toml
 [global]
 verbose = false
