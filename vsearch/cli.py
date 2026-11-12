@@ -78,12 +78,31 @@ def _extract_frame_base64(video_path, timestamp):
     if not ret:
         return ""
     img = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-    buf = io.BytesIO()
-    cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 85])[1]
-    return base64.b64encode(buf.getvalue()).decode("utf-8")
+    # Encode to JPEG using imencode
+    success, encoded = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 85])
+    if not success:
+        return ""
+    # Convert to base64
+    return base64.b64encode(encoded.tobytes()).decode("utf-8")
 
 
-
+def _extract_frame_at(video_path, timestamp, out_path):
+    """Extract a single frame at given timestamp and save to out_path as JPEG."""
+    cap = cv2.VideoCapture(video_path)
+    if not cap.isOpened():
+        return False
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    if fps is None or fps <= 0:
+        fps = 30.0
+    frame_number = int(timestamp * fps)
+    cap.set(cv2.CAP_PROP_POS_FRAMES, frame_number)
+    ret, frame = cap.read()
+    cap.release()
+    if not ret:
+        return False
+    img = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    cv2.imwrite(out_path, cv2.cvtColor(img, cv2.COLOR_RGB2BGR), [cv2.IMWRITE_JPEG_QUALITY, 85])
+    return True
 
 
 def _extract_frames_lazy(results, video_path, verbose=False):
@@ -179,7 +198,7 @@ def _validate_results_with_ollama(results, query, frame_b64s, npz_name, model_id
 
 def cmd_search(args):
     cfg = load_config()
-    
+
     def cfg_val(key, cli_arg):
         return get_config_value(cfg, "search", key, getattr(args, cli_arg, None))
 
@@ -231,11 +250,13 @@ def cmd_search(args):
         if verbose:
             print(f"MD5 verified for {args.video}", file=sys.stderr)
 
-    if video_path is not None and not os.path.exists(video_path):
-        print(f"Error: video file '{video_path}' does not exist in cache '{args.cache}'. "
-                  f"Re-index the video or manually provide --video flag when running search.",
-                  file=sys.stderr,)
-        sys.exit(1)
+    if video_path is not None:
+        video_path = str(video_path.item()) if hasattr(video_path, "item") else str(video_path)
+        if not os.path.exists(video_path):
+            print(f"Error: video file '{video_path}' does not exist in cache '{args.cache}'. "
+                      f"Re-index the video or manually provide --video flag when running search.",
+                      file=sys.stderr,)
+            sys.exit(1)
 
     # Derive cache name from the .npz filename for result/frame naming
     npz_name = os.path.splitext(os.path.basename(args.cache))[0]
@@ -315,7 +336,7 @@ def main():
     p_index.add_argument("video", help="Path to input video file")
     p_index.add_argument("--output", "-o", default=None, help="Path to save the output cache archive (.npz). If a directory, auto-generates filename: {video_name}_{model_name}_{sample_rate}_{md5_prefix8}.npz")
     p_index.add_argument("--sample-rate", "-r", type=int, default=None, help="Frame sampling interval in seconds (default: 1)")
-    p_index.add_argument("--model", default=None, help="CLIP model variant (default: openai/clip-vit-base-patch32)")
+    p_index.add_argument("--model", "-m",default=None, help="CLIP model variant (default: openai/clip-vit-base-patch32)")
     p_index.add_argument("--verbose", "-v", action="store_true", default=None, help="Enable verbose progress output")
     p_index.set_defaults(func=cmd_index)
 
@@ -325,15 +346,15 @@ def main():
     p_search.add_argument("--image", "-i", default=None, help="Path to reference image file")
     p_search.add_argument("--top-k", "-k", type=int, default=None, help="Maximum number of top results to return (default: all)")
     p_search.add_argument("--json", action="store_true", default=None, help="Output results in strict JSON format")
-    p_search.add_argument("--raw-floor", type=float, default=None, help="Absolute noise floor for raw similarity (default: 0.25)")
-    p_search.add_argument("--norm-threshold", type=float, default=None, help="Normalized score threshold (default: 0.75)")
+    p_search.add_argument("--raw-floor","-rf", type=float, default=None, help="Absolute noise floor for raw similarity (default: 0.25)")
+    p_search.add_argument("--norm-threshold","-nt", type=float, default=None, help="Normalized score threshold (default: 0.75)")
     p_search.add_argument("--verbose", "-v", action="store_true", default=None, help="Enable verbose progress output")
-    p_search.add_argument("--save-frames", "-f", default=None, help="Directory to save matched frame images as {cache_name}_{HHMMSS}_{score}_{norm_score}.jpg")
-    p_search.add_argument("--video", default=None, help="Path to original video file (required with --save-frames)")
-    p_search.add_argument("--decision-model-validate", action="store_true", default=None, help="Use local Ollama decision model to validate top results. Results failing validation are discarded from match results.")
-    p_search.add_argument("--decision-model-threshold", type=float, default=None, help="Ollama decision model threshold (default: 0.5). Results with score < threshold are discarded.")
-    p_search.add_argument("--ollama-endpoint", default=None, help="Ollama API endpoint (default: http://localhost:11434/v1/systemone)")
-    p_search.add_argument("--ollama-model", default=None, help="Ollama model name for validation (default: clef-flash)")
+    p_search.add_argument("--save-frames", "-sf", default=None, help="Directory to save matched frame images as {cache_name}_{HHMMSS}_{score}_{norm_score}.jpg")
+    p_search.add_argument("--video", "-vid", default=None, help="Path to original video file (required with --save-frames)")
+    p_search.add_argument("--decision-model-validate","-dmv", action="store_true", default=None, help="Use local Ollama decision model to validate top results. Results failing validation are discarded from match results.")
+    p_search.add_argument("--decision-model-threshold","-dmt", type=float, default=None, help="Ollama decision model threshold (default: 0.5). Results with score < threshold are discarded.")
+    p_search.add_argument("--ollama-endpoint","-oe", default=None, help="Ollama API endpoint (default: http://localhost:11434/v1/systemone)")
+    p_search.add_argument("--ollama-model","-dm", default=None, help="Ollama model name for validation")
     p_search.set_defaults(func=cmd_search)
 
     args = parser.parse_args()
