@@ -22,6 +22,11 @@ def cmd_index(args):
     model = get_config_value(cfg, "index", "model", getattr(args, "model", None))
     sample_rate = get_config_value(cfg, "index", "sample_rate", getattr(args, "sample_rate", None))
     engine = VideoSearchEngine(model_id=model)
+
+    # Print config values in verbose mode
+    if verbose:
+        print(f"Config: model={model}, sample_rate={sample_rate}s", file=sys.stderr)
+
     embeddings, timestamps = engine.extract_and_encode(
         args.video, sample_rate, BATCH_SIZE, verbose=verbose
     )
@@ -217,6 +222,11 @@ def cmd_search(args):
     ollama_endpoint = cfg_val("ollama_endpoint", "ollama_endpoint")
     ollama_model = cfg_val("ollama_decision_model", "ollama_model")
     decision_model_threshold = cfg_val("decision_model_threshold", "decision_model_threshold")
+
+    # Print config values in verbose mode
+    if verbose:
+        print(f"Config: top_k={top_k}, raw_floor={raw_floor:.2f}, norm_threshold={norm_threshold:.2f}, json_output={json_output}", file=sys.stderr)
+        print(f"        save_frames={save_frames}, video={video_path}, validate={validate}, ollama_endpoint={ollama_endpoint}, ollama_model={ollama_model}, decision_model_threshold={decision_model_threshold}", file=sys.stderr)
 
     data = np.load(args.cache, allow_pickle=False)
     embeddings = data["embeddings"]

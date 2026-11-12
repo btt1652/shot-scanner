@@ -87,6 +87,7 @@ Index-mode defaults (used when running `vsearch index`):
 - `output_dir` - Default output directory for `.npz` cache
 - `model` - CLIP model variant
 - `sample_rate` - Frame sampling interval in seconds
+- `md5` - MD5 hash of the source video for integrity validation at search time
 
 ### `[search]`
 Search-mode defaults (used when running `vsearch search`):
@@ -119,8 +120,8 @@ save_frames = ""
 video = ""
 decision_model_validate = false
 ollama_endpoint = "http://localhost:11434/v1/systemone"
-ollama_decision_model = "clef-flash"
-decision_model_threshold = 0.5
+ollama_decision_model = "d3:4b"
+decision_model_threshold = 0.8
 ```
 
 ## Model Variants
@@ -176,7 +177,7 @@ Flags:
 - `--decision-model-validate` - Use local Ollama decision model to validate top-K selected frames. Results that fail validation are discarded from match results.
 - `--decision-model-threshold` - Ollama decision model threshold (default: 0.5). Results with score < threshold are discarded.
 - `--ollama-endpoint` - Ollama API endpoint (default: http://localhost:11434/v1/systemone)
-- `--ollama-model` - Ollama model name for decision validation (default: clef-flash). Config key: `ollama_decision_model`.
+- `--ollama-model` - Ollama model name for decision validation. Config key: `ollama_decision_model`.
 
 **Auto video path:** If `--save-frames` or `--decision-model-validate` is used, vsearch looks for `video_path` stored in the `.npz` cache from the indexing step. If the cached video path exists, it is used automatically — you don't need to pass `--video`. If the video was moved and the cached path no longer exists, vsearch exits with an error and you must provide `--video` with the new path.
 
