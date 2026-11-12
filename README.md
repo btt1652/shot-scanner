@@ -146,7 +146,7 @@ Process a local video file, extract keyframes, compute embeddings, and save a co
 
 Flags:
 - `video` - Path to input video file (required)
-- `-o, --output OUTPUT` - Path to save the output cache archive (.npz) (default: current directory). If a directory, auto-generates filename: `{video_name}_{model_name}_{sample_rate}.npz`
+- `-o, --output OUTPUT` - Path to save the output cache archive (.npz). If a directory, auto-generates filename: `{video_name}_{model_name}_{sample_rate}_{md5_prefix8}.npz`
 - `-r, --sample-rate SAMPLE_RATE` - Frame sampling interval in seconds (default: 1)
 - `--model MODEL` - CLIP model variant (default: openai/clip-vit-base-patch32)
 - `--verbose, -v` - Enable verbose progress output

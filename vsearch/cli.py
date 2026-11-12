@@ -38,7 +38,8 @@ def cmd_index(args):
     video_name = os.path.splitext(os.path.basename(args.video))[0]
     if os.path.isdir(output_path):
         model_name = model.split("/")[-1]  # e.g., clip-vit-base-patch32
-        output_path = os.path.join(output_path, f"{video_name}_{model_name}_{sample_rate}s.npz")
+        md5_prefix = video_md5_hex[:8]  # first 8 chars
+        output_path = os.path.join(output_path, f"{video_name}_{model_name}_{sample_rate}s_{md5_prefix}.npz")
     np.savez_compressed(
         output_path,
         embeddings=embeddings,
@@ -312,7 +313,7 @@ def main():
 
     p_index = sub.add_parser("index", help="Extract keyframes and build a .npz cache")
     p_index.add_argument("video", help="Path to input video file")
-    p_index.add_argument("--output", "-o", default=None, help="Path to save the output cache archive (.npz). If a directory, auto-generates filename: {video_name}_{model_name}.npz")
+    p_index.add_argument("--output", "-o", default=None, help="Path to save the output cache archive (.npz). If a directory, auto-generates filename: {video_name}_{model_name}_{sample_rate}_{md5_prefix8}.npz")
     p_index.add_argument("--sample-rate", "-r", type=int, default=None, help="Frame sampling interval in seconds (default: 1)")
     p_index.add_argument("--model", default=None, help="CLIP model variant (default: openai/clip-vit-base-patch32)")
     p_index.add_argument("--verbose", "-v", action="store_true", default=None, help="Enable verbose progress output")
