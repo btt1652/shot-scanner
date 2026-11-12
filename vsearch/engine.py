@@ -132,7 +132,7 @@ class VideoSearchEngine:
                     "score": float(raw_similarities[idx]),
                     "normalized_score": float(normalized_scores[idx]),
                 })
-                if top_k is not None and top_k > 0 and len(results) >= top_k:
+                if top_k is not None and top_k >= 0 and len(results) >= top_k:
                     break
         return results
 

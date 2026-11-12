@@ -111,16 +111,18 @@ def _validate_results_with_ollama(results, query, frame_paths, npz_name, model_i
     Frames are checked from highest score to lowest. If a frame fails
     validation (score < 0.5), that frame and all lower-score frames are
     discarded. If the highest-score frame fails, all results are discarded.
+    When top_k is unlimited (e.g., -1), all extracted frames are validated.
     """
     if not frame_paths:
         print("Warning: No frames were saved. Skipping Ollama validation.", file=sys.stderr)
         return results
 
-    # Limit to a reasonable number for Ollama
-    top_n = min(len(frame_paths), 10)
-    selected_frames = frame_paths[:top_n]
+    # Check all extracted frames (corresponding to the top-k results)
+    # When top_k is unlimited (e.g., -1), all results are validated.
+    selected_frames = frame_paths
 
-    # Check frames top-down (highest score first)
+    # Check all frames top-down (highest score first)
+    top_n = len(selected_frames)
     for i, frame_path in enumerate(selected_frames):
         try:
             with open(frame_path, "rb") as f:
