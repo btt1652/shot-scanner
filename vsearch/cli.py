@@ -1,6 +1,7 @@
 """Command-line interface for vsearch."""
 
 import argparse
+import hashlib
 import io
 import json
 import os
@@ -25,6 +26,13 @@ def cmd_index(args):
         args.video, sample_rate, BATCH_SIZE, verbose=verbose
     )
 
+    # Compute MD5 of the source video for integrity checking
+    video_md5 = hashlib.md5()
+    with open(args.video, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            video_md5.update(chunk)
+    video_md5_hex = video_md5.hexdigest()
+
     # Auto-generate filename if output is a directory
     output_path = get_config_value(cfg, "index", "output_dir", getattr(args, "output", None))
     video_name = os.path.splitext(os.path.basename(args.video))[0]
@@ -37,6 +45,7 @@ def cmd_index(args):
         timestamps=timestamps,
         model=model,
         video_path=args.video,
+        md5=video_md5_hex,
     )
     if verbose:
         print(f"Cache saved to {output_path} (model: {model})", file=sys.stderr)
@@ -51,22 +60,6 @@ def _format_results_text(results):
             f"sim={r['score']:.4f}  norm={r['normalized_score']:.4f}"
         )
     return "\n".join(lines)
-
-
-def _save_results_to_file(results, output_path, query, npz_name):
-    """Save results to a text file. If output_path is a directory, auto-generate filename."""
-    if os.path.isdir(output_path):
-        from datetime import datetime
-        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        output_path = os.path.join(output_path, f"{npz_name}_search_results_{ts}.txt")
-    with open(output_path, "w", encoding="utf-8") as f:
-        f.write(f"Query: {query}\n")
-        f.write(f"Video: {npz_name}\n")
-        f.write(f"Results: {len(results)}\n")
-        f.write("-" * 60 + "\n")
-        f.write(_format_results_text(results))
-        f.write("\n")
-    return output_path
 
 
 def _extract_frame_base64(video_path, timestamp):
@@ -113,7 +106,7 @@ def _save_matched_frames(results, npz_name, video_path, output_dir, verbose=Fals
     frame_paths = []
     for r in results:
         ts = r["timestamp_seconds"]
-        ts_str = f"{int(ts)//3600:02d}{int(ts)%3600//60:02d}{int(ts)%60:02d}"
+        ts_str = f"{ts:.3f}".replace(".", "_")  # e.g., 252.300 -> 252_300
         out_path = os.path.join(output_dir, f"{npz_name}_{ts_str}_{r['score']:.4f}_{r['normalized_score']:.4f}.jpg")
         if _extract_frame_at(video_path, ts, out_path):
             saved += 1
@@ -194,7 +187,6 @@ def cmd_search(args):
     raw_floor = cfg_val("raw_floor", "raw_floor")
     norm_threshold = cfg_val("norm_threshold", "norm_threshold")
     json_output = cfg_val("json_output", "json")
-    save_results = cfg_val("save_results", "save_results")
     save_frames = cfg_val("save_frames", "save_frames")
     video_path = cfg_val("video", "video")
     validate = cfg_val("decision_model_validate", "decision_model_validate")
@@ -206,6 +198,37 @@ def cmd_search(args):
     embeddings = data["embeddings"]
     timestamps = data["timestamps"]
     video_path = data.get("video_path", None)
+
+    # MD5 is mandatory in cache
+    if "md5" not in data:
+        print(
+            f"Error: cache '{args.cache}' is missing required 'md5' field. "
+            f"Re-index the video to add integrity metadata.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    stored_md5 = str(data["md5"].item())
+
+    # If user provided --video, verify MD5 matches the cache's stored MD5
+    if args.video is not None:
+        if not os.path.exists(args.video):
+            print(f"Error: --video file '{args.video}' does not exist.", file=sys.stderr)
+            sys.exit(1)
+        actual_md5 = hashlib.md5()
+        with open(args.video, "rb") as f:
+            for chunk in iter(lambda: f.read(1 << 20), b""):
+                actual_md5.update(chunk)
+        actual_md5_hex = actual_md5.hexdigest()
+        if actual_md5_hex != stored_md5:
+            print(
+                f"Error: MD5 mismatch for --video '{args.video}'. "
+                f"Cache '{args.cache}' was indexed from a different video file "
+                f"(stored MD5: {stored_md5}).",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        if verbose:
+            print(f"MD5 verified for {args.video}", file=sys.stderr)
 
     if video_path is not None and not os.path.exists(video_path):
         print(f"Error: video file '{video_path}' does not exist in cache '{args.cache}'. "
@@ -249,12 +272,6 @@ def cmd_search(args):
     else:
         print("search requires either --text or --image", file=sys.stderr)
         sys.exit(2)
-
-    # Save results to text file if requested
-    if save_results:
-        out_path = _save_results_to_file(results, save_results, query, npz_name)
-        if verbose:
-            print(f"Results saved to {out_path}", file=sys.stderr)
 
     # Extract frames in-memory (for validation only) or save to disk
     frame_b64s = []
@@ -310,7 +327,6 @@ def main():
     p_search.add_argument("--raw-floor", type=float, default=None, help="Absolute noise floor for raw similarity (default: 0.25)")
     p_search.add_argument("--norm-threshold", type=float, default=None, help="Normalized score threshold (default: 0.75)")
     p_search.add_argument("--verbose", "-v", action="store_true", default=None, help="Enable verbose progress output")
-    p_search.add_argument("--save-results", "-s", default=None, help="Save results to text file. If directory, auto-generates {cache_name}_search_results_YYYYMMDD_HHMMSS.txt")
     p_search.add_argument("--save-frames", "-f", default=None, help="Directory to save matched frame images as {cache_name}_{HHMMSS}_{score}_{norm_score}.jpg")
     p_search.add_argument("--video", default=None, help="Path to original video file (required with --save-frames)")
     p_search.add_argument("--decision-model-validate", action="store_true", default=None, help="Use local Ollama decision model to validate top results. Results failing validation are discarded from match results.")

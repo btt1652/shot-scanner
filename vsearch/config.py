@@ -34,7 +34,6 @@ def default_config() -> dict:
             "raw_floor": 0.25,
             "norm_threshold": 0.75,
             "json_output": False,
-            "save_results": None,
             "save_frames": None,
             "video": None,
             "decision_model_validate": False,

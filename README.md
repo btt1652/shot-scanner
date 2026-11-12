@@ -24,12 +24,7 @@ A lightweight, fully offline command-line interface (CLI) tool designed to extra
    vsearch search cache.npz -i reference.jpg
    ```
 
-5. Save search results to a text file:
-   ```
-   vsearch search cache.npz -t "a person running" -s /tmp/results
-   ```
-
-6. Save matched frames as images (video path is auto-loaded from cache):
+5. Save matched frames as images (video path is auto-loaded from cache):
    ```
    vsearch search cache.npz -t "a person running" -f /tmp/frames
    ```
@@ -42,7 +37,7 @@ video_path → Extract frames (OpenCV) → Encode images to embeddings → Save 
 ```
 - Reads video, extracts frames based on `sample_rate`
 - Encodes each frame using CLIP model
-- Saves: `embeddings`, `timestamps`, `model`, `video_path` to cache
+- Saves: `embeddings`, `timestamps`, `model`, `video_path`, `md5` to cache
 
 ### Search mode
 ```
@@ -75,7 +70,7 @@ cache.npz + query (text/image) → Load embeddings → Encode query → Similari
     ]
   }
   ```
-- **Files**: Optional `--save-results` (text) and `--save-frames` (images) options
+- **Files**: Optional `--save-frames` (images) options
 
 ### Config precedence
 1. CLI flags override config.toml values
@@ -99,7 +94,6 @@ Search-mode defaults (used when running `vsearch search`):
 - `raw_floor` - Absolute noise floor for raw similarity
 - `norm_threshold` - Normalized score threshold
 - `json_output` - Output results in JSON format
-- `save_results` - Path to save results text file
 - `save_frames` - Directory to save matched frame images
 - `video` - Path to original video file
 - `decision_model_validate` - Enable Ollama decision model validation
@@ -121,7 +115,6 @@ top_k = -1
 raw_floor = 0.25
 norm_threshold = 0.75
 json_output = false
-save_results = ""
 save_frames = ""
 video = ""
 decision_model_validate = false
@@ -163,6 +156,7 @@ The `.npz` cache stores:
 - `timestamps` - Frame timestamps in seconds
 - `model` - CLIP model used for indexing
 - `video_path` - Path to video file at index time (used for auto frame extraction)
+- `md5` - MD5 hash of the source video for integrity validation at search time
 
 ### `search`
 
@@ -177,8 +171,7 @@ Flags:
 - `--raw-floor` - Absolute noise floor for raw similarity (default: 0.25)
 - `--norm-threshold` - Normalized score threshold (default: 0.75)
 - `--verbose, -v` - Enable verbose progress output
-- `--save-results, -s` - Save results to text file. If directory, auto-generates `{cache_name}_search_results_YYYYMMDD_HHMMSS.txt`
-- `--save-frames, -f` - Directory to save matched frame images as `{cache_name}_{HHMMSS}_{score}_{norm_score}.jpg`
+- `--save-frames, -f` - Directory to save matched frame images as `{cache_name}_{seconds_milliseconds}_{score}_{norm_score}.jpg` (e.g., `{cache_name}_252.300_{score}_{norm_score}.jpg`)
 - `--video` - Path to original video file (required with --save-frames if not recorded in cache, or if video was moved)
 - `--decision-model-validate` - Use local Ollama decision model to validate top-K selected frames. Results that fail validation are discarded from match results.
 - `--decision-model-threshold` - Ollama decision model threshold (default: 0.5). Results with score < threshold are discarded.
@@ -186,6 +179,8 @@ Flags:
 - `--ollama-model` - Ollama model name for decision validation (default: clef-flash). Config key: `ollama_decision_model`.
 
 **Auto video path:** If `--save-frames` or `--decision-model-validate` is used, vsearch looks for `video_path` stored in the `.npz` cache from the indexing step. If the cached video path exists, it is used automatically — you don't need to pass `--video`. If the video was moved and the cached path no longer exists, vsearch exits with an error and you must provide `--video` with the new path.
+
+**MD5 integrity check:** If `--video` is provided, vsearch verifies its MD5 hash against the `md5` field stored in the cache. If they do not match, vsearch exits with an error.
 
 ## Expected JSON Output Schema (`--json` flag)
 
