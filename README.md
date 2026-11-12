@@ -85,54 +85,49 @@ cache.npz + query (text/image) → Load embeddings → Encode query → Similari
 
 ## Config File
 
-vsearch uses a configuration file at `config.toml` in the repo root to store default values. Settings are grouped into three sections:
-
-### `[global]`
-Shared defaults applied to both modes.
+vsearch uses a configuration file at `config.toml` in the repo root to store default values. Settings are grouped into two sections:
 
 ### `[index]`
 Index-mode defaults (used when running `vsearch index`):
 - `output_dir` - Default output directory for `.npz` cache
 - `model` - CLIP model variant
 - `sample_rate` - Frame sampling interval in seconds
-- `verbose` - Enable verbose progress output
 
 ### `[search]`
 Search-mode defaults (used when running `vsearch search`):
-- `top_k` - Maximum number of top results to return (-1 = all)
+- `top_k` - Maximum number of top results to return (-1 = all, 0 = none)
 - `raw_floor` - Absolute noise floor for raw similarity
 - `norm_threshold` - Normalized score threshold
 - `json_output` - Output results in JSON format
 - `save_results` - Path to save results text file
 - `save_frames` - Directory to save matched frame images
 - `video` - Path to original video file
-- `validate` - Use local Ollama to validate results
+- `decision_model_validate` - Enable Ollama decision model validation
 - `ollama_endpoint` - Ollama API endpoint
+- `ollama_decision_model` - Ollama model name for validation
+- `decision_model_threshold` - Validation score threshold
 
 **CLI flags always override config values when specified.** If a flag is not given, the config value is used. If neither is set, the built-in default applies.
 
 Example `config.toml`:
 ```toml
-[global]
-verbose = false
-
 [index]
 output_dir = "."
 model = "openai/clip-vit-base-patch32"
 sample_rate = 1
-verbose = false
 
 [search]
-verbose = false
 top_k = -1
 raw_floor = 0.25
 norm_threshold = 0.75
 json_output = false
-save_results = null
-save_frames = null
-video = null
-validate = false
+save_results = ""
+save_frames = ""
+video = ""
+decision_model_validate = false
 ollama_endpoint = "http://localhost:11434/v1/systemone"
+ollama_decision_model = "clef-flash"
+decision_model_threshold = 0.5
 ```
 
 ## Model Variants
