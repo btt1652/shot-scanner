@@ -139,7 +139,7 @@ def _save_matched_frames(results, npz_name, video_path, output_dir, verbose=Fals
 
 
 
-def _validate_results_with_ollama(results, query, frame_b64s, npz_name, model_id="clef-flash", ollama_endpoint="http://localhost:11434/v1/systemone", threshold=0.5):
+def _validate_results_with_ollama(results, query, frame_b64s, npz_name, model_id="clef-flash", ollama_endpoint="http://localhost:11434/v1/systemone", threshold=0.5, verbose=False):
     """Use Ollama's decision capability to validate frames top-down.
 
     Frames are checked from highest score to lowest. If a frame fails
@@ -172,6 +172,10 @@ def _validate_results_with_ollama(results, query, frame_b64s, npz_name, model_id
                 }
             }
         }
+
+        # Ollama request
+        if verbose:
+            print(f"Ollama request sent for frame {i+1} (model: {model_id})", file=sys.stderr)
 
         try:
             req = urllib.request.Request(
@@ -316,7 +320,7 @@ def cmd_search(args):
 
     # Perform Ollama validation if requested
     if validate and frame_b64_gen:
-        results = _validate_results_with_ollama(results, query, frame_b64_gen, npz_name, model_id=ollama_model, ollama_endpoint=ollama_endpoint, threshold=decision_model_threshold)
+        results = _validate_results_with_ollama(results, query, frame_b64_gen, npz_name, model_id=ollama_model, ollama_endpoint=ollama_endpoint, threshold=decision_model_threshold, verbose=verbose)
 
     # Output to stdout (JSON or text)
     if json_output:
