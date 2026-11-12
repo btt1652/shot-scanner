@@ -1,14 +1,9 @@
-[global]
-verbose = false
-
 [index]
 output_dir = "."
 model = "openai/clip-vit-base-patch32"
 sample_rate = 1
-verbose = false
 
 [search]
-verbose = false
 top_k = -1
 raw_floor = 0.25
 norm_threshold = 0.75

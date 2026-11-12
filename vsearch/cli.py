@@ -16,7 +16,7 @@ from .config import load_config, get_config_value, save_config
 
 def cmd_index(args):
     cfg = load_config()
-    verbose = bool(get_config_value(cfg, "index", "verbose", getattr(args, "verbose", None)))
+    verbose = bool(getattr(args, "verbose", False))
     model = get_config_value(cfg, "index", "model", getattr(args, "model", None))
     sample_rate = get_config_value(cfg, "index", "sample_rate", getattr(args, "sample_rate", None))
     engine = VideoSearchEngine(model_id=model)
@@ -159,7 +159,7 @@ def cmd_search(args):
     def cfg_val(key, cli_arg):
         return get_config_value(cfg, "search", key, getattr(args, cli_arg, None))
 
-    verbose = bool(cfg_val("verbose", "verbose"))
+    verbose = bool(getattr(args, "verbose", False))
     top_k = cfg_val("top_k", "top_k")
     raw_floor = cfg_val("raw_floor", "raw_floor")
     norm_threshold = cfg_val("norm_threshold", "norm_threshold")

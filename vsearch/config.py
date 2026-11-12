@@ -1,7 +1,6 @@
 """Config handling for vsearch.
 
 The config file (TOML) grouping:
-  [global]   - shared defaults applied to both modes
   [index]    - index-mode defaults
   [search]   - search-mode defaults
 
@@ -11,6 +10,7 @@ Uses tomllib (Python 3.11+) for reading TOML files.
 """
 
 import os
+import tomllib
 from pathlib import Path
 
 CONFIG_DIR = Path.home() / ".vsearch"
@@ -23,17 +23,12 @@ def get_config_path() -> Path:
 
 def default_config() -> dict:
     return {
-        "global": {
-            "verbose": False
-        },
         "index": {
             "output_dir": ".",
             "model": "openai/clip-vit-base-patch32",
-            "sample_rate": 1,
-            "verbose": False
+            "sample_rate": 1
         },
         "search": {
-            "verbose": False,
             "top_k": -1,
             "raw_floor": 0.25,
             "norm_threshold": 0.75,
