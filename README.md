@@ -213,10 +213,4 @@ The tool follows a two-phase lifecycle:
 
 2. **Query phase** (`vsearch search`): Loads the cached embeddings, auto-detects the CLIP model from the cache, encodes the query (text or image) with the same CLIP model, computes cosine similarity via dot product, applies min-max normalization and dual-threshold filtering (normalized >= threshold AND raw >= floor), sorts by score descending, and returns the top-k matching timestamps.
 
-## Legacy Cache Compatibility
 
-`.npz` caches created before the `model` field was added do not contain model metadata. Running `vsearch search` on such caches will fail with an error message instructing you to re-index the video. This prevents silently producing incorrect results due to model mismatch.
-
-## Target Environment
-
-Optimized for CPU execution (compatible with standard multi-core desktop CPUs, 16GB RAM) with optional CUDA support if a GPU is present.
