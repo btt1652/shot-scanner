@@ -13,3 +13,4 @@ save_frames = ""
 video = ""
 validate = false
 ollama_endpoint = "http://localhost:11434/v1/systemone"
+ollama_model = "clef-flash"
