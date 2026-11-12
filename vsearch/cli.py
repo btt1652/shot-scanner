@@ -169,6 +169,7 @@ def cmd_search(args):
     video_path = cfg_val("video", "video")
     validate = cfg_val("validate", "validate")
     ollama_endpoint = cfg_val("ollama_endpoint", "ollama_endpoint")
+    ollama_model = cfg_val("ollama_model", "ollama_model")
 
     data = np.load(args.cache, allow_pickle=False)
     embeddings = data["embeddings"]
@@ -245,7 +246,7 @@ def cmd_search(args):
 
     # Perform Ollama validation if requested
     if validate and frame_paths:
-        results = _validate_results_with_ollama(results, query, frame_paths, ollama_endpoint=ollama_endpoint)
+        results = _validate_results_with_ollama(results, query, frame_paths, model_id=ollama_model, ollama_endpoint=ollama_endpoint)
 
     # Output to stdout (JSON or text)
     if json_output:
@@ -283,6 +284,7 @@ def main():
     p_search.add_argument("--video", default=None, help="Path to original video file (required with --save-frames)")
     p_search.add_argument("--validate", action="store_true", default=None, help="Use local Ollama (clef-flash) to validate the top results")
     p_search.add_argument("--ollama-endpoint", default=None, help="Ollama API endpoint (default: http://localhost:11434/v1/systemone)")
+    p_search.add_argument("--ollama-model", default=None, help="Ollama model name for validation (default: clef-flash)")
     p_search.set_defaults(func=cmd_search)
 
     args = parser.parse_args()
