@@ -34,6 +34,55 @@ A lightweight, fully offline command-line interface (CLI) tool designed to extra
    vsearch search cache.npz -t "a person running" -f /tmp/frames
    ```
 
+## Program Flow
+
+### Index mode
+```
+video_path → Extract frames (OpenCV) → Encode images to embeddings → Save to .npz
+```
+- Reads video, extracts frames based on `sample_rate`
+- Encodes each frame using CLIP model
+- Saves: `embeddings`, `timestamps`, `model`, `video_path` to cache
+
+### Search mode
+```
+cache.npz + query (text/image) → Load embeddings → Encode query → Similarity search
+    → Top-k ranking → Optional frame extraction → Optional Ollama validation
+```
+- Loads cached embeddings and model
+- Encodes query (text/image) using same CLIP model
+- Computes similarities, applies thresholds (`raw_floor`, `norm_threshold`)
+- Ranks by similarity (highest first)
+- **Frame extraction**: For each ranked result, extracts frame from cached `video_path`
+- **Validation**: If `--decision-model-validate` enabled, checks each frame with Ollama decision model
+  - Results fail validation (score < `decision_model_threshold`) are discarded
+  - Validation stops at first failure — all lower-score results are discarded
+  - Configurable via `decision_model_threshold` in `config.toml` or `--decision-model-threshold` CLI flag
+
+### Output formats
+- **Default**: Human-readable table to stdout
+- **JSON**: Structured JSON matching schema:
+  ```json
+  {
+    "query": "search prompt",
+    "results": [
+      {
+        "timestamp_seconds": 252.0,
+        "timestamp_formatted": "04:12",
+        "similarity_score": 0.3125,
+        "normalized_score": 1.0
+      }
+    ]
+  }
+  ```
+- **Files**: Optional `--save-results` (text) and `--save-frames` (images) options
+
+### Config precedence
+1. CLI flags override config.toml values
+2. Config.toml values override defaults
+3. Saved config values are merged with user-provided config values on load
+
+
 ## Config File
 
 vsearch uses a configuration file at `config.toml` in the repo root to store default values. Settings are grouped into three sections:
