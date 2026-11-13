@@ -33,7 +33,6 @@ def default_config() -> dict:
         "search": {
             "top_k": -1,
             "raw_floor": 0.25,
-
             "json_output": False,
             "save_frames": None,
             "video": None,
@@ -43,7 +42,6 @@ def default_config() -> dict:
             "rerank_threshold": 0.5,
             "rerank_weight_clip": 0.5,
             "rerank_weight_ollama": 0.5,
-            "use_percentile": False,
             "percentile": 0.0
         }
     }

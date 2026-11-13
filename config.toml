@@ -2,7 +2,7 @@
 output_dir = "."
 model = "openai/clip-vit-large-patch14"
 sample_rate = 1
-batch_size = 32
+batch_size = 64
 
 [search]
 top_k = 5

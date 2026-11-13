@@ -316,11 +316,7 @@ def cmd_search(args):
     rerank_threshold = cfg_val("rerank_threshold", "rerank_threshold")
     rerank_weight_clip = cfg_val("rerank_weight_clip", "rerank_weight_clip")
     rerank_weight_ollama = cfg_val("rerank_weight_ollama", "rerank_weight_ollama")
-    use_percentile = cfg_val("use_percentile", "use_percentile")
     percentile = cfg_val("percentile", "percentile")
-    # --percentile X alone is sufficient; it implies percentile mode.
-    if percentile is not None and percentile > 0.0:
-        use_percentile = True
 
     # Print config values in verbose mode
     if verbose:
@@ -402,10 +398,10 @@ def cmd_search(args):
     # Query: text or image
     if args.text is not None:
         query = args.text
-        results = engine.search_text(query, embeddings, timestamps, top_k, raw_floor, use_percentile=use_percentile, percentile=percentile)
+        results = engine.search_text(query, embeddings, timestamps, top_k, raw_floor, percentile=percentile)
     elif args.image is not None:
         query = args.image
-        results = engine.search_image(query, embeddings, timestamps, top_k, raw_floor, use_percentile=use_percentile, percentile=percentile)
+        results = engine.search_image(query, embeddings, timestamps, top_k, raw_floor, percentile=percentile)
     else:
         print("search requires either --text or --image", file=sys.stderr)
         sys.exit(2)
@@ -472,7 +468,6 @@ def main():
     p_search.add_argument("--json", action="store_true", default=None, help="Output results in strict JSON format")
     p_search.add_argument("--raw-floor","-rf", type=float, default=None, help="Absolute noise floor for raw similarity (default: 0.25)")
     p_search.add_argument("--percentile", "-p", type=float, default=None, help="Percentile cutoff (0.0-1.0, e.g., 0.2 keeps top 20%% of frames). Setting this enables percentile filtering automatically.")
-    p_search.add_argument("--use-percentile", action="store_true", default=None, help="(Deprecated) Enable percentile-based filtering. Now redundant; use --percentile instead.")
     p_search.add_argument("--verbose", "-v", action="store_true", default=None, help="Enable verbose progress output")
     p_search.add_argument("--save-frames", "-sf", default=None, help="Directory to save matched frame images as {cache_name}_{HHMMSS}_{score}_{norm_score}.jpg")
     p_search.add_argument("--video", "-vid", default=None, help="Path to original video file (required with --save-frames)")
