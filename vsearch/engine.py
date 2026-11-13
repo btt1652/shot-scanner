@@ -113,42 +113,61 @@ class VideoSearchEngine:
             print(f"Extracted {len(embeddings)} frames at {sample_rate_sec}s interval", file=_sys.stderr, flush=True)
         return embeddings, timestamps_arr
 
-    def _rank_results(self, query_vec, embeddings, timestamps, top_k, raw_floor, norm_threshold):
-        raw_similarities = np.dot(embeddings, query_vec)
-        raw_min = raw_similarities.min()
-        raw_max = raw_similarities.max()
-        if raw_max - raw_min > 1e-9:
-            normalized_scores = (raw_similarities - raw_min) / (raw_max - raw_min)
-        else:
-            normalized_scores = np.full_like(raw_similarities, 0.5)
+    def _rank_results(self, query_vec, embeddings, timestamps, top_k, raw_floor, norm_threshold, use_percentile=False, percentile=0.0):
+        """Rank frames by raw cosine similarity (absolute, comparable across videos).
 
+        - raw_floor: calibrated minimum cosine similarity to keep (e.g. 0.5).
+        - use_percentile / percentile: optionally keep only the top fraction of
+          frames by similarity (e.g. use_percentile=True, percentile=0.2 keeps the
+          top 20%), independent of the absolute score.
+
+        `norm_threshold` is kept for backwards-compatibility but no longer
+        affects ranking; use raw_floor or the percentile cutoff instead.
+        """
+        raw_similarities = np.dot(embeddings, query_vec)
         order = np.argsort(-raw_similarities)
+
+        # Optional percentile cutoff: keep only the top `percentile` fraction.
+        if use_percentile and 0.0 < percentile < 1.0 and len(raw_similarities) > 0:
+            cutoff_idx = max(1, int(len(raw_similarities) * percentile))
+            cutoff_score = float(raw_similarities[order[cutoff_idx - 1]])
+        else:
+            cutoff_score = -np.inf
+
         results = []
         for idx in order:
-            if normalized_scores[idx] >= norm_threshold and raw_similarities[idx] >= raw_floor:
-                ts = float(timestamps[idx])
-                results.append({
-                    "timestamp_seconds": ts,
-                    "timestamp_formatted": f"{int(ts)//60:02d}:{int(ts)%60:02d}",
-                    "score": float(raw_similarities[idx]),
-                    "normalized_score": float(normalized_scores[idx]),
-                })
-                if top_k is not None and top_k >= 0 and len(results) >= top_k:
-                    break
+            raw_score = float(raw_similarities[idx])
+
+            # Calibrated absolute floor; order is descending so we can stop early.
+            if raw_score < raw_floor:
+                break
+            # Optional percentile cutoff.
+            if raw_score < cutoff_score:
+                break
+
+            ts = float(timestamps[idx])
+            results.append({
+                "timestamp_seconds": ts,
+                "timestamp_formatted": f"{int(ts)//60:02d}:{int(ts)%60:02d}",
+                "score": raw_score,
+                "normalized_score": raw_score,
+            })
+            if top_k is not None and top_k >= 0 and len(results) >= top_k:
+                break
         return results
 
-    def search_text(self, text_query, embeddings, timestamps, top_k=5, raw_floor=0.25, norm_threshold=0.75, model_id=None):
+    def search_text(self, text_query, embeddings, timestamps, top_k=5, raw_floor=0.25, norm_threshold=0.75, model_id=None, use_percentile=False, percentile=0.0):
         """Encode text query and run ranked similarity matching."""
         if model_id is not None:
             self._load_model(model_id, verbose=False)
         query_vec = self._encode_text(text_query)
-        return self._rank_results(query_vec, embeddings, timestamps, top_k, raw_floor, norm_threshold)
+        return self._rank_results(query_vec, embeddings, timestamps, top_k, raw_floor, norm_threshold, use_percentile=use_percentile, percentile=percentile)
 
-    def search_image(self, ref_image_path, embeddings, timestamps, top_k=5, raw_floor=0.25, norm_threshold=0.75, model_id=None):
+    def search_image(self, ref_image_path, embeddings, timestamps, top_k=5, raw_floor=0.25, norm_threshold=0.75, model_id=None, use_percentile=False, percentile=0.0):
         """Encode reference image query and run ranked similarity matching."""
         if model_id is not None:
             self._load_model(model_id, verbose=False)
         from PIL import Image as PILImage
         img = PILImage.open(ref_image_path).convert("RGB")
         query_vec = self._encode_image(img)
-        return self._rank_results(query_vec, embeddings, timestamps, top_k, raw_floor, norm_threshold)
+        return self._rank_results(query_vec, embeddings, timestamps, top_k, raw_floor, norm_threshold, use_percentile=use_percentile, percentile=percentile)
