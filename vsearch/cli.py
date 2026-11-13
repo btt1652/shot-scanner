@@ -128,8 +128,17 @@ def _save_matched_frames(results, npz_name, video_path, output_dir, verbose=Fals
     frame_paths = []
     for r in results:
         ts = r["timestamp_seconds"]
-        ts_str = f"{ts:.3f}".replace(".", "_")  # e.g., 252.300 -> 252_300
-        out_path = os.path.join(output_dir, f"{npz_name}_{ts_str}_{r['score']:.4f}.jpg")
+        # Format timestamp as HH:MM:SS (with hours if >= 1 hour)
+        if ts >= 3600:
+            ts_formatted = f"{int(ts)//3600:02d}:{int(ts)%3600//60:02d}:{int(ts)%60:02d}"
+        else:
+            ts_formatted = f"{int(ts)//60:02d}:{int(ts)%60:02d}"
+        # Use the original video filename (without extension) if provided, else npz_name
+        if video_path:
+            video_name = os.path.splitext(os.path.basename(video_path))[0]
+        else:
+            video_name = npz_name
+        out_path = os.path.join(output_dir, f"{video_name}_{ts_formatted}_{r['score']:.4f}.jpg")
         if _extract_frame_at(video_path, ts, out_path):
             saved += 1
             frame_paths.append(out_path)
