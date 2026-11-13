@@ -60,8 +60,7 @@ def _format_results_text(results):
     lines = []
     for r in results:
         lines.append(
-            f"sec={r['timestamp_seconds']:.1f}s  ts={r['timestamp_formatted']}  "
-            f"sim={r['score']:.4f}"
+            f"{r['timestamp_formatted']}  sim={r['score']:.4f}"
         )
     return "\n".join(lines)
 

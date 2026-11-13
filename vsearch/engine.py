@@ -169,7 +169,7 @@ class VideoSearchEngine:
             ts = float(timestamps[idx])
             results.append({
                 "timestamp_seconds": ts,
-                "timestamp_formatted": f"{int(ts)//3600:02d}:{int(ts)%3600//60:02d}:{int(ts)%60:02d}" if int(ts) >= 3600 else f"{int(ts)//60:02d}:{int(ts)%60:02d}",
+                "timestamp_formatted": f"{int(ts)//3600:02d}:{int(ts)%3600//60:02d}:{int(ts)%60:02d}",
                 "score": raw_score,
             })
             if top_k is not None and top_k >= 0 and len(results) >= top_k:
