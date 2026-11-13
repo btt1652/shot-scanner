@@ -134,9 +134,9 @@ def _save_matched_frames(results, npz_name, video_path, output_dir, verbose=Fals
             saved += 1
             frame_paths.append(out_path)
             if verbose:
-                print(f"  Saved frame at {ts:.1f}s -> {out_path}", file=sys.stderr)
+                print(f"Saved frame at {ts:.1f}s -> {out_path}", file=sys.stderr)
         elif verbose:
-            print(f"  Failed to extract frame at {ts:.1f}s", file=sys.stderr)
+            print(f"Failed to extract frame at {ts:.1f}s", file=sys.stderr)
     return saved, frame_paths
 
 
