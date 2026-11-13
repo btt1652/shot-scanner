@@ -27,7 +27,8 @@ def default_config() -> dict:
         "index": {
             "output_dir": ".",
             "model": "openai/clip-vit-large-patch14",
-            "sample_rate": 1
+            "sample_rate": 1,
+            "batch_size": 32
         },
         "search": {
             "top_k": -1,

@@ -90,6 +90,7 @@ Index-mode defaults (used when running `vsearch index`):
 - `output_dir` - Default output directory for `.npz` cache
 - `model` - CLIP model variant
 - `sample_rate` - Frame sampling interval in seconds
+- `batch_size` - Number of frames to encode in a single CLIP forward pass during indexing (default: 32). Larger batches reduce Python overhead and can speed up indexing on multi-core CPUs, at the cost of higher peak memory usage.
 
 ### `[search]`
 Search-mode defaults (used when running `vsearch search`):
@@ -115,6 +116,7 @@ Example `config.toml`:
 output_dir = "."
 model = "openai/clip-vit-base-patch32"
 sample_rate = 1
+batch_size = 32
 
 [search]
 top_k = -1
@@ -224,6 +226,7 @@ Flags:
 - `video` - Path to input video file (required)
 - `-o, --output OUTPUT` - Path to save the output cache archive (.npz). If a directory, auto-generates filename: `{video_name}_{model_name}_{sample_rate}_{md5_prefix8}.npz`
 - `-r, --sample-rate SAMPLE_RATE` - Frame sampling interval in seconds (default: 1)
+- `-bs, --batch-size BATCH_SIZE` - Number of frames to encode in a single CLIP forward pass during indexing (default: 32). Larger batches reduce Python overhead and can speed up indexing on multi-core CPUs, at the cost of higher peak memory usage.
 - `--model MODEL` - CLIP model variant (default: openai/clip-vit-base-patch32)
 - `--verbose, -v` - Enable verbose progress output
 
@@ -282,6 +285,6 @@ When `--json` is specified, the application prints strictly valid JSON to stdout
 
 The tool follows a two-phase lifecycle:
 
-1. **Indexing phase** (`vsearch index`): Extracts frames at the specified sample rate, encodes each frame with CLIP, L2-normalizes the feature vectors, and saves them into a compressed `.npz` archive alongside the original timestamps, model ID, and video path.
+1. **Indexing phase** (`vsearch index`): Extracts frames at the specified sample rate, encodes them in batches with CLIP (batch size configurable via `--batch-size` or `config.toml`), L2-normalizes the feature vectors, and saves them into a compressed `.npz` archive alongside the original timestamps, model ID, and video path.
 
 2. **Query phase** (`vsearch search`): Loads the cached embeddings, auto-detects the CLIP model from the cache, encodes the query (text or image) with the same CLIP model, computes cosine similarity via dot product, applies calibrated floor filtering (`raw_floor`) or optional percentile cutoff (`use_percentile` / `percentile`), sorts by score descending, and returns the top-k matching timestamps.

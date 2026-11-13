@@ -20,6 +20,7 @@ def cmd_index(args):
     verbose = bool(getattr(args, "verbose", False))
     model = get_config_value(cfg, "index", "model", getattr(args, "model", None))
     sample_rate = get_config_value(cfg, "index", "sample_rate", getattr(args, "sample_rate", None))
+    batch_size = get_config_value(cfg, "index", "batch_size", getattr(args, "batch_size", BATCH_SIZE))
     engine = VideoSearchEngine(model_id=model)
 
     # Print config values in verbose mode
@@ -27,7 +28,7 @@ def cmd_index(args):
         print(f"Config: model={model}, sample_rate={sample_rate}s", file=sys.stderr)
 
     embeddings, timestamps = engine.extract_and_encode(
-        args.video, sample_rate, BATCH_SIZE, verbose=verbose
+        args.video, sample_rate, batch_size, verbose=verbose
     )
 
     # Compute MD5 of the source video for integrity checking
@@ -455,6 +456,7 @@ def main():
     p_index.add_argument("video", help="Path to input video file")
     p_index.add_argument("--output", "-o", default=None, help="Path to save the output cache archive (.npz). If a directory, auto-generates filename: {video_name}_{model_name}_{sample_rate}_{md5_prefix8}.npz")
     p_index.add_argument("--sample-rate", "-r", type=int, default=None, help="Frame sampling interval in seconds (default: 1)")
+    p_index.add_argument("--batch-size", "-bs", type=int, default=None, help="Batch size for frame encoding during indexing (default: 32)")
     p_index.add_argument("--model", "-m",default=None, help="CLIP model variant (default: openai/clip-vit-base-patch32)")
     p_index.add_argument("--verbose", "-v", action="store_true", default=None, help="Enable verbose progress output")
     p_index.set_defaults(func=cmd_index)
