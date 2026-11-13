@@ -143,7 +143,6 @@ def _save_matched_frames(results, npz_name, video_path, output_dir, verbose=Fals
     return saved, frame_paths
 
 
-
 def _as_list(value):
     """Normalize a value into a list of non-empty strings. Strips whitespace and splits comma-separated values."""
     if value is None:
@@ -329,7 +328,19 @@ def cmd_search(args):
     data = np.load(args.cache, allow_pickle=False)
     embeddings = data["embeddings"]
     timestamps = data["timestamps"]
-    video_path = data.get("video_path", None)
+    cache_model = data.get("model")
+    cache_video_path = data.get("video_path")
+    stored_md5 = str(data["md5"].item()) if "md5" in data else "N/A"
+
+    if verbose:
+        print(f"Cache Info: model={cache_model}, video_path={cache_video_path}, md5={stored_md5}", file=sys.stderr)
+
+    # Update video_path to use the one from cache
+    # Note: if user explicitly passed --video, we respect that.
+    if args.video is not None:
+        video_path = args.video
+    else:
+        video_path = cache_video_path if cache_video_path else data.get("video_path")
 
     # MD5 is mandatory in cache
     if "md5" not in data:
@@ -341,7 +352,6 @@ def cmd_search(args):
         sys.exit(1)
     stored_md5 = str(data["md5"].item())
 
-    # If user provided --video, verify MD5 matches the cache's stored MD5
     if args.video is not None:
         if not os.path.exists(args.video):
             print(f"Error: --video file '{args.video}' does not exist.", file=sys.stderr)
@@ -417,7 +427,7 @@ def cmd_search(args):
         if verbose:
             print(f"Ollama models: {ollama_models}", file=sys.stderr, flush=True)
         if not video_path:
-            print("--video is required when using --decision-model-rerank", file=sys.stderr)
+            print("--video is required when using --decision_model_rerank", file=sys.stderr)
             sys.exit(2)
 
         # Extract frames lazily and validate top-down
@@ -430,7 +440,7 @@ def cmd_search(args):
     # Save frames for remaining (validated) results only
     if save_frames:
         if not video_path:
-            print("--video is required when using --save-frames", file=sys.stderr)
+            print("--video is required when using --save_frames", file=sys.stderr)
             sys.exit(2)
 
         os.makedirs(save_frames, exist_ok=True)
@@ -467,10 +477,10 @@ def main():
     p_search.add_argument("--image", "-i", default=None, help="Path to reference image file")
     p_search.add_argument("--top-k", "-k", type=int, default=None, help="Maximum number of top results to return (default: all)")
     p_search.add_argument("--json", action="store_true", default=None, help="Output results in strict JSON format")
-    p_search.add_argument("--raw-floor","-rf", type=float, default=None, help="Absolute noise floor for raw similarity (default: 0.25)")
+    p_search.add_argument("--raw-floor", "-rf", type=float, default=None, help="Absolute noise floor for raw similarity (default: 0.25)")
     p_search.add_argument("--percentile", "-p", type=float, default=None, help="Percentile cutoff (0.0-1.0, e.g., 0.2 keeps top 20%% of frames). Setting this enables percentile filtering automatically.")
     p_search.add_argument("--verbose", "-v", action="store_true", default=None, help="Enable verbose progress output")
-    p_search.add_argument("--save-frames", "-sf", default=None, help="Directory to save matched frame images as {cache_name}_{HHMMSS}_{score}_{norm_score}.jpg")
+    p_search.add_argument("--save_frames", "-sf", default=None, help="Directory to save matched frame images as {cache_name}_{HHMMSS}_{score}_{norm_score}.jpg")
     p_search.add_argument("--video", "-vid", default=None, help="Path to original video file (required with --save-frames)")
     p_search.add_argument("--decision_model-rerank","-dmr", action="store_true", default=None, help="Use local Ollama decision model to rerank top results. Results failing the fused score threshold are discarded from match results.")
     p_search.add_argument("--rerank_threshold","-rt", type=float, default=None, help="Threshold for the fused reranking score (default: 0.5). Results with score < threshold are discarded.")
