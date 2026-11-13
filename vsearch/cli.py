@@ -25,7 +25,7 @@ def cmd_index(args):
 
     # Print config values in verbose mode
     if verbose:
-        print(f"Config: model={model}, sample_rate={sample_rate}s", file=sys.stderr)
+        print(f"Config: model={model}, sample_rate={sample_rate}s, batch_size={batch_size}", file=sys.stderr)
 
     embeddings, timestamps = engine.extract_and_encode(
         args.video, sample_rate, batch_size, verbose=verbose
