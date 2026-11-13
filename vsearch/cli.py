@@ -284,9 +284,9 @@ def _rerank_results_with_ollama(results, query, frame_b64s, npz_name, model_id="
         # Fused score calculation
         fused_score = (r['score'] * weight_clip) + (valid_score * weight_ollama)
         if fused_score >= threshold:
-            print(f"{r['timestamp_seconds']:.1f}s sim={r['score']:.4f} ollama={valid_score:.4f} fused={fused_score:.4f}", file=sys.stderr)
+            print(f"{r['timestamp_formatted']} sim={r['score']:.4f} ollama={valid_score:.4f} fused={fused_score:.4f}", file=sys.stderr)
         else:
-            print(f"{r['timestamp_seconds']:.1f}s sim={r['score']:.4f} ollama={valid_score:.4f} fused={fused_score:.4f} discard", file=sys.stderr)
+            print(f"{r['timestamp_formatted']} sim={r['score']:.4f} ollama={valid_score:.4f} fused={fused_score:.4f} discard", file=sys.stderr)
         scored_results.append({**r, "fused_score": fused_score, "ollama_score": valid_score})
 
     # Rerank the results based on fused score
