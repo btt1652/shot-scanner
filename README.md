@@ -106,7 +106,6 @@ Search-mode defaults (used when running `vsearch search`):
 - `rerank_weight_clip` - Weight given to the CLIP similarity score (0.0 to 1.0) during reranking
 - `rerank_weight_ollama` - Weight given to the Ollama judgment score (0.0 to 1.0) during reranking
 - `percentile` - Percentile cutoff (0.0 to 1.0, e.g. 0.2 keeps top 20%). Setting this automatically enables percentile filtering.
-- `--use-percentile` - Deprecated; keep for backward compatibility but no longer needed.
 
 **CLI flags always override config values when specified.** If a flag is not given, the config value is used. If neither is set, the built-in default applies.
 
@@ -130,7 +129,6 @@ ollama_decision_model = ["d3:4b", "clef-flash"]
 rerank_threshold = 0.5
 rerank_weight_clip = 0.5
 rerank_weight_ollama = 0.5
-use_percentile = false
 percentile = 0.0
 ```
 
@@ -249,7 +247,6 @@ Flags:
 - `--json` - Output results in strict JSON format to stdout for AI agent consumption
 - `--raw-floor` - Absolute calibrated cosine similarity floor (default: 0.25). Results below this similarity are discarded.
 - `--percentile` - Percentile cutoff (0.0 to 1.0, e.g. 0.2 keeps top 20%). Setting this enables percentile filtering automatically.
-- `--use-percentile` - Deprecated; keep for backward compatibility but no longer needed.
 - `--verbose, -v` - Enable verbose progress output
 - `--save-frames, -f` - Directory to save matched frame images as `{cache_name}_{seconds_milliseconds}_{score}_{norm_score}.jpg` (e.g., `{cache_name}_252.300_{score}_{norm_score}.jpg`)
 - `--video` - Path to original video file (required with --save-frames if not recorded in cache, or if video was moved)
@@ -287,4 +284,4 @@ The tool follows a two-phase lifecycle:
 
 1. **Indexing phase** (`vsearch index`): Extracts frames at the specified sample rate, encodes them in batches with CLIP (batch size configurable via `--batch-size` or `config.toml`), L2-normalizes the feature vectors, and saves them into a compressed `.npz` archive alongside the original timestamps, model ID, and video path.
 
-2. **Query phase** (`vsearch search`): Loads the cached embeddings, auto-detects the CLIP model from the cache, encodes the query (text or image) with the same CLIP model, computes cosine similarity via dot product, applies calibrated floor filtering (`raw_floor`) or optional percentile cutoff (`use_percentile` / `percentile`), sorts by score descending, and returns the top-k matching timestamps.
+2. **Query phase** (`vsearch search`): Loads the cached embeddings, auto-detects the CLIP model from the cache, encodes the query (text or image) with the same CLIP model, computes cosine similarity via dot product, applies calibrated floor filtering (`raw_floor`) or optional percentile cutoff (`percentile`), sorts by score descending, and returns the top-k matching timestamps.

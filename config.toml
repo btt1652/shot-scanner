@@ -16,5 +16,4 @@ ollama_decision_model = ["d3:9b","d3:4b"]
 rerank_threshold = 0.5
 rerank_weight_clip = 0.5
 rerank_weight_ollama = 0.5
-use_percentile = false
 percentile = 0.0
