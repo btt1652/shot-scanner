@@ -320,9 +320,10 @@ def cmd_search(args):
 
     # Print config values in verbose mode
     if verbose:
-        print(f"Config: top_k={top_k}, raw_floor={raw_floor:.2f}, json_output={json_output}", file=sys.stderr)
         _eps = ollama_endpoint if isinstance(ollama_endpoint, (list, tuple)) else ([ollama_endpoint] if ollama_endpoint else [])
         _models = _as_list(ollama_model)
+        pct_str = f", percentile={percentile:.2f}" if percentile and percentile > 0.0 else ""
+        print(f"Config: top_k={top_k}, raw_floor={raw_floor:.2f}, json_output={json_output}{pct_str}", file=sys.stderr)
         print(f"        save_frames={save_frames}, video={video_path}, rerank={rerank}, ollama_endpoint={_eps}, ollama_model={_models}, rerank_threshold={rerank_threshold}", file=sys.stderr)
 
     data = np.load(args.cache, allow_pickle=False)
