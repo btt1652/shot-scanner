@@ -316,7 +316,7 @@ def cmd_search(args):
     verbose = not json_output
     video_path = cfg_val("video", "video")
     rerank = cfg_val("decision_model_rerank", "decision_model_rerank")
-    ollama_endpoint = cfg_val("ollama_server_addr", "ollama_server_addr")
+    ollama_endpoint = cfg_val("ollama_host", "ollama_host")
     ollama_model = cfg_val("ollama_decision_model", "ollama_model")
     rerank_threshold = cfg_val("rerank_threshold", "rerank_threshold")
     rerank_weight_clip = cfg_val("rerank_weight_clip", "rerank_weight_clip")
@@ -329,7 +329,7 @@ def cmd_search(args):
         _models = _as_list(ollama_model)
         pct_str = f", percentile={percentile:.2f}" if percentile and percentile > 0.0 else ""
         print(f"Config: top_k={top_k}, raw_floor={raw_floor:.2f}, json_output={json_output}{pct_str}", file=sys.stderr)
-        print(f"        save_frames={save_frames}, video={video_path}, rerank={rerank}, ollama_server_addr={_eps}, ollama_model={_models}, rerank_threshold={rerank_threshold}, rerank_weight_clip={rerank_weight_clip:.2f}, rerank_weight_ollama={rerank_weight_ollama:.2f}", file=sys.stderr)
+        print(f"        save_frames={save_frames}, video={video_path}, rerank={rerank}, ollama_host={_eps}, ollama_model={_models}, rerank_threshold={rerank_threshold}, rerank_weight_clip={rerank_weight_clip:.2f}, rerank_weight_ollama={rerank_weight_ollama:.2f}", file=sys.stderr)
 
     data = np.load(args.cache, allow_pickle=False)
     embeddings = data["embeddings"]
@@ -437,16 +437,12 @@ def cmd_search(args):
         ollama_models = _as_list(ollama_model)
         if not ollama_models:
             ollama_models = ["clef-flash"]
-        if verbose:
-            print(f"Ollama models: {ollama_models}", file=sys.stderr, flush=True)
         if not video_path:
             print("--video is required when using --decision_model_rerank", file=sys.stderr)
             sys.exit(2)
 
         # Extract frames lazily and validate top-down
         frame_b64_gen = _extract_frames_lazy(results, video_path, verbose)
-        if verbose:
-            print(f"Extracting frames in memory for reranking...", file=sys.stderr)
         results = _rerank_results_with_ollama(results, query, frame_b64_gen, npz_name, model_id=ollama_model, ollama_endpoint=ollama_endpoint, threshold=rerank_threshold, verbose=verbose, weight_clip=rerank_weight_clip, weight_ollama=rerank_weight_ollama)
 
     # If rerank was enabled, results were already sorted/filtered by fused score;
@@ -492,7 +488,7 @@ def cmd_search(args):
                 "save_frames": _safe(save_frames),
                 "video": _safe(video_path),
                 "rerank": _safe(rerank), 
-                "ollama_server_addr": _safe(ollama_endpoint),
+                "ollama_host": _safe(ollama_endpoint),
                 "ollama_model": _safe(ollama_model),
                 "rerank_threshold": _safe(rerank_threshold),
                 "rerank_weight_clip": _safe(rerank_weight_clip),
@@ -539,7 +535,7 @@ def main():
     p_search.add_argument("--rerank_threshold","-rt", type=float, default=None, help="Threshold for the fused reranking score (default: 0.5). Results with score < threshold are discarded.")
     p_search.add_argument("--rerank_weight_clip","-rwc", type=float, default=None, help="Weight given to CLIP similarity in fused score (default: 0.3).")
     p_search.add_argument("--rerank_weight_ollama","-rwo", type=float, default=None, help="Weight given to Ollama judgment in fused score (default: 0.7).")
-    p_search.add_argument("--ollama_server_addr","-oe", default=None, help="Ollama server addr, or a comma-separated list of endpoints tried in order (default: [192.168.1.190, localhost])")
+    p_search.add_argument("--ollama_host","-oe", default=None, help="Ollama server addr, or a comma-separated list of endpoints tried in order (default: [192.168.1.190, localhost])")
     p_search.add_argument("--ollama_model","-dm", default=None, help="Ollama decision model name(s), comma-separated fallback list tried in order for validation")
     p_search.set_defaults(func=cmd_search)
 

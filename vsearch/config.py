@@ -37,7 +37,7 @@ def default_config() -> dict:
             "save_frames": None,
             "video": None,
             "decision_model_rerank": False,
-            "ollama_server_addr": ["192.168.1.190", "localhost"],
+            "ollama_host": ["192.168.1.190", "localhost"],
             "ollama_decision_model": ["clef-flash", "d3:4b"],
             "rerank_threshold": 0.5,
             "rerank_weight_clip": 0.3,
