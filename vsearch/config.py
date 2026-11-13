@@ -40,9 +40,9 @@ def default_config() -> dict:
             "ollama_endpoint": ["192.168.1.190", "localhost"],
             "ollama_decision_model": ["clef-flash", "d3:4b"],
             "rerank_threshold": 0.5,
-            "rerank_weight_clip": 0.5,
-            "rerank_weight_ollama": 0.5,
-            "percentile": 0.0
+            "rerank_weight_clip": 0.3,
+            "rerank_weight_ollama": 0.7,
+            "percentile": 0.1
         }
     }
 

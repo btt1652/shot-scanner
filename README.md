@@ -127,9 +127,9 @@ decision_model_rerank = false
 ollama_endpoint = ["192.168.1.190", "localhost"]
 ollama_decision_model = ["d3:4b", "clef-flash"]
 rerank_threshold = 0.5
-rerank_weight_clip = 0.5
-rerank_weight_ollama = 0.5
-percentile = 0.0
+rerank_weight_clip = 0.3
+rerank_weight_ollama = 0.7
+percentile = 0.1
 ```
 
 ## Ollama endpoint resolution
@@ -162,7 +162,7 @@ Two filtering modes are available:
 Set a minimum similarity threshold (e.g. `--raw-floor 0.5`). Results below this are discarded. Since results are sorted descending, ranking stops early once similarity falls below this floor.
 
 **2. Percentile-based filtering**
-Keep only the top N% of frames by similarity, regardless of absolute score. Useful when you don't know what cosine similarity values to expect. Example: `--percentile 0.2` keeps only the top 20% (no `--use-percentile` needed).
+Keep only the top N% of frames by similarity, regardless of absolute score. Useful when you don't know what cosine similarity values to expect. Example: `--percentile 0.2` keeps only the top 20%.
 
 You can combine both: `--raw-floor 0.5 --percentile 0.2` keeps up to the top 20% but only if similarity is at least 0.5.
 
@@ -252,6 +252,8 @@ Flags:
 - `--video` - Path to original video file (required with --save-frames if not recorded in cache, or if video was moved)
 - `--decision-model-rerank` - Use local Ollama decision model to rerank top-K selected frames. Each frame is checked independently; results whose fused score is below `rerank_threshold` are discarded from match results.
 - `--rerank_threshold` - Threshold for the fused reranking score (default: 0.5). Results with score < threshold are discarded.
+- `--rerank_weight_clip` - Weight given to the CLIP similarity score in the fused reranking score (default: 0.3). CLI flag; also configurable via `rerank_weight_clip` in `config.toml`.
+- `--rerank_weight_ollama` - Weight given to the Ollama judgment score in the fused reranking score (default: 0.7). CLI flag; also configurable via `rerank_weight_ollama` in `config.toml`.
 - `--ollama_endpoint` - Ollama API endpoint (default: http://localhost:11434/v1/systemone)
 - `--ollama_model` - Ollama model name for decision validation. Config key: `ollama_decision_model`.
 

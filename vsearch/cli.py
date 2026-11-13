@@ -474,6 +474,8 @@ def main():
     p_search.add_argument("--video", "-vid", default=None, help="Path to original video file (required with --save-frames)")
     p_search.add_argument("--decision_model-rerank","-dmr", action="store_true", default=None, help="Use local Ollama decision model to rerank top results. Results failing the fused score threshold are discarded from match results.")
     p_search.add_argument("--rerank_threshold","-rt", type=float, default=None, help="Threshold for the fused reranking score (default: 0.5). Results with score < threshold are discarded.")
+    p_search.add_argument("--rerank_weight_clip","-rwc", type=float, default=None, help="Weight given to CLIP similarity in fused score (default: 0.3).")
+    p_search.add_argument("--rerank_weight_ollama","-rwo", type=float, default=None, help="Weight given to Ollama judgment in fused score (default: 0.7).")
     p_search.add_argument("--ollama_endpoint","-oe", default=None, help="Ollama API endpoint, or a comma-separated list of endpoints tried in order (default: [192.168.1.190, localhost])")
     p_search.add_argument("--ollama_model","-dm", default=None, help="Ollama decision model name(s), comma-separated fallback list tried in order for validation")
     p_search.set_defaults(func=cmd_search)
