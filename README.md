@@ -41,18 +41,21 @@ video_path → Extract frames (OpenCV) → Encode images to embeddings → Save 
 
 ### Search mode
 ```
-cache.npz + query (text/image) → Load embeddings → Encode query → Similarity search
-    → Top-k ranking → Optional frame extraction → Optional Ollama reranking
+cache.npz + query (text/image) → Load embeddings → Encode query → Raw cosine similarity
+    → Sort descending → raw_floor / percentile filter → Top-k cap
+    → Optional frame extraction → Optional Ollama reranking → Output
 ```
 - Loads cached embeddings and model
 - Encodes query (text/image) using same CLIP model
-- Computes raw cosine similarities, applies calibrated floor (`raw_floor`) or optional percentile cutoff
+- Computes **raw cosine similarity** (dot product of L2-normalized vectors; `[0, 1]` for CLIP)
+- Applies the calibrated floor (`raw_floor`) and/or optional percentile cutoff, then the `top_k` cap
 - Ranks by raw similarity (highest first)
 - **Frame extraction**: For each ranked result, extracts frame from cached `video_path`
-- **Reranking**: If `--decision_model_rerank` enabled, checks each frame with Ollama decision model
-  - Each frame is reranked independently using a fused score of CLIP similarity and Ollama's judgment
-  - Results whose fused score is below `rerank_threshold` are discarded
-  - Passing results are retained with their original timestamps and scores
+- **Reranking**: If `--decision_model_rerank` enabled, checks each remaining frame with the Ollama decision model **after** the CLIP ranking, filtering and top-k cap:
+  - Each frame is scored by Ollama and fused with its CLIP cosine similarity
+  - Fused score: `(cosine_similarity * rerank_weight_clip) + (ollama_score * rerank_weight_ollama)`
+  - Results are re-sorted by fused score; results whose fused score is below `rerank_threshold` are discarded
+  - Passing results are returned with their original timestamps and scores
   - Configurable via `rerank_threshold` in `config.toml` or `--decision-model-rerank` CLI flag
 
 ### Output formats
@@ -65,8 +68,8 @@ cache.npz + query (text/image) → Load embeddings → Encode query → Similari
       {
         "timestamp_seconds": 252.0,
         "timestamp_formatted": "04:12",
-        "similarity_score": 0.3125,
-        "normalized_score": 1.0
+        "score": 0.5123,
+        "normalized_score": 0.5123
       }
     ]
   }
@@ -88,7 +91,6 @@ Index-mode defaults (used when running `vsearch index`):
 - `output_dir` - Default output directory for `.npz` cache
 - `model` - CLIP model variant
 - `sample_rate` - Frame sampling interval in seconds
-- `md5` - MD5 hash of the source video for integrity validation at search time
 
 ### `[search]`
 Search-mode defaults (used when running `vsearch search`):
@@ -165,14 +167,36 @@ Keep only the top N% of frames by similarity, regardless of absolute score. Usef
 
 You can combine both: `--raw-floor 0.5 --use-percentile --percentile 0.2` keeps up to the top 20% but only if similarity is at least 0.5.
 
+### Top-k vs percentile
+
+These two controls are different, and are applied **after** `raw_floor`:
+
+| | `--top-k` | `--use-percentile --percentile X` |
+|---|---|---|
+| What it limits | A fixed **count** of results | A **fraction** of all indexed frames |
+| Known in advance? | Yes — you choose the exact number | No — depends on how many frames were indexed |
+| Example | `--top-k 10` → at most 10 results | `--percentile 0.2` → keep top 20% of all frames |
+| `-1` | No cap (default) | — |
+| `0` | No results | — |
+
+Order of operations for a search:
+1. Compute raw cosine similarity for every frame.
+2. Sort descending.
+3. Apply `raw_floor` and (if enabled) the percentile cutoff.
+4. Apply the `top_k` cap.
+5. (Optional) rerank the remaining frames with Ollama, then re-sort and apply `rerank_threshold`.
+
+So `top_k` is a **fixed-count cap** of the highest-scoring frames that already passed the other filters, while `percentile` filters by **share of the total frame set** (whose count you don't know up front).
+
 ### Reranking (Ollama decision model)
 
-When `decision_model_rerank` is enabled, the system:
-1. Retrieves the top `K` results using CLIP.
-2. Queries Ollama for a validation score for each of those `K` results.
-3. Calculates a **fused score**: `(CLIP_score * rerank_weight_clip) + (Ollama_score * rerank_weight_ollama)`.
-4. Reranks the top `K` results based on this fused score.
-5. Filters out any results where the fused score is below `rerank_threshold`.
+Reranking runs **last** — after the CLIP raw-cosine ranking, `raw_floor`/percentile filtering and the `top_k` cap. When `decision_model_rerank` is enabled, the system:
+1. Takes the frames remaining after step 4 above (CLIP-ranked, filtered, top-k capped).
+2. Extracts each frame and queries Ollama for a validation score (`ollama_score`, `[0, 1]`).
+3. Calculates a **fused score**: `(cosine_similarity * rerank_weight_clip) + (ollama_score * rerank_weight_ollama)`.
+   - The CLIP term is the frame's **raw cosine similarity** (the same value reported as `score`/`normalized_score`).
+4. Re-sorts these frames by the fused score (descending).
+5. Discards any results where the fused score is below `rerank_threshold`.
 
 This ensures that results that are visually strong but perhaps slightly less "certain" from the LLM still rank highly, while very high-confidence LLM matches move to the top.
 
@@ -247,12 +271,14 @@ When `--json` is specified, the application prints strictly valid JSON to stdout
     {
       "timestamp_seconds": 252.0,
       "timestamp_formatted": "04:12",
-      "similarity_score": 0.3125,
-      "normalized_score": 1.0
+      "score": 0.5123,
+      "normalized_score": 0.5123
     }
   ]
 }
 ```
+
+`score` is the raw cosine similarity (0.0–1.0). `normalized_score` now mirrors `score` (min‑max normalization was removed).
 
 ## Architecture
 
