@@ -315,7 +315,7 @@ def cmd_search(args):
     ollama_endpoint = cfg_val("ollama_endpoint", "ollama_endpoint")
     ollama_endpoint_fallback = cfg_val("ollama_endpoint_fallback", "ollama_endpoint_fallback")
     ollama_model = cfg_val("ollama_decision_model", "ollama_model")
-    decision_model_threshold = cfg_val("decision_model_threshold", "decision_model_threshold")
+    rerank_threshold = cfg_val("rerank_threshold", "rerank_threshold")
     rerank_weight_clip = cfg_val("rerank_weight_clip", "rerank_weight_clip")
     rerank_weight_ollama = cfg_val("rerank_weight_ollama", "rerank_weight_ollama")
 
