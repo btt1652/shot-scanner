@@ -105,8 +105,8 @@ Search-mode defaults (used when running `vsearch search`):
 - `rerank_threshold` - Threshold for the fused reranking score
 - `rerank_weight_clip` - Weight given to the CLIP similarity score (0.0 to 1.0) during reranking
 - `rerank_weight_ollama` - Weight given to the Ollama judgment score (0.0 to 1.0) during reranking
-- `use_percentile` - Enable percentile-based filtering (keep top N% by raw similarity)
-- `percentile` - Percentile cutoff (0.0 to 1.0, e.g. 0.2 keeps top 20%)
+- `percentile` - Percentile cutoff (0.0 to 1.0, e.g. 0.2 keeps top 20%). Setting this automatically enables percentile filtering.
+- `--use-percentile` - Deprecated; keep for backward compatibility but no longer needed.
 
 **CLI flags always override config values when specified.** If a flag is not given, the config value is used. If neither is set, the built-in default applies.
 
@@ -163,16 +163,16 @@ Two filtering modes are available:
 **1. Calibrated floor (`raw_floor`) — recommended**
 Set a minimum similarity threshold (e.g. `--raw-floor 0.5`). Results below this are discarded. Since results are sorted descending, ranking stops early once similarity falls below this floor.
 
-**2. Percentile-based filtering (`use_percentile` + `percentile`)**
-Keep only the top N% of frames by similarity, regardless of absolute score. Useful when you don't know what cosine similarity values to expect. Example: `--use-percentile --percentile 0.2` keeps only the top 20%.
+**2. Percentile-based filtering**
+Keep only the top N% of frames by similarity, regardless of absolute score. Useful when you don't know what cosine similarity values to expect. Example: `--percentile 0.2` keeps only the top 20% (no `--use-percentile` needed).
 
-You can combine both: `--raw-floor 0.5 --use-percentile --percentile 0.2` keeps up to the top 20% but only if similarity is at least 0.5.
+You can combine both: `--raw-floor 0.5 --percentile 0.2` keeps up to the top 20% but only if similarity is at least 0.5.
 
 ### Top-k vs percentile
 
 These two controls are different, and are applied **after** `raw_floor`:
 
-| | `--top-k` | `--use-percentile --percentile X` |
+| | `--top-k` | `--percentile X` |
 |---|---|---|
 | What it limits | A fixed **count** of results | A **fraction** of all indexed frames |
 | Known in advance? | Yes — you choose the exact number | No — depends on how many frames were indexed |
@@ -248,8 +248,8 @@ Flags:
 - `-k, --top-k` - Maximum number of top results to return (default: all). Use `0` for no results, `-1` for unlimited.
 - `--json` - Output results in strict JSON format to stdout for AI agent consumption
 - `--raw-floor` - Absolute calibrated cosine similarity floor (default: 0.25). Results below this similarity are discarded.
-- `--use-percentile` - Enable percentile-based filtering (keep top percentile of frames by similarity)
-- `--percentile` - Percentile cutoff (0.0 to 1.0, e.g. 0.2 keeps top 20%)
+- `--percentile` - Percentile cutoff (0.0 to 1.0, e.g. 0.2 keeps top 20%). Setting this enables percentile filtering automatically.
+- `--use-percentile` - Deprecated; keep for backward compatibility but no longer needed.
 - `--verbose, -v` - Enable verbose progress output
 - `--save-frames, -f` - Directory to save matched frame images as `{cache_name}_{seconds_milliseconds}_{score}_{norm_score}.jpg` (e.g., `{cache_name}_252.300_{score}_{norm_score}.jpg`)
 - `--video` - Path to original video file (required with --save-frames if not recorded in cache, or if video was moved)

@@ -318,6 +318,9 @@ def cmd_search(args):
     rerank_weight_ollama = cfg_val("rerank_weight_ollama", "rerank_weight_ollama")
     use_percentile = cfg_val("use_percentile", "use_percentile")
     percentile = cfg_val("percentile", "percentile")
+    # --percentile X alone is sufficient; it implies percentile mode.
+    if percentile is not None and percentile > 0.0:
+        use_percentile = True
 
     # Print config values in verbose mode
     if verbose:
@@ -468,8 +471,8 @@ def main():
     p_search.add_argument("--top-k", "-k", type=int, default=None, help="Maximum number of top results to return (default: all)")
     p_search.add_argument("--json", action="store_true", default=None, help="Output results in strict JSON format")
     p_search.add_argument("--raw-floor","-rf", type=float, default=None, help="Absolute noise floor for raw similarity (default: 0.25)")
-    p_search.add_argument("--use-percentile", action="store_true", default=None, help="Enable percentile-based filtering (keep top percentile of frames by similarity)")
-    p_search.add_argument("--percentile", type=float, default=None, help="Percentile cutoff (0.0-1.0, e.g., 0.2 keeps top 20%% of frames)")
+    p_search.add_argument("--percentile", "-p", type=float, default=None, help="Percentile cutoff (0.0-1.0, e.g., 0.2 keeps top 20%% of frames). Setting this enables percentile filtering automatically.")
+    p_search.add_argument("--use-percentile", action="store_true", default=None, help="(Deprecated) Enable percentile-based filtering. Now redundant; use --percentile instead.")
     p_search.add_argument("--verbose", "-v", action="store_true", default=None, help="Enable verbose progress output")
     p_search.add_argument("--save-frames", "-sf", default=None, help="Directory to save matched frame images as {cache_name}_{HHMMSS}_{score}_{norm_score}.jpg")
     p_search.add_argument("--video", "-vid", default=None, help="Path to original video file (required with --save-frames)")
