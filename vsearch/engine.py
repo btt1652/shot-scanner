@@ -73,6 +73,9 @@ class VideoSearchEngine:
         frame_index = 0
         stride = max(1, int(fps * sample_rate_sec))
 
+        batch_images = []
+        batch_timestamps = []
+
         while True:
             ret, frame_bgr = cap.read()
             if not ret:
@@ -81,12 +84,39 @@ class VideoSearchEngine:
                 rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
                 pil_img = Image.fromarray(rgb)
                 ts = frame_index / fps
-                embeddings_list.append(self._encode_image(pil_img))
-                timestamps_list.append(ts)
+                batch_images.append(pil_img)
+                batch_timestamps.append(ts)
+                # encode when batch is full
+                if len(batch_images) >= batch_size:
+                    inputs = self.processor(images=batch_images, return_tensors="pt").to(self.device)
+                    with torch.no_grad():
+                        outputs = self.model.get_image_features(**inputs)
+                    vecs = outputs.pooler_output.cpu().numpy().astype(np.float32)
+                    norms = np.linalg.norm(vecs, axis=1)
+                    norms[norms == 0] = 1.0
+                    vecs = vecs / norms[:, np.newaxis]
+                    for i, v in enumerate(vecs):
+                        embeddings_list.append(v)
+                        timestamps_list.append(batch_timestamps[i])
+                    batch_images = []
+                    batch_timestamps = []
             frame_index += 1
             if verbose and frame_index % 1000 == 0:
                 pct = (frame_index / total_video_frames * 100) if total_video_frames > 0 else 0
                 print(f"  {frame_index}/{total_video_frames} frames ({pct:.1f}%), encoded {len(embeddings_list)} keyframes...", file=_sys.stderr, flush=True)
+
+        # encode remaining frames in the last partial batch
+        if batch_images:
+            inputs = self.processor(images=batch_images, return_tensors="pt").to(self.device)
+            with torch.no_grad():
+                outputs = self.model.get_image_features(**inputs)
+            vecs = outputs.pooler_output.cpu().numpy().astype(np.float32)
+            norms = np.linalg.norm(vecs, axis=1)
+            norms[norms == 0] = 1.0
+            vecs = vecs / norms[:, np.newaxis]
+            for i, v in enumerate(vecs):
+                embeddings_list.append(v)
+                timestamps_list.append(batch_timestamps[i])
 
         cap.release()
 
