@@ -145,7 +145,6 @@ class VideoSearchEngine:
                 "timestamp_seconds": ts,
                 "timestamp_formatted": f"{int(ts)//60:02d}:{int(ts)%60:02d}",
                 "score": raw_score,
-                "normalized_score": raw_score,
             })
             if top_k is not None and top_k >= 0 and len(results) >= top_k:
                 break

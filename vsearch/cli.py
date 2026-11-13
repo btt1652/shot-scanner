@@ -62,7 +62,7 @@ def _format_results_text(results):
     for r in results:
         lines.append(
             f"{r['timestamp_seconds']:.1f}s  {r['timestamp_formatted']}  "
-            f"sim={r['score']:.4f}  norm={r['normalized_score']:.4f}"
+            f"sim={r['score']:.4f}"
         )
     return "\n".join(lines)
 
@@ -131,7 +131,7 @@ def _save_matched_frames(results, npz_name, video_path, output_dir, verbose=Fals
     for r in results:
         ts = r["timestamp_seconds"]
         ts_str = f"{ts:.3f}".replace(".", "_")  # e.g., 252.300 -> 252_300
-        out_path = os.path.join(output_dir, f"{npz_name}_{ts_str}_{r['score']:.4f}_{r['normalized_score']:.4f}.jpg")
+        out_path = os.path.join(output_dir, f"{npz_name}_{ts_str}_{r['score']:.4f}.jpg")
         if _extract_frame_at(video_path, ts, out_path):
             saved += 1
             frame_paths.append(out_path)
@@ -279,7 +279,7 @@ def _rerank_results_with_ollama(results, query, frame_b64s, npz_name, model_id="
             continue
 
         # Fused score calculation
-        fused_score = (r['normalized_score'] * weight_clip) + (valid_score * weight_ollama)
+        fused_score = (r['score'] * weight_clip) + (valid_score * weight_ollama)
         scored_results.append({**r, "fused_score": fused_score, "ollama_score": valid_score})
 
     # Rerank the results based on fused score

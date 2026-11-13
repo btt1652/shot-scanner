@@ -68,8 +68,7 @@ cache.npz + query (text/image) → Load embeddings → Encode query → Raw cosi
       {
         "timestamp_seconds": 252.0,
         "timestamp_formatted": "04:12",
-        "score": 0.5123,
-        "normalized_score": 0.5123
+        "score": 0.5123
       }
     ]
   }
@@ -194,7 +193,7 @@ Reranking runs **last** — after the CLIP raw-cosine ranking, `raw_floor`/perce
 1. Takes the frames remaining after step 4 above (CLIP-ranked, filtered, top-k capped).
 2. Extracts each frame and queries Ollama for a validation score (`ollama_score`, `[0, 1]`).
 3. Calculates a **fused score**: `(cosine_similarity * rerank_weight_clip) + (ollama_score * rerank_weight_ollama)`.
-   - The CLIP term is the frame's **raw cosine similarity** (the same value reported as `score`/`normalized_score`).
+   - The CLIP term is the frame's **raw cosine similarity** (the same value reported as `score`).
 4. Re-sorts these frames by the fused score (descending).
 5. Discards any results where the fused score is below `rerank_threshold`.
 
@@ -271,14 +270,13 @@ When `--json` is specified, the application prints strictly valid JSON to stdout
     {
       "timestamp_seconds": 252.0,
       "timestamp_formatted": "04:12",
-      "score": 0.5123,
-      "normalized_score": 0.5123
+      "score": 0.5123
     }
   ]
 }
 ```
 
-`score` is the raw cosine similarity (0.0–1.0). `normalized_score` now mirrors `score` (min‑max normalization was removed).
+`score` is the raw cosine similarity (0.0–1.0). Min‑max normalization was removed entirely.
 
 ## Architecture
 
