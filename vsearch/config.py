@@ -10,6 +10,7 @@ Uses tomllib (Python 3.11+) for reading TOML files.
 """
 
 import os
+import sys
 import tomllib
 from pathlib import Path
 
@@ -26,7 +27,7 @@ def default_config() -> dict:
     return {
         "index": {
             "output_dir": ".",
-            "model": "openai/clip-vit-base-patch32",
+            "model": "openai/clip-vit-large-patch14",
             "sample_rate": 1
         },
         "search": {
@@ -36,10 +37,12 @@ def default_config() -> dict:
             "json_output": False,
             "save_frames": None,
             "video": None,
-            "decision_model_validate": False,
+            "decision_model_rerank": False,
             "ollama_endpoint": ["192.168.1.190", "localhost"],
             "ollama_decision_model": ["clef-flash", "d3:4b"],
-            "decision_model_threshold": 0.5
+            "rerank_threshold": 0.5,
+            "rerank_weight_clip": 0.5,
+            "rerank_weight_ollama": 0.5
         }
     }
 
@@ -58,7 +61,7 @@ def load_config() -> dict:
                     merged.update(values)
                     config[section] = merged
         except Exception as e:
-            print(f"Warning: Could not parse config file {config_path}: {e}")
+            print(f"Warning: Could not parse config file {config_path}: {e}", file=sys.stderr)
 
     return config
 

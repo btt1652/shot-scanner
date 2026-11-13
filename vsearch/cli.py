@@ -210,13 +210,14 @@ def resolve_ollama_endpoint(endpoints, verbose=False):
     return _normalize_ollama_endpoint(endpoints[0])
 
 
-def _validate_results_with_ollama(results, query, frame_b64s, npz_name, model_id="clef-flash", ollama_endpoint="http://localhost:11434/v1/systemone", threshold=0.5, verbose=False):
+def _rerank_results_with_ollama(results, query, frame_b64s, npz_name, model_id="clef-flash", ollama_endpoint="http://localhost:11434/v1/systemone", threshold=0.5, verbose=False, weight_clip=0.5, weight_ollama=0.5):
     """Use Ollama's decision capability to validate frames individually.
 
     Every frame in `frame_b64s` is validated against the Ollama decision model.
     `model_id` can be a single model name or a list/comma-separated string;
     models are tried in order per frame until one succeeds.
-    Only frames whose result passes the threshold are kept; failing frames are
+    The results are then reranked using a fused score of CLIP similarity and Ollama's judgment.
+    Only frames whose fused score passes the threshold are kept; failing frames are
     discarded while passing frames are retained with their original metadata.
     The returned list preserves the original result order for passing frames only.
     """
@@ -229,7 +230,7 @@ def _validate_results_with_ollama(results, query, frame_b64s, npz_name, model_id
     if not model_ids:
         model_ids = ["clef-flash"]
 
-    passed_results = []
+    scored_results = []
     frame_iter = iter(frame_b64s)
 
     for r in results:
@@ -268,20 +269,33 @@ def _validate_results_with_ollama(results, query, frame_b64s, npz_name, model_id
 
                 valid_score = res_json["answers"]["is_valid"]["noul"]
                 print(f"Ollama decision score for frame at {r['timestamp_seconds']:.1f}s: {valid_score:.4f}", file=sys.stderr)
-
-                if valid_score >= threshold:
-                    passed_results.append(r)
-                else:
-                    print(f"Frame at {r['timestamp_seconds']:.1f}s did NOT pass Ollama validation (score: {valid_score:.4f} < threshold: {threshold:.2f}). Discarded.", file=sys.stderr)
                 break
             except Exception as e:
                 last_err = e
                 if verbose:
                     print(f"Model '{model}' failed for frame at {r['timestamp_seconds']:.1f}s: {e}", file=sys.stderr)
+        
         if valid_score is None:
             print(f"Error validating frame at {r['timestamp_seconds']:.1f}s: {last_err}. Discarded.", file=sys.stderr)
+            continue
 
-    return passed_results
+        # Fused score calculation
+        fused_score = (r['normalized_score'] * weight_clip) + (valid_score * weight_ollama)
+        scored_results.append({**r, "fused_score": fused_score, "ollama_score": valid_score})
+
+    # Rerank the results based on fused score
+    scored_results.sort(key=lambda x: x["fused_score"], reverse=True)
+
+    # Filter by threshold
+    final_results = []
+    for res in scored_results:
+        if res["fused_score"] >= threshold:
+            # Remove the fused_score and ollama_score keys before returning to maintain original structure
+            final_results.append({k: v for k, v in res.items() if k not in ["fused_score", "ollama_score"]})
+        else:
+            print(f"Frame at {res['timestamp_seconds']:.1f}s did NOT pass reranked threshold (fused score: {res['fused_score']:.4f} < threshold: {threshold:.2f}). Discarded.", file=sys.stderr)
+
+    return final_results
 
 
 def cmd_search(args):
@@ -297,11 +311,13 @@ def cmd_search(args):
     json_output = cfg_val("json_output", "json")
     save_frames = cfg_val("save_frames", "save_frames")
     video_path = cfg_val("video", "video")
-    validate = cfg_val("decision_model_validate", "decision_model_validate")
+    rerank = cfg_val("decision_model_rerank", "decision_model_rerank")
     ollama_endpoint = cfg_val("ollama_endpoint", "ollama_endpoint")
     ollama_endpoint_fallback = cfg_val("ollama_endpoint_fallback", "ollama_endpoint_fallback")
     ollama_model = cfg_val("ollama_decision_model", "ollama_model")
     decision_model_threshold = cfg_val("decision_model_threshold", "decision_model_threshold")
+    rerank_weight_clip = cfg_val("rerank_weight_clip", "rerank_weight_clip")
+    rerank_weight_ollama = cfg_val("rerank_weight_ollama", "rerank_weight_ollama")
 
     # Print config values in verbose mode
     if verbose:
@@ -392,7 +408,7 @@ def cmd_search(args):
         sys.exit(2)
 
     # Perform Ollama validation first (so failing frames are discarded before saving)
-    if validate:
+    if rerank:
         # Resolve Ollama endpoint: first reachable from the list (primary first, fallback second)
         ollama_endpoint = resolve_ollama_endpoint(ollama_endpoint, verbose=verbose)
         ollama_models = _as_list(ollama_model)
@@ -401,14 +417,15 @@ def cmd_search(args):
         if verbose:
             print(f"Ollama models: {ollama_models}", file=sys.stderr, flush=True)
         if not video_path:
-            print("--video is required when using --decision-model-validate", file=sys.stderr)
+            print("--video is required when using --decision-model-rerank", file=sys.stderr)
             sys.exit(2)
 
         # Extract frames lazily and validate top-down
         frame_b64_gen = _extract_frames_lazy(results, video_path, verbose)
         if verbose:
-            print(f"Extracting frames in memory for validation...", file=sys.stderr)
-        results = _validate_results_with_ollama(results, query, frame_b64_gen, npz_name, model_id=ollama_model, ollama_endpoint=ollama_endpoint, threshold=decision_model_threshold, verbose=verbose)
+            print(f"Extracting frames in memory for reranking...", file=sys.stderr)
+        results = _rerank_results_with_ollama(results, query, frame_b64_gen, npz_name, model_id=ollama_model, ollama_endpoint=ollama_endpoint, threshold=decision_model_threshold, verbose=verbose, weight_clip=rerank_weight_clip, weight_ollama=rerank_weight_ollama)
+
 
     # Save frames for remaining (validated) results only
     if save_frames:
@@ -454,10 +471,10 @@ def main():
     p_search.add_argument("--verbose", "-v", action="store_true", default=None, help="Enable verbose progress output")
     p_search.add_argument("--save-frames", "-sf", default=None, help="Directory to save matched frame images as {cache_name}_{HHMMSS}_{score}_{norm_score}.jpg")
     p_search.add_argument("--video", "-vid", default=None, help="Path to original video file (required with --save-frames)")
-    p_search.add_argument("--decision-model-validate","-dmv", action="store_true", default=None, help="Use local Ollama decision model to validate top results. Results failing validation are discarded from match results.")
-    p_search.add_argument("--decision-model-threshold","-dmt", type=float, default=None, help="Ollama decision model threshold (default: 0.5). Results with score < threshold are discarded.")
-    p_search.add_argument("--ollama-endpoint","-oe", default=None, help="Ollama API endpoint, or a comma-separated list of endpoints tried in order (default: [192.168.1.190, localhost])")
-    p_search.add_argument("--ollama-model","-dm", default=None, help="Ollama decision model name(s), comma-separated fallback list tried in order for validation")
+    p_search.add_argument("--decision_model-rerank","-dmr", action="store_true", default=None, help="Use local Ollama decision model to rerank top results. Results failing the fused score threshold are discarded from match results.")
+    p_search.add_argument("--rerank_threshold","-rt", type=float, default=None, help="Threshold for the fused reranking score (default: 0.5). Results with score < threshold are discarded.")
+    p_search.add_argument("--ollama_endpoint","-oe", default=None, help="Ollama API endpoint, or a comma-separated list of endpoints tried in order (default: [192.168.1.190, localhost])")
+    p_search.add_argument("--ollama_model","-dm", default=None, help="Ollama decision model name(s), comma-separated fallback list tried in order for validation")
     p_search.set_defaults(func=cmd_search)
 
     args = parser.parse_args()

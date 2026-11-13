@@ -42,18 +42,18 @@ video_path → Extract frames (OpenCV) → Encode images to embeddings → Save 
 ### Search mode
 ```
 cache.npz + query (text/image) → Load embeddings → Encode query → Similarity search
-    → Top-k ranking → Optional frame extraction → Optional Ollama validation
+    → Top-k ranking → Optional frame extraction → Optional Ollama reranking
 ```
 - Loads cached embeddings and model
 - Encodes query (text/image) using same CLIP model
 - Computes similarities, applies thresholds (`raw_floor`, `norm_threshold`)
 - Ranks by similarity (highest first)
 - **Frame extraction**: For each ranked result, extracts frame from cached `video_path`
-- **Validation**: If `--decision-model-validate` enabled, checks each frame with Ollama decision model
-  - Each frame is validated independently against the query
-  - Results that fail validation (score < `decision_model_threshold`) are discarded
+- **Reranking**: If `--decision_model_rerank` enabled, checks each frame with Ollama decision model
+  - Each frame is reranked independently using a fused score of CLIP similarity and Ollama's judgment
+  - Results whose fused score is below `rerank_threshold` are discarded
   - Passing results are retained with their original timestamps and scores
-  - Configurable via `decision_model_threshold` in `config.toml` or `--decision-model-threshold` CLI flag
+  - Configurable via `rerank_threshold` in `config.toml` or `--decision-model-rerank` CLI flag
 
 ### Output formats
 - **Default**: Human-readable table to stdout
@@ -98,10 +98,12 @@ Search-mode defaults (used when running `vsearch search`):
 - `json_output` - Output results in JSON format
 - `save_frames` - Directory to save matched frame images
 - `video` - Path to original video file
-- `decision_model_validate` - Enable Ollama decision model validation
+- `decision_model_rerank` - Enable Ollama decision model reranking
 - `ollama_endpoint` - Ollama API endpoint (first priority). Accepts a single URL or a list of endpoints tried in order until one is reachable. Bare hosts are accepted too, e.g. `192.168.1.190` or `localhost:11434`.
-- `ollama_decision_model` - Ollama decision model name, or a list of model names tried in order (primary first, then fallbacks) if a model call fails
-- `decision_model_threshold` - Validation score threshold
+- `ollama_decision_model` - Ollama decision model name, or a list of model names tried in order (primary first, fallback second) if a model call fails
+- `rerank_threshold` - Threshold for the fused reranking score
+- `rerank_weight_clip` - Weight given to the CLIP similarity score (0.0 to 1.0) during reranking
+- `rerank_weight_ollama` - Weight given to the Ollama judgment score (0.0 to 1.0) during reranking
 
 **CLI flags always override config values when specified.** If a flag is not given, the config value is used. If neither is set, the built-in default applies.
 
@@ -119,15 +121,17 @@ norm_threshold = 0.75
 json_output = false
 save_frames = ""
 video = ""
-decision_model_validate = false
+decision_model_rerank = false
 ollama_endpoint = ["192.168.1.190", "localhost"]
 ollama_decision_model = ["d3:4b", "clef-flash"]
-decision_model_threshold = 0.8
+rerank_threshold = 0.5
+rerank_weight_clip = 0.5
+rerank_weight_ollama = 0.5
 ```
 
 ## Ollama endpoint resolution
 
-When `decision_model_validate` is enabled, the Ollama endpoint is resolved at search time:
+When `decision_model_rerank` is enabled, the Ollama endpoint is resolved at search time:
 
 1. Each endpoint in `ollama_endpoint` is tried in order (primary first).
 2. The first reachable endpoint is used for validation.
@@ -142,6 +146,17 @@ ollama_endpoint = ["192.168.1.190", "localhost"]
 Bare hosts (with or without a port) are normalized to `http://<host>:11434/v1/systemone`. The same list can be passed on the CLI with `--ollama-endpoint 192.168.1.190,localhost`.
 
 The decision model (`ollama_decision_model`) also accepts a list and works the same way at validation time: each frame is sent to the first model; if that model call fails (e.g. model not loaded on the server), the next model is tried for that frame before the frame is discarded. Pass a fallback list on the CLI with `--ollama-model d3:4b,clef-flash`.
+
+## Reranking Logic
+
+When `decision_model_rerank` is enabled, the system:
+1. Retrieves the top `K` results using CLIP.
+2. Queries Ollama for a validation score for each of those `K` results.
+3. Calculates a **fused score**: `(CLIP_score * rerank_weight_clip) + (Ollama_score * rerank_weight_ollama)`.
+4. Reranks the top `K` results based on this fused score.
+5. Filters out any results where the fused score is below `rerank_threshold`.
+
+This ensures that results that are visually strong but perhaps slightly less "certain" from the LLM still rank highly, while very high-confidence LLM matches move to the top.
 
 ## Model Variants
 
@@ -193,12 +208,12 @@ Flags:
 - `--verbose, -v` - Enable verbose progress output
 - `--save-frames, -f` - Directory to save matched frame images as `{cache_name}_{seconds_milliseconds}_{score}_{norm_score}.jpg` (e.g., `{cache_name}_252.300_{score}_{norm_score}.jpg`)
 - `--video` - Path to original video file (required with --save-frames if not recorded in cache, or if video was moved)
-- `--decision-model-validate` - Use local Ollama decision model to validate top-K selected frames. Each frame is checked independently; results that fail validation are discarded from match results.
-- `--decision-model-threshold` - Ollama decision model threshold (default: 0.5). Results with score < threshold are discarded.
-- `--ollama-endpoint` - Ollama API endpoint (default: http://localhost:11434/v1/systemone)
-- `--ollama-model` - Ollama model name for decision validation. Config key: `ollama_decision_model`.
+- `--decision-model-rerank` - Use local Ollama decision model to rerank top-K selected frames. Each frame is checked independently; results whose fused score is below `rerank_threshold` are discarded from match results.
+- `--rerank_threshold` - Threshold for the fused reranking score (default: 0.5). Results with score < threshold are discarded.
+- `--ollama_endpoint` - Ollama API endpoint (default: http://localhost:11434/v1/systemone)
+- `--ollama_model` - Ollama model name for decision validation. Config key: `ollama_decision_model`.
 
-**Auto video path:** If `--save-frames` or `--decision-model-validate` is used, vsearch looks for `video_path` stored in the `.npz` cache from the indexing step. If the cached video path exists, it is used automatically — you don't need to pass `--video`. If the video was moved and the cached path no longer exists, vsearch exits with an error and you must provide `--video` with the new path.
+**Auto video path:** If `--save_frames` or `--decision_model_rerank` is used, vsearch looks for `video_path` stored in the `.npz` cache from the indexing step. If the cached video path exists, it is used automatically — you don't need to pass `--video`. If the video was moved and the cached path no longer exists, vsearch exits with an error and you must provide `--video` with the new path.
 
 **MD5 integrity check:** If `--video` is provided, vsearch verifies its MD5 hash against the `md5` field stored in the cache. If they do not match, vsearch exits with an error.
 
@@ -227,5 +242,3 @@ The tool follows a two-phase lifecycle:
 1. **Indexing phase** (`vsearch index`): Extracts frames at the specified sample rate, encodes each frame with CLIP, L2-normalizes the feature vectors, and saves them into a compressed `.npz` archive alongside the original timestamps, model ID, and video path.
 
 2. **Query phase** (`vsearch search`): Loads the cached embeddings, auto-detects the CLIP model from the cache, encodes the query (text or image) with the same CLIP model, computes cosine similarity via dot product, applies min-max normalization and dual-threshold filtering (normalized >= threshold AND raw >= floor), sorts by score descending, and returns the top-k matching timestamps.
-
-
