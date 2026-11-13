@@ -254,8 +254,8 @@ def _rerank_results_with_ollama(results, query, frame_b64s, npz_name, model_id="
                 }
             }
 
-            if verbose:
-                print(f"Ollama request for frame at {r['timestamp_seconds']:.1f}s (model: {model})", file=sys.stderr)
+            # if verbose:
+            #     print(f"Ollama request for frame at {r['timestamp_seconds']:.1f}s (model: {model})", file=sys.stderr)
 
             try:
                 req = urllib.request.Request(
@@ -267,7 +267,8 @@ def _rerank_results_with_ollama(results, query, frame_b64s, npz_name, model_id="
                     res_json = json.loads(response.read().decode("utf-8"))
 
                 valid_score = res_json["answers"]["is_valid"]["noul"]
-                print(f"Ollama decision score for frame at {r['timestamp_seconds']:.1f}s: {valid_score:.4f}", file=sys.stderr)
+                if verbose:
+                    print(f"Ollama decision score for frame at {r['timestamp_seconds']:.1f}s: {valid_score:.4f}", file=sys.stderr)
                 break
             except Exception as e:
                 last_err = e
@@ -291,8 +292,8 @@ def _rerank_results_with_ollama(results, query, frame_b64s, npz_name, model_id="
         if res["fused_score"] >= threshold:
             # Remove the fused_score and ollama_score keys before returning to maintain original structure
             final_results.append({k: v for k, v in res.items() if k not in ["fused_score", "ollama_score"]})
-        else:
-            print(f"Frame at {res['timestamp_seconds']:.1f}s did NOT pass reranked threshold (fused score: {res['fused_score']:.4f} < threshold: {threshold:.2f}). Discarded.", file=sys.stderr)
+        elif verbose:
+                print(f"Frame at {res['timestamp_seconds']:.1f}s did NOT pass reranked threshold (fused score: {res['fused_score']:.4f} < threshold: {threshold:.2f}). Discarded.", file=sys.stderr)
 
     return final_results
 
@@ -306,8 +307,8 @@ def cmd_search(args):
     top_k = cfg_val("top_k", "top_k")
     raw_floor = cfg_val("raw_floor", "raw_floor")
     json_output = cfg_val("json_output", "json")
-    verbose = bool(getattr(args, "verbose", False)) and not json_output
     save_frames = cfg_val("save_frames", "save_frames")
+    verbose = bool(getattr(args, "verbose", False)) and not json_output
     video_path = cfg_val("video", "video")
     rerank = cfg_val("decision_model_rerank", "decision_model_rerank")
     ollama_endpoint = cfg_val("ollama_endpoint", "ollama_endpoint")
@@ -323,7 +324,7 @@ def cmd_search(args):
         _models = _as_list(ollama_model)
         pct_str = f", percentile={percentile:.2f}" if percentile and percentile > 0.0 else ""
         print(f"Config: top_k={top_k}, raw_floor={raw_floor:.2f}, json_output={json_output}{pct_str}", file=sys.stderr)
-        print(f"        save_frames={save_frames}, video={video_path}, rerank={rerank}, ollama_endpoint={_eps}, ollama_model={_models}, rerank_threshold={rerank_threshold}", file=sys.stderr)
+        print(f"        save_frames={save_frames}, video={video_path}, rerank={rerank}, ollama_endpoint={_eps}, ollama_model={_models}, rerank_threshold={rerank_threshold}, rerank_weight_clip={rerank_weight_clip:.2f}, rerank_weight_ollama={rerank_weight_ollama:.2f}", file=sys.stderr)
 
     data = np.load(args.cache, allow_pickle=False)
     embeddings = data["embeddings"]
