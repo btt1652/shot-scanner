@@ -17,18 +17,16 @@ from .config import load_config, get_config_value
 
 def cmd_index(args):
     cfg = load_config()
-    verbose = bool(getattr(args, "verbose", False))
     model = get_config_value(cfg, "index", "model", getattr(args, "model", None))
     sample_rate = get_config_value(cfg, "index", "sample_rate", getattr(args, "sample_rate", None))
     batch_size = get_config_value(cfg, "index", "batch_size", getattr(args, "batch_size", BATCH_SIZE))
     engine = VideoSearchEngine(model_id=model)
 
-    # Print config values in verbose mode
-    if verbose:
-        print(f"Config: model={model}, sample_rate={sample_rate}s, batch_size={batch_size}", file=sys.stderr)
+    # Print config values (always)
+    print(f"Config: model={model}, sample_rate={sample_rate}s, batch_size={batch_size}", file=sys.stderr)
 
     embeddings, timestamps = engine.extract_and_encode(
-        args.video, sample_rate, batch_size, verbose=verbose
+        args.video, sample_rate, batch_size
     )
 
     # Compute MD5 of the source video for integrity checking
@@ -308,7 +306,7 @@ def cmd_search(args):
     raw_floor = cfg_val("raw_floor", "raw_floor")
     json_output = cfg_val("json_output", "json")
     save_frames = cfg_val("save_frames", "save_frames")
-    verbose = bool(getattr(args, "verbose", False)) and not json_output
+    verbose = not json_output
     video_path = cfg_val("video", "video")
     rerank = cfg_val("decision_model_rerank", "decision_model_rerank")
     ollama_endpoint = cfg_val("ollama_endpoint", "ollama_endpoint")
@@ -504,7 +502,7 @@ def main():
     p_index.add_argument("--sample-rate", "-r", type=int, default=None, help="Frame sampling interval in seconds (default: 1)")
     p_index.add_argument("--batch-size", "-bs", type=int, default=None, help="Batch size for frame encoding during indexing (default: 32)")
     p_index.add_argument("--model", "-m",default=None, help="CLIP model variant (default: openai/clip-vit-base-patch32)")
-    p_index.add_argument("--verbose", "-v", action="store_true", default=None, help="Enable verbose progress output")
+    
     p_index.set_defaults(func=cmd_index)
 
     p_search = sub.add_parser("search", help="Query a pre-computed cache")
@@ -515,8 +513,8 @@ def main():
     p_search.add_argument("--json", action="store_true", default=None, help="Output results in strict JSON format")
     p_search.add_argument("--raw-floor", "-rf", type=float, default=None, help="Absolute noise floor for raw similarity (default: 0.25)")
     p_search.add_argument("--percentile", "-p", type=float, default=None, help="Percentile cutoff (0.0-1.0, e.g., 0.2 keeps top 20%% of frames). Setting this enables percentile filtering automatically.")
-    p_search.add_argument("--verbose", "-v", action="store_true", default=None, help="Enable verbose progress output")
-    p_search.add_argument("--save_frames", "-sf", default=None, help="Directory to save matched frame images as {cache_name}_{HHMMSS}_{score}_{norm_score}.jpg")
+    
+    p_search.add_argument("--save_frames", "-sf", default=None, help="Directory to save matched frame images as {cache_name}_{HHMMSS}_{score}.jpg")
     p_search.add_argument("--video", "-vid", default=None, help="Path to original video file (required with --save-frames)")
     p_search.add_argument("--decision_model-rerank","-dmr", action="store_true", default=None, help="Use local Ollama decision model to rerank top results. Results failing the fused score threshold are discarded from match results.")
     p_search.add_argument("--rerank_threshold","-rt", type=float, default=None, help="Threshold for the fused reranking score (default: 0.5). Results with score < threshold are discarded.")

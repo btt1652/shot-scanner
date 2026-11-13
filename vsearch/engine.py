@@ -21,14 +21,13 @@ class VideoSearchEngine:
         self.processor = CLIPProcessor.from_pretrained(model_id)
         self.model = CLIPModel.from_pretrained(model_id).to(self.device)
 
-    def _load_model(self, model_id, verbose=False):
+    def _load_model(self, model_id):
         """Load a different CLIP model variant."""
         from transformers import CLIPModel, CLIPProcessor
         self.processor = CLIPProcessor.from_pretrained(model_id)
         self.model = CLIPModel.from_pretrained(model_id).to(self.device)
         self.model_id = model_id
-        if verbose:
-            print(f"Loaded model: {model_id}", file=sys.stderr, flush=True)
+        print(f"Loaded model: {model_id}", file=sys.stderr, flush=True)
 
     def _encode_image(self, img):
         """Encode a single PIL image -> L2-normalized feature vector."""
@@ -47,15 +46,15 @@ class VideoSearchEngine:
         norm = np.linalg.norm(vec)
         return vec / norm if norm > 0 else vec
 
-    def extract_and_encode(self, video_path, sample_rate_sec=1, batch_size=BATCH_SIZE, verbose=False, model_id=None):
+    def extract_and_encode(self, video_path, sample_rate_sec=1, batch_size=BATCH_SIZE, model_id=None):
         """Extract frames via OpenCV and return L2-normalized image embeddings + timestamps.
 
         Streams frames one-at-a-time so very long videos don't exhaust memory.
-        Progress is written to stderr for easy monitoring (only when verbose=True).
+        Progress is written to stderr for easy monitoring.
         """
         import sys as _sys
         if model_id is not None:
-            self._load_model(model_id, verbose=verbose)
+            self._load_model(model_id)
         cap = cv2.VideoCapture(video_path)
         if not cap.isOpened():
             raise IOError(f"Cannot open video file: {video_path}")
@@ -65,8 +64,7 @@ class VideoSearchEngine:
             fps = 30.0
 
         total_video_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) or 0
-        if verbose:
-            print(f"Indexing {video_path}: {total_video_frames} frames at {fps:.1f} fps, sampling every {sample_rate_sec}s...", file=_sys.stderr, flush=True)
+        print(f"Indexing {video_path}: {total_video_frames} frames at {fps:.1f} fps, sampling every {sample_rate_sec}s...", file=_sys.stderr, flush=True)
 
         embeddings_list = []
         timestamps_list = []
@@ -101,7 +99,7 @@ class VideoSearchEngine:
                     batch_images = []
                     batch_timestamps = []
             frame_index += 1
-            if verbose and frame_index % 1000 == 0:
+            if frame_index % 1000 == 0:
                 pct = (frame_index / total_video_frames * 100) if total_video_frames > 0 else 0
                 print(f"  {frame_index}/{total_video_frames} frames ({pct:.1f}%), encoded {len(embeddings_list)} keyframes...", file=_sys.stderr, flush=True)
 
@@ -121,8 +119,7 @@ class VideoSearchEngine:
         cap.release()
 
         if not embeddings_list:
-            if verbose:
-                print(f"No frames extracted from {video_path} (total read: {frame_index})", file=_sys.stderr)
+            print(f"No frames extracted from {video_path} (total read: {frame_index})", file=_sys.stderr)
             return np.empty((0,)), np.empty((0,))
 
         embeddings = np.stack(embeddings_list)
@@ -137,8 +134,7 @@ class VideoSearchEngine:
             norms = np.linalg.norm(embeddings, axis=1)
             norms[norms == 0] = 1.0
             embeddings = embeddings / norms[:, np.newaxis]
-        if verbose:
-            print(f"Extracted {len(embeddings)} frames at {sample_rate_sec}s interval", file=_sys.stderr, flush=True)
+        print(f"Extracted {len(embeddings)} frames at {sample_rate_sec}s interval", file=sys.stderr, flush=True)
         return embeddings, timestamps_arr
 
     def _rank_results(self, query_vec, embeddings, timestamps, top_k, raw_floor, percentile=0.0):
@@ -183,14 +179,14 @@ class VideoSearchEngine:
     def search_text(self, text_query, embeddings, timestamps, top_k=5, raw_floor=0.25, model_id=None, percentile=0.0):
         """Encode text query and run ranked similarity matching."""
         if model_id is not None:
-            self._load_model(model_id, verbose=False)
+            self._load_model(model_id)
         query_vec = self._encode_text(text_query)
         return self._rank_results(query_vec, embeddings, timestamps, top_k, raw_floor, percentile=percentile)
 
     def search_image(self, ref_image_path, embeddings, timestamps, top_k=5, raw_floor=0.25, model_id=None, percentile=0.0):
         """Encode reference image query and run ranked similarity matching."""
         if model_id is not None:
-            self._load_model(model_id, verbose=False)
+            self._load_model(model_id)
         from PIL import Image as PILImage
         img = PILImage.open(ref_image_path).convert("RGB")
         query_vec = self._encode_image(img)

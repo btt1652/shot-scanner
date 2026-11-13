@@ -226,7 +226,8 @@ Flags:
 - `-r, --sample-rate SAMPLE_RATE` - Frame sampling interval in seconds (default: 1)
 - `-bs, --batch-size BATCH_SIZE` - Number of frames to encode in a single CLIP forward pass during indexing (default: 32). Larger batches reduce Python overhead and can speed up indexing on multi-core CPUs, at the cost of higher peak memory usage.
 - `--model MODEL` - CLIP model variant (default: openai/clip-vit-base-patch32)
-- `--verbose, -v` - Enable verbose progress output
+
+Indexing always prints progress logs to stderr.
 
 The `.npz` cache stores:
 - `embeddings` - CLIP feature vectors per keyframe
@@ -247,8 +248,7 @@ Flags:
 - `--json` - Output results in strict JSON format to stdout for AI agent consumption
 - `--raw-floor` - Absolute calibrated cosine similarity floor (default: 0.25). Results below this similarity are discarded.
 - `--percentile` - Percentile cutoff (0.0 to 1.0, e.g. 0.2 keeps top 20%). Setting this enables percentile filtering automatically.
-- `--verbose, -v` - Enable verbose progress output
-- `--save-frames, -f` - Directory to save matched frame images as `{cache_name}_{seconds_milliseconds}_{score}_{norm_score}.jpg` (e.g., `{cache_name}_252.300_{score}_{norm_score}.jpg`)
+- `--save-frames, -f` - Directory to save matched frame images as `{cache_name}_{HHMMSS}_{score}.jpg`
 - `--video` - Path to original video file (required with --save-frames if not recorded in cache, or if video was moved)
 - `--decision-model-rerank` - Use local Ollama decision model to rerank top-K selected frames. Each frame is checked independently; results whose fused score is below `rerank_threshold` are discarded from match results.
 - `--rerank_threshold` - Threshold for the fused reranking score (default: 0.5). Results with score < threshold are discarded.
