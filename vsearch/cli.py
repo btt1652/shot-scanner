@@ -406,12 +406,19 @@ def cmd_search(args):
     engine = VideoSearchEngine(model_id=model)
 
     # Query: text or image
+    # When rerank is enabled, expand candidate pool to top_k * 2 to allow for
+    # frames that fail the Ollama fused score check; we keep a reserve buffer
+    # capped at top_k extra candidates.
+    search_top_k = top_k
+    if rerank and top_k is not None and top_k > 0:
+        search_top_k = top_k * 2
+
     if args.text is not None:
         query = args.text
-        results = engine.search_text(query, embeddings, timestamps, top_k, raw_floor, percentile=percentile)
+        results = engine.search_text(query, embeddings, timestamps, search_top_k, raw_floor, percentile=percentile)
     elif args.image is not None:
         query = args.image
-        results = engine.search_image(query, embeddings, timestamps, top_k, raw_floor, percentile=percentile)
+        results = engine.search_image(query, embeddings, timestamps, search_top_k, raw_floor, percentile=percentile)
     else:
         print("search requires either --text or --image", file=sys.stderr)
         sys.exit(2)
@@ -434,6 +441,11 @@ def cmd_search(args):
         if verbose:
             print(f"Extracting frames in memory for reranking...", file=sys.stderr)
         results = _rerank_results_with_ollama(results, query, frame_b64_gen, npz_name, model_id=ollama_model, ollama_endpoint=ollama_endpoint, threshold=rerank_threshold, verbose=verbose, weight_clip=rerank_weight_clip, weight_ollama=rerank_weight_ollama)
+
+    # If rerank was enabled, results were already sorted/filtered by fused score;
+    # slice back to the requested top_k so we don't return more than the user asked for.
+    if rerank and top_k is not None and top_k > 0:
+        results = results[:top_k]
 
 
     # Save frames for remaining (validated) results only
