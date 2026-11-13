@@ -42,7 +42,9 @@ def default_config() -> dict:
             "ollama_decision_model": ["clef-flash", "d3:4b"],
             "rerank_threshold": 0.5,
             "rerank_weight_clip": 0.5,
-            "rerank_weight_ollama": 0.5
+            "rerank_weight_ollama": 0.5,
+            "use_percentile": False,
+            "percentile": 0.0
         }
     }
 

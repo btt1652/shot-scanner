@@ -46,8 +46,8 @@ cache.npz + query (text/image) → Load embeddings → Encode query → Similari
 ```
 - Loads cached embeddings and model
 - Encodes query (text/image) using same CLIP model
-- Computes similarities, applies thresholds (`raw_floor`, `norm_threshold`)
-- Ranks by similarity (highest first)
+- Computes raw cosine similarities, applies calibrated floor (`raw_floor`) or optional percentile cutoff
+- Ranks by raw similarity (highest first)
 - **Frame extraction**: For each ranked result, extracts frame from cached `video_path`
 - **Reranking**: If `--decision_model_rerank` enabled, checks each frame with Ollama decision model
   - Each frame is reranked independently using a fused score of CLIP similarity and Ollama's judgment
@@ -93,8 +93,8 @@ Index-mode defaults (used when running `vsearch index`):
 ### `[search]`
 Search-mode defaults (used when running `vsearch search`):
 - `top_k` - Maximum number of top results to return (-1 = all, 0 = none)
-- `raw_floor` - Absolute noise floor for raw similarity
-- `norm_threshold` - Normalized score threshold
+- `raw_floor` - Absolute calibrated cosine similarity floor (e.g. 0.25 means 25% similarity). Results below this are discarded. Replaces the old min-max normalized threshold.
+- `norm_threshold` - Normalized score threshold (deprecated). Kept for backwards compatibility but no longer affects ranking. Use `raw_floor` or `use_percentile` instead.
 - `json_output` - Output results in JSON format
 - `save_frames` - Directory to save matched frame images
 - `video` - Path to original video file
@@ -104,6 +104,8 @@ Search-mode defaults (used when running `vsearch search`):
 - `rerank_threshold` - Threshold for the fused reranking score
 - `rerank_weight_clip` - Weight given to the CLIP similarity score (0.0 to 1.0) during reranking
 - `rerank_weight_ollama` - Weight given to the Ollama judgment score (0.0 to 1.0) during reranking
+- `use_percentile` - Enable percentile-based filtering (keep top N% by raw similarity)
+- `percentile` - Percentile cutoff (0.0 to 1.0, e.g. 0.2 keeps top 20%)
 
 **CLI flags always override config values when specified.** If a flag is not given, the config value is used. If neither is set, the built-in default applies.
 
@@ -127,6 +129,8 @@ ollama_decision_model = ["d3:4b", "clef-flash"]
 rerank_threshold = 0.5
 rerank_weight_clip = 0.5
 rerank_weight_ollama = 0.5
+use_percentile = false
+percentile = 0.0
 ```
 
 ## Ollama endpoint resolution
@@ -147,7 +151,23 @@ Bare hosts (with or without a port) are normalized to `http://<host>:11434/v1/sy
 
 The decision model (`ollama_decision_model`) also accepts a list and works the same way at validation time: each frame is sent to the first model; if that model call fails (e.g. model not loaded on the server), the next model is tried for that frame before the frame is discarded. Pass a fallback list on the CLI with `--ollama-model d3:4b,clef-flash`.
 
-## Reranking Logic
+## Scoring & Thresholding
+
+### Raw cosine similarity ranking
+
+vsearch ranks frames by **raw cosine similarity** (dot product of L2-normalized embeddings). Scores are absolute and comparable across videos (e.g. 0.75 means 75% cosine similarity regardless of which video you searched).
+
+Two filtering modes are available:
+
+**1. Calibrated floor (`raw_floor`) — recommended**
+Set a minimum similarity threshold (e.g. `--raw-floor 0.5`). Results below this are discarded. Since results are sorted descending, ranking stops early once similarity falls below this floor.
+
+**2. Percentile-based filtering (`use_percentile` + `percentile`)**
+Keep only the top N% of frames by similarity, regardless of absolute score. Useful when you don't know what cosine similarity values to expect. Example: `--use-percentile --percentile 0.2` keeps only the top 20%.
+
+You can combine both: `--raw-floor 0.5 --use-percentile --percentile 0.2` keeps up to the top 20% but only if similarity is at least 0.5.
+
+### Reranking (Ollama decision model)
 
 When `decision_model_rerank` is enabled, the system:
 1. Retrieves the top `K` results using CLIP.
@@ -203,8 +223,10 @@ Flags:
 - `-i, --image` - Path to reference image file for visual similarity matching
 - `-k, --top-k` - Maximum number of top results to return (default: all). Use `0` for no results, `-1` for unlimited.
 - `--json` - Output results in strict JSON format to stdout for AI agent consumption
-- `--raw-floor` - Absolute noise floor for raw similarity (default: 0.25)
-- `--norm-threshold` - Normalized score threshold (default: 0.75)
+- `--raw-floor` - Absolute calibrated cosine similarity floor (default: 0.25). Results below this similarity are discarded.
+- `--norm-threshold` - Normalized score threshold (default: 0.75) — deprecated, use `raw_floor` or `--use-percentile`
+- `--use-percentile` - Enable percentile-based filtering (keep top percentile of frames by similarity)
+- `--percentile` - Percentile cutoff (0.0 to 1.0, e.g. 0.2 keeps top 20%)
 - `--verbose, -v` - Enable verbose progress output
 - `--save-frames, -f` - Directory to save matched frame images as `{cache_name}_{seconds_milliseconds}_{score}_{norm_score}.jpg` (e.g., `{cache_name}_252.300_{score}_{norm_score}.jpg`)
 - `--video` - Path to original video file (required with --save-frames if not recorded in cache, or if video was moved)
@@ -241,4 +263,4 @@ The tool follows a two-phase lifecycle:
 
 1. **Indexing phase** (`vsearch index`): Extracts frames at the specified sample rate, encodes each frame with CLIP, L2-normalizes the feature vectors, and saves them into a compressed `.npz` archive alongside the original timestamps, model ID, and video path.
 
-2. **Query phase** (`vsearch search`): Loads the cached embeddings, auto-detects the CLIP model from the cache, encodes the query (text or image) with the same CLIP model, computes cosine similarity via dot product, applies min-max normalization and dual-threshold filtering (normalized >= threshold AND raw >= floor), sorts by score descending, and returns the top-k matching timestamps.
+2. **Query phase** (`vsearch search`): Loads the cached embeddings, auto-detects the CLIP model from the cache, encodes the query (text or image) with the same CLIP model, computes cosine similarity via dot product, applies calibrated floor filtering (`raw_floor`) or optional percentile cutoff (`use_percentile` / `percentile`), sorts by score descending, and returns the top-k matching timestamps.
