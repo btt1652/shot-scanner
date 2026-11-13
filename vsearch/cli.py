@@ -450,7 +450,42 @@ def cmd_search(args):
 
     # Output to stdout (JSON or text)
     if json_output:
-        print(json.dumps({"query": query, "results": results}))
+        # Ensure all metadata values are JSON serializable (avoid numpy types)
+        def _safe(v):
+            if v is None:
+                return None
+            if isinstance(v, np.ndarray):
+                return str(v)
+            if isinstance(v, (np.integer,)):
+                return int(v)
+            if isinstance(v, (np.floating,)):
+                return float(v)
+            if isinstance(v, (bytes,)):
+                return v.decode("utf-8", errors="replace")
+            return v
+
+        payload = {
+            "query": query,
+            "results": results,
+            "metadata": {
+                "top_k": _safe(top_k),
+                "raw_floor": _safe(raw_floor),
+                "json_output": _safe(json_output),
+                "save_frames": _safe(save_frames),
+                "video": _safe(video_path),
+                "rerank": _safe(rerank), 
+                "ollama_endpoint": _safe(ollama_endpoint),
+                "ollama_model": _safe(ollama_model),
+                "rerank_threshold": _safe(rerank_threshold),
+                "rerank_weight_clip": _safe(rerank_weight_clip),
+                "rerank_weight_ollama": _safe(rerank_weight_ollama),
+                "percentile": _safe(percentile),
+                "cache_model": _safe(cache_model),
+                "cache_video_path": _safe(cache_video_path),
+                "cache_md5": _safe(stored_md5),
+            },
+        }
+        print(json.dumps(payload))
     else:
         if results:
             print(_format_results_text(results))
