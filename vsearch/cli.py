@@ -303,7 +303,7 @@ def cmd_search(args):
     def cfg_val(key, cli_arg):
         return get_config_value(cfg, "search", key, getattr(args, cli_arg, None))
 
-    verbose = bool(getattr(args, "verbose", False))
+    verbose = bool(getattr(args, "verbose", False)) and not json_output
     top_k = cfg_val("top_k", "top_k")
     raw_floor = cfg_val("raw_floor", "raw_floor")
     json_output = cfg_val("json_output", "json")
