@@ -177,14 +177,21 @@ def _normalize_ollama_endpoint(endpoint):
 
 
 def _ollama_endpoint_reachable(endpoint, timeout=5.0):
-    """Check if the Ollama endpoint is reachable."""
+    """Check if the Ollama endpoint is reachable.
+
+    Any HTTP response (including 405 Method Not Allowed) means the server is
+    up; only connection errors count as unreachable.
+    """
     endpoint = _normalize_ollama_endpoint(endpoint)
     if not endpoint:
         return False
     try:
-        req = urllib.request.Request(url=endpoint, method="GET", headers={"Content-Type": "application/json"})
+        req = urllib.request.Request(url=endpoint, method="GET")
         with urllib.request.urlopen(req, timeout=timeout) as response:
             return response.status is not None
+    except urllib.error.HTTPError:
+        # Server responded with e.g. 405 -> reachable
+        return True
     except Exception:
         return False
 
@@ -202,7 +209,7 @@ def resolve_ollama_endpoint(endpoints, verbose=False):
         if ep and _ollama_endpoint_reachable(ep):
             return _normalize_ollama_endpoint(ep)
     if verbose and endpoints:
-        print(f"Ollama endpoint(s) {list(endpoints)} unreachable; no fallback available", file=sys.stderr, flush=True)
+        print(f"Ollama endpoint(s) {list(endpoints)} unreachable; using first endpoint {endpoints[0]} as fallback", file=sys.stderr, flush=True)
     return _normalize_ollama_endpoint(endpoints[0])
 
 
@@ -309,7 +316,7 @@ def cmd_search(args):
     verbose = not json_output
     video_path = cfg_val("video", "video")
     rerank = cfg_val("decision_model_rerank", "decision_model_rerank")
-    ollama_endpoint = cfg_val("ollama_endpoint", "ollama_endpoint")
+    ollama_endpoint = cfg_val("ollama_server_addr", "ollama_server_addr")
     ollama_model = cfg_val("ollama_decision_model", "ollama_model")
     rerank_threshold = cfg_val("rerank_threshold", "rerank_threshold")
     rerank_weight_clip = cfg_val("rerank_weight_clip", "rerank_weight_clip")
@@ -322,7 +329,7 @@ def cmd_search(args):
         _models = _as_list(ollama_model)
         pct_str = f", percentile={percentile:.2f}" if percentile and percentile > 0.0 else ""
         print(f"Config: top_k={top_k}, raw_floor={raw_floor:.2f}, json_output={json_output}{pct_str}", file=sys.stderr)
-        print(f"        save_frames={save_frames}, video={video_path}, rerank={rerank}, ollama_endpoint={_eps}, ollama_model={_models}, rerank_threshold={rerank_threshold}, rerank_weight_clip={rerank_weight_clip:.2f}, rerank_weight_ollama={rerank_weight_ollama:.2f}", file=sys.stderr)
+        print(f"        save_frames={save_frames}, video={video_path}, rerank={rerank}, ollama_server_addr={_eps}, ollama_model={_models}, rerank_threshold={rerank_threshold}, rerank_weight_clip={rerank_weight_clip:.2f}, rerank_weight_ollama={rerank_weight_ollama:.2f}", file=sys.stderr)
 
     data = np.load(args.cache, allow_pickle=False)
     embeddings = data["embeddings"]
@@ -485,7 +492,7 @@ def cmd_search(args):
                 "save_frames": _safe(save_frames),
                 "video": _safe(video_path),
                 "rerank": _safe(rerank), 
-                "ollama_endpoint": _safe(ollama_endpoint),
+                "ollama_server_addr": _safe(ollama_endpoint),
                 "ollama_model": _safe(ollama_model),
                 "rerank_threshold": _safe(rerank_threshold),
                 "rerank_weight_clip": _safe(rerank_weight_clip),
@@ -532,7 +539,7 @@ def main():
     p_search.add_argument("--rerank_threshold","-rt", type=float, default=None, help="Threshold for the fused reranking score (default: 0.5). Results with score < threshold are discarded.")
     p_search.add_argument("--rerank_weight_clip","-rwc", type=float, default=None, help="Weight given to CLIP similarity in fused score (default: 0.3).")
     p_search.add_argument("--rerank_weight_ollama","-rwo", type=float, default=None, help="Weight given to Ollama judgment in fused score (default: 0.7).")
-    p_search.add_argument("--ollama_endpoint","-oe", default=None, help="Ollama API endpoint, or a comma-separated list of endpoints tried in order (default: [192.168.1.190, localhost])")
+    p_search.add_argument("--ollama_server_addr","-oe", default=None, help="Ollama server addr, or a comma-separated list of endpoints tried in order (default: [192.168.1.190, localhost])")
     p_search.add_argument("--ollama_model","-dm", default=None, help="Ollama decision model name(s), comma-separated fallback list tried in order for validation")
     p_search.set_defaults(func=cmd_search)
 

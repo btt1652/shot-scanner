@@ -100,7 +100,7 @@ Search-mode defaults (used when running `vsearch search`):
 - `save_frames` - Directory to save matched frame images
 - `video` - Path to original video file
 - `decision_model_rerank` - Enable Ollama decision model reranking
-- `ollama_endpoint` - Ollama API endpoint (first priority). Accepts a single URL or a list of endpoints tried in order until one is reachable. Bare hosts are accepted too, e.g. `192.168.1.190` or `localhost:11434`.
+- `ollama_server_addr` - Ollama API endpoint (first priority). Accepts a single URL or a list of endpoints tried in order until one is reachable. Bare hosts are accepted too, e.g. `192.168.1.190` or `localhost:11434`.
 - `ollama_decision_model` - Ollama decision model name, or a list of model names tried in order (primary first, fallback second) if a model call fails
 - `rerank_threshold` - Threshold for the fused reranking score
 - `rerank_weight_clip` - Weight given to the CLIP similarity score (0.0 to 1.0) during reranking
@@ -124,7 +124,7 @@ json_output = false
 save_frames = ""
 video = ""
 decision_model_rerank = false
-ollama_endpoint = ["192.168.1.190", "localhost"]
+ollama_server_addr = ["192.168.1.190", "localhost"]
 ollama_decision_model = ["d3:4b", "clef-flash"]
 rerank_threshold = 0.5
 rerank_weight_clip = 0.3
@@ -136,14 +136,14 @@ percentile = 0.1
 
 When `decision_model_rerank` is enabled, the Ollama endpoint is resolved at search time:
 
-1. Each endpoint in `ollama_endpoint` is tried in order (primary first).
+1. Each endpoint in `ollama_server_addr` is tried in order (primary first).
 2. The first reachable endpoint is used for validation.
 3. If none is reachable, the first endpoint in the list is used anyway (validation requests will fail per-frame and be discarded).
 
 This lets you configure a remote server as primary and a local fallback in a single key, e.g.:
 
 ```toml
-ollama_endpoint = ["192.168.1.190", "localhost"]
+ollama_server_addr = ["192.168.1.190", "localhost"]
 ```
 
 Bare hosts (with or without a port) are normalized to `http://<host>:11434/v1/systemone`. The same list can be passed on the CLI with `--ollama-endpoint 192.168.1.190,localhost`.
@@ -254,7 +254,7 @@ Flags:
 - `--rerank_threshold` - Threshold for the fused reranking score (default: 0.5). Results with score < threshold are discarded.
 - `--rerank_weight_clip` - Weight given to the CLIP similarity score in the fused reranking score (default: 0.3). CLI flag; also configurable via `rerank_weight_clip` in `config.toml`.
 - `--rerank_weight_ollama` - Weight given to the Ollama judgment score in the fused reranking score (default: 0.7). CLI flag; also configurable via `rerank_weight_ollama` in `config.toml`.
-- `--ollama_endpoint` - Ollama API endpoint (default: http://localhost:11434/v1/systemone)
+- `--ollama_server_addr` - Ollama API endpoint (default: http://localhost:11434/v1/systemone)
 - `--ollama_model` - Ollama model name for decision validation. Config key: `ollama_decision_model`.
 
 **Auto video path:** If `--save_frames` or `--decision_model_rerank` is used, vsearch looks for `video_path` stored in the `.npz` cache from the indexing step. If the cached video path exists, it is used automatically — you don't need to pass `--video`. If the video was moved and the cached path no longer exists, vsearch exits with an error and you must provide `--video` with the new path.
