@@ -2,7 +2,6 @@
 
 import argparse
 import hashlib
-import io
 import json
 import os
 import sys
@@ -13,7 +12,7 @@ import cv2
 import numpy as np
 
 from .engine import VideoSearchEngine, BATCH_SIZE
-from .config import load_config, get_config_value, save_config
+from .config import load_config, get_config_value
 
 
 def cmd_index(args):
@@ -307,13 +306,11 @@ def cmd_search(args):
     verbose = bool(getattr(args, "verbose", False))
     top_k = cfg_val("top_k", "top_k")
     raw_floor = cfg_val("raw_floor", "raw_floor")
-    norm_threshold = cfg_val("norm_threshold", "norm_threshold")
     json_output = cfg_val("json_output", "json")
     save_frames = cfg_val("save_frames", "save_frames")
     video_path = cfg_val("video", "video")
     rerank = cfg_val("decision_model_rerank", "decision_model_rerank")
     ollama_endpoint = cfg_val("ollama_endpoint", "ollama_endpoint")
-    ollama_endpoint_fallback = cfg_val("ollama_endpoint_fallback", "ollama_endpoint_fallback")
     ollama_model = cfg_val("ollama_decision_model", "ollama_model")
     rerank_threshold = cfg_val("rerank_threshold", "rerank_threshold")
     rerank_weight_clip = cfg_val("rerank_weight_clip", "rerank_weight_clip")
@@ -323,10 +320,10 @@ def cmd_search(args):
 
     # Print config values in verbose mode
     if verbose:
-        print(f"Config: top_k={top_k}, raw_floor={raw_floor:.2f}, norm_threshold={norm_threshold:.2f}, json_output={json_output}", file=sys.stderr)
+        print(f"Config: top_k={top_k}, raw_floor={raw_floor:.2f}, json_output={json_output}", file=sys.stderr)
         _eps = ollama_endpoint if isinstance(ollama_endpoint, (list, tuple)) else ([ollama_endpoint] if ollama_endpoint else [])
         _models = _as_list(ollama_model)
-        print(f"        save_frames={save_frames}, video={video_path}, rerank={rerank}, ollama_endpoint={_eps}, ollama_model={_models}, decision_model_threshold={decision_model_threshold}", file=sys.stderr)
+        print(f"        save_frames={save_frames}, video={video_path}, rerank={rerank}, ollama_endpoint={_eps}, ollama_model={_models}, rerank_threshold={rerank_threshold}", file=sys.stderr)
 
     data = np.load(args.cache, allow_pickle=False)
     embeddings = data["embeddings"]
@@ -401,10 +398,10 @@ def cmd_search(args):
     # Query: text or image
     if args.text is not None:
         query = args.text
-        results = engine.search_text(query, embeddings, timestamps, top_k, raw_floor, norm_threshold, use_percentile=use_percentile, percentile=percentile)
+        results = engine.search_text(query, embeddings, timestamps, top_k, raw_floor, use_percentile=use_percentile, percentile=percentile)
     elif args.image is not None:
         query = args.image
-        results = engine.search_image(query, embeddings, timestamps, top_k, raw_floor, norm_threshold, use_percentile=use_percentile, percentile=percentile)
+        results = engine.search_image(query, embeddings, timestamps, top_k, raw_floor, use_percentile=use_percentile, percentile=percentile)
     else:
         print("search requires either --text or --image", file=sys.stderr)
         sys.exit(2)
@@ -426,7 +423,7 @@ def cmd_search(args):
         frame_b64_gen = _extract_frames_lazy(results, video_path, verbose)
         if verbose:
             print(f"Extracting frames in memory for reranking...", file=sys.stderr)
-        results = _rerank_results_with_ollama(results, query, frame_b64_gen, npz_name, model_id=ollama_model, ollama_endpoint=ollama_endpoint, threshold=decision_model_threshold, verbose=verbose, weight_clip=rerank_weight_clip, weight_ollama=rerank_weight_ollama)
+        results = _rerank_results_with_ollama(results, query, frame_b64_gen, npz_name, model_id=ollama_model, ollama_endpoint=ollama_endpoint, threshold=rerank_threshold, verbose=verbose, weight_clip=rerank_weight_clip, weight_ollama=rerank_weight_ollama)
 
 
     # Save frames for remaining (validated) results only
@@ -469,7 +466,6 @@ def main():
     p_search.add_argument("--top-k", "-k", type=int, default=None, help="Maximum number of top results to return (default: all)")
     p_search.add_argument("--json", action="store_true", default=None, help="Output results in strict JSON format")
     p_search.add_argument("--raw-floor","-rf", type=float, default=None, help="Absolute noise floor for raw similarity (default: 0.25)")
-    p_search.add_argument("--norm-threshold","-nt", type=float, default=None, help="Normalized score threshold (default: 0.75) [DEPRECATED: use raw_floor or percentile]")
     p_search.add_argument("--use-percentile", action="store_true", default=None, help="Enable percentile-based filtering (keep top percentile of frames by similarity)")
     p_search.add_argument("--percentile", type=float, default=None, help="Percentile cutoff (0.0-1.0, e.g., 0.2 keeps top 20%% of frames)")
     p_search.add_argument("--verbose", "-v", action="store_true", default=None, help="Enable verbose progress output")

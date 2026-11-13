@@ -6,9 +6,7 @@ sample_rate = 1
 [search]
 top_k = 5
 raw_floor = 0.1
-norm_threshold = 0.8
 json_output = false
-save_results = ""
 save_frames = ""
 video = ""
 decision_model_rerank = false

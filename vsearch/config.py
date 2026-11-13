@@ -9,7 +9,6 @@ CLI flags always override config values when given.
 Uses tomllib (Python 3.11+) for reading TOML files.
 """
 
-import os
 import sys
 import tomllib
 from pathlib import Path
@@ -33,7 +32,7 @@ def default_config() -> dict:
         "search": {
             "top_k": -1,
             "raw_floor": 0.25,
-            "norm_threshold": 0.85,
+
             "json_output": False,
             "save_frames": None,
             "video": None,
@@ -67,20 +66,8 @@ def load_config() -> dict:
 
     return config
 
-def save_config(config: dict) -> None:
-    """Save configuration to file."""
-    config_path = get_config_path()
-    with open(config_path, "w") as f:
-        tomllib.dump(config, f)
-
 def get_config_value(config: dict, section: str, key: str, cli_value=None):
     """Get config value, using cli_value if provided, else config/index/search then global."""
     if cli_value is not None:
         return cli_value
     return config.get(section, {}).get(key, config.get("global", {}).get(key))
-
-def set_config_value(config: dict, section: str, key: str, value) -> None:
-    """Set config value."""
-    if section not in config:
-        config[section] = {}
-    config[section][key] = value

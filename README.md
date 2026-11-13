@@ -93,8 +93,7 @@ Index-mode defaults (used when running `vsearch index`):
 ### `[search]`
 Search-mode defaults (used when running `vsearch search`):
 - `top_k` - Maximum number of top results to return (-1 = all, 0 = none)
-- `raw_floor` - Absolute calibrated cosine similarity floor (e.g. 0.25 means 25% similarity). Results below this are discarded. Replaces the old min-max normalized threshold.
-- `norm_threshold` - Normalized score threshold (deprecated). Kept for backwards compatibility but no longer affects ranking. Use `raw_floor` or `use_percentile` instead.
+- `raw_floor` - Absolute calibrated cosine similarity floor (e.g. 0.25 means 25% similarity). Results below this are discarded.
 - `json_output` - Output results in JSON format
 - `save_frames` - Directory to save matched frame images
 - `video` - Path to original video file
@@ -119,7 +118,6 @@ sample_rate = 1
 [search]
 top_k = -1
 raw_floor = 0.25
-norm_threshold = 0.75
 json_output = false
 save_frames = ""
 video = ""
@@ -224,7 +222,6 @@ Flags:
 - `-k, --top-k` - Maximum number of top results to return (default: all). Use `0` for no results, `-1` for unlimited.
 - `--json` - Output results in strict JSON format to stdout for AI agent consumption
 - `--raw-floor` - Absolute calibrated cosine similarity floor (default: 0.25). Results below this similarity are discarded.
-- `--norm-threshold` - Normalized score threshold (default: 0.75) — deprecated, use `raw_floor` or `--use-percentile`
 - `--use-percentile` - Enable percentile-based filtering (keep top percentile of frames by similarity)
 - `--percentile` - Percentile cutoff (0.0 to 1.0, e.g. 0.2 keeps top 20%)
 - `--verbose, -v` - Enable verbose progress output
