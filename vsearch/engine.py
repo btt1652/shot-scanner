@@ -99,13 +99,14 @@ class VideoSearchEngine:
 
         embeddings = np.stack(embeddings_list)
         timestamps_arr = np.array(timestamps_list[: len(embeddings)], dtype=np.float64)
-        # L2-normalize embeddings across samples
+        # L2-normalize each frame's embedding to unit length (row-wise).
+        # Embeddings are already unit-norm from _encode_image; this is a robustness safeguard.
         if embeddings.ndim == 1:
             norms = np.linalg.norm(embeddings)
             norms = norms if norms > 0 else 1.0
             embeddings = embeddings / norms
         else:
-            norms = np.linalg.norm(embeddings, axis=0)
+            norms = np.linalg.norm(embeddings, axis=1)
             norms[norms == 0] = 1.0
             embeddings = embeddings / norms
         if verbose:

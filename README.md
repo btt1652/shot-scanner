@@ -99,8 +99,8 @@ Search-mode defaults (used when running `vsearch search`):
 - `save_frames` - Directory to save matched frame images
 - `video` - Path to original video file
 - `decision_model_validate` - Enable Ollama decision model validation
-- `ollama_endpoint` - Ollama API endpoint
-- `ollama_decision_model` - Ollama model name for validation
+- `ollama_endpoint` - Ollama API endpoint (first priority). Accepts a single URL or a list of endpoints tried in order until one is reachable. Bare hosts are accepted too, e.g. `192.168.1.190` or `localhost:11434`.
+- `ollama_decision_model` - Ollama decision model name, or a list of model names tried in order (primary first, then fallbacks) if a model call fails
 - `decision_model_threshold` - Validation score threshold
 
 **CLI flags always override config values when specified.** If a flag is not given, the config value is used. If neither is set, the built-in default applies.
@@ -120,10 +120,28 @@ json_output = false
 save_frames = ""
 video = ""
 decision_model_validate = false
-ollama_endpoint = "http://localhost:11434/v1/systemone"
-ollama_decision_model = "d3:4b"
+ollama_endpoint = ["192.168.1.190", "localhost"]
+ollama_decision_model = ["d3:4b", "clef-flash"]
 decision_model_threshold = 0.8
 ```
+
+## Ollama endpoint resolution
+
+When `decision_model_validate` is enabled, the Ollama endpoint is resolved at search time:
+
+1. Each endpoint in `ollama_endpoint` is tried in order (primary first).
+2. The first reachable endpoint is used for validation.
+3. If none is reachable, the first endpoint in the list is used anyway (validation requests will fail per-frame and be discarded).
+
+This lets you configure a remote server as primary and a local fallback in a single key, e.g.:
+
+```toml
+ollama_endpoint = ["192.168.1.190", "localhost"]
+```
+
+Bare hosts (with or without a port) are normalized to `http://<host>:11434/v1/systemone`. The same list can be passed on the CLI with `--ollama-endpoint 192.168.1.190,localhost`.
+
+The decision model (`ollama_decision_model`) also accepts a list and works the same way at validation time: each frame is sent to the first model; if that model call fails (e.g. model not loaded on the server), the next model is tried for that frame before the frame is discarded. Pass a fallback list on the CLI with `--ollama-model d3:4b,clef-flash`.
 
 ## Model Variants
 

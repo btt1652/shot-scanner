@@ -144,10 +144,78 @@ def _save_matched_frames(results, npz_name, video_path, output_dir, verbose=Fals
 
 
 
+def _as_list(value):
+    """Normalize a value into a list of non-empty strings. Strips whitespace and splits comma-separated values."""
+    if value is None:
+        return []
+    if isinstance(value, (list, tuple)):
+        items = list(value)
+    else:
+        value = str(value).strip()
+        if not value:
+            return []
+        if "," in value:
+            items = value.split(",")
+        else:
+            items = [value]
+    return [str(item).strip() for item in items if str(item).strip()]
+
+
+def _normalize_ollama_endpoint(endpoint):
+    """Normalize an Ollama endpoint to a full URL. Accepts bare hosts like
+    '192.168.1.190' or 'localhost:11434' or full URLs like 'http://192.168.1.190:11434/v1/systemone'."""
+    if not endpoint:
+        return None
+    ep = str(endpoint).strip().rstrip("/")
+    if ep.startswith(("http://", "https://")):
+        return ep
+    host_part = ep.split("://")[-1]
+    if "/" in host_part:
+        host_part = host_part.split("/")[0]
+    host = host_part
+    port = 11434
+    if ":" in host:
+        host, port_str = host.split(":", 1)
+        port = int(port_str) if port_str.isdigit() else 11434
+    return f"http://{host}:{port}/v1/systemone"
+
+
+def _ollama_endpoint_reachable(endpoint, timeout=5.0):
+    """Check if the Ollama endpoint is reachable."""
+    endpoint = _normalize_ollama_endpoint(endpoint)
+    if not endpoint:
+        return False
+    try:
+        req = urllib.request.Request(url=endpoint, method="GET", headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=timeout) as response:
+            return response.status is not None
+    except Exception:
+        return False
+
+
+def resolve_ollama_endpoint(endpoints, verbose=False):
+    """Use the first reachable Ollama endpoint from the list (primary first, fallback second).
+
+    Accepts a list of endpoint URLs (or a single string). Returns the endpoint to use.
+    """
+    if not endpoints:
+        return None
+    if not isinstance(endpoints, (list, tuple)):
+        endpoints = [endpoints]
+    for ep in endpoints:
+        if ep and _ollama_endpoint_reachable(ep):
+            return _normalize_ollama_endpoint(ep)
+    if verbose and endpoints:
+        print(f"Ollama endpoint(s) {list(endpoints)} unreachable; no fallback available", file=sys.stderr, flush=True)
+    return _normalize_ollama_endpoint(endpoints[0])
+
+
 def _validate_results_with_ollama(results, query, frame_b64s, npz_name, model_id="clef-flash", ollama_endpoint="http://localhost:11434/v1/systemone", threshold=0.5, verbose=False):
     """Use Ollama's decision capability to validate frames individually.
 
     Every frame in `frame_b64s` is validated against the Ollama decision model.
+    `model_id` can be a single model name or a list/comma-separated string;
+    models are tried in order per frame until one succeeds.
     Only frames whose result passes the threshold are kept; failing frames are
     discarded while passing frames are retained with their original metadata.
     The returned list preserves the original result order for passing frames only.
@@ -156,7 +224,11 @@ def _validate_results_with_ollama(results, query, frame_b64s, npz_name, model_id
         print("Warning: No frames were extracted. Skipping Ollama validation.", file=sys.stderr)
         return results
 
-    # Validate each frame independently and collect passing results
+    normalized_endpoint = _normalize_ollama_endpoint(ollama_endpoint)
+    model_ids = _as_list(model_id)
+    if not model_ids:
+        model_ids = ["clef-flash"]
+
     passed_results = []
     frame_iter = iter(frame_b64s)
 
@@ -167,40 +239,47 @@ def _validate_results_with_ollama(results, query, frame_b64s, npz_name, model_id
             print("Warning: Frame extraction ended early. Stopping validation.", file=sys.stderr)
             break
 
-        payload = {
-            "model": model_id,
-            "state": f"A user is searching for: {query}",
-            "images": [frame_b64],
-            "questions": {
-                "is_valid": {
-                    "type": "noul",
-                    "instructions": f"Does the image match the query: {query}?"
+        valid_score = None
+        last_err = None
+        for model in model_ids:
+            payload = {
+                "model": model,
+                "state": f"A user is searching for: {query}",
+                "images": [frame_b64],
+                "questions": {
+                    "is_valid": {
+                        "type": "noul",
+                        "instructions": f"Does the image match the query: {query}?"
+                    }
                 }
             }
-        }
 
-        # Ollama request
-        if verbose:
-            print(f"Ollama request sent for frame at {r['timestamp_seconds']:.1f}s (model: {model_id})", file=sys.stderr)
+            if verbose:
+                print(f"Ollama request for frame at {r['timestamp_seconds']:.1f}s (model: {model})", file=sys.stderr)
 
-        try:
-            req = urllib.request.Request(
-                ollama_endpoint,
-                data=json.dumps(payload).encode("utf-8"),
-                headers={"Content-Type": "application/json"}
-            )
-            with urllib.request.urlopen(req) as response:
-                res_json = json.loads(response.read().decode("utf-8"))
+            try:
+                req = urllib.request.Request(
+                    normalized_endpoint,
+                    data=json.dumps(payload).encode("utf-8"),
+                    headers={"Content-Type": "application/json"}
+                )
+                with urllib.request.urlopen(req, timeout=60) as response:
+                    res_json = json.loads(response.read().decode("utf-8"))
 
-            valid_score = res_json["answers"]["is_valid"]["noul"]
-            print(f"Ollama decision score for frame at {r['timestamp_seconds']:.1f}s: {valid_score:.4f}", file=sys.stderr)
+                valid_score = res_json["answers"]["is_valid"]["noul"]
+                print(f"Ollama decision score for frame at {r['timestamp_seconds']:.1f}s: {valid_score:.4f}", file=sys.stderr)
 
-            if valid_score >= threshold:
-                passed_results.append(r)
-            else:
-                print(f"Frame at {r['timestamp_seconds']:.1f}s did NOT pass Ollama validation (score: {valid_score:.4f} < threshold: {threshold:.2f}). Discarded.", file=sys.stderr)
-        except Exception as e:
-            print(f"Error validating frame at {r['timestamp_seconds']:.1f}s: {e}. Discarded.", file=sys.stderr)
+                if valid_score >= threshold:
+                    passed_results.append(r)
+                else:
+                    print(f"Frame at {r['timestamp_seconds']:.1f}s did NOT pass Ollama validation (score: {valid_score:.4f} < threshold: {threshold:.2f}). Discarded.", file=sys.stderr)
+                break
+            except Exception as e:
+                last_err = e
+                if verbose:
+                    print(f"Model '{model}' failed for frame at {r['timestamp_seconds']:.1f}s: {e}", file=sys.stderr)
+        if valid_score is None:
+            print(f"Error validating frame at {r['timestamp_seconds']:.1f}s: {last_err}. Discarded.", file=sys.stderr)
 
     return passed_results
 
@@ -220,13 +299,16 @@ def cmd_search(args):
     video_path = cfg_val("video", "video")
     validate = cfg_val("decision_model_validate", "decision_model_validate")
     ollama_endpoint = cfg_val("ollama_endpoint", "ollama_endpoint")
+    ollama_endpoint_fallback = cfg_val("ollama_endpoint_fallback", "ollama_endpoint_fallback")
     ollama_model = cfg_val("ollama_decision_model", "ollama_model")
     decision_model_threshold = cfg_val("decision_model_threshold", "decision_model_threshold")
 
     # Print config values in verbose mode
     if verbose:
         print(f"Config: top_k={top_k}, raw_floor={raw_floor:.2f}, norm_threshold={norm_threshold:.2f}, json_output={json_output}", file=sys.stderr)
-        print(f"        save_frames={save_frames}, video={video_path}, validate={validate}, ollama_endpoint={ollama_endpoint}, ollama_model={ollama_model}, decision_model_threshold={decision_model_threshold}", file=sys.stderr)
+        _eps = ollama_endpoint if isinstance(ollama_endpoint, (list, tuple)) else ([ollama_endpoint] if ollama_endpoint else [])
+        _models = _as_list(ollama_model)
+        print(f"        save_frames={save_frames}, video={video_path}, validate={validate}, ollama_endpoint={_eps}, ollama_model={_models}, decision_model_threshold={decision_model_threshold}", file=sys.stderr)
 
     data = np.load(args.cache, allow_pickle=False)
     embeddings = data["embeddings"]
@@ -311,6 +393,13 @@ def cmd_search(args):
 
     # Perform Ollama validation first (so failing frames are discarded before saving)
     if validate:
+        # Resolve Ollama endpoint: first reachable from the list (primary first, fallback second)
+        ollama_endpoint = resolve_ollama_endpoint(ollama_endpoint, verbose=verbose)
+        ollama_models = _as_list(ollama_model)
+        if not ollama_models:
+            ollama_models = ["clef-flash"]
+        if verbose:
+            print(f"Ollama models: {ollama_models}", file=sys.stderr, flush=True)
         if not video_path:
             print("--video is required when using --decision-model-validate", file=sys.stderr)
             sys.exit(2)
@@ -367,8 +456,8 @@ def main():
     p_search.add_argument("--video", "-vid", default=None, help="Path to original video file (required with --save-frames)")
     p_search.add_argument("--decision-model-validate","-dmv", action="store_true", default=None, help="Use local Ollama decision model to validate top results. Results failing validation are discarded from match results.")
     p_search.add_argument("--decision-model-threshold","-dmt", type=float, default=None, help="Ollama decision model threshold (default: 0.5). Results with score < threshold are discarded.")
-    p_search.add_argument("--ollama-endpoint","-oe", default=None, help="Ollama API endpoint (default: http://localhost:11434/v1/systemone)")
-    p_search.add_argument("--ollama-model","-dm", default=None, help="Ollama model name for validation")
+    p_search.add_argument("--ollama-endpoint","-oe", default=None, help="Ollama API endpoint, or a comma-separated list of endpoints tried in order (default: [192.168.1.190, localhost])")
+    p_search.add_argument("--ollama-model","-dm", default=None, help="Ollama decision model name(s), comma-separated fallback list tried in order for validation")
     p_search.set_defaults(func=cmd_search)
 
     args = parser.parse_args()
