@@ -264,8 +264,6 @@ def _rerank_results_with_ollama(results, query, frame_b64s, npz_name, model_id="
                     res_json = json.loads(response.read().decode("utf-8"))
 
                 valid_score = res_json["answers"]["is_valid"]["noul"]
-                if verbose:
-                    print(f"Ollama decision score for frame at {r['timestamp_seconds']:.1f}s: {valid_score:.4f}", file=sys.stderr)
                 break
             except Exception as e:
                 last_err = e
@@ -278,6 +276,10 @@ def _rerank_results_with_ollama(results, query, frame_b64s, npz_name, model_id="
 
         # Fused score calculation
         fused_score = (r['score'] * weight_clip) + (valid_score * weight_ollama)
+        if fused_score >= threshold:
+            print(f"{r['timestamp_seconds']:.1f}s sim={r['score']:.4f} ollama={valid_score:.4f} fused={fused_score:.4f}", file=sys.stderr)
+        else:
+            print(f"{r['timestamp_seconds']:.1f}s sim={r['score']:.4f} ollama={valid_score:.4f} fused={fused_score:.4f} discard", file=sys.stderr)
         scored_results.append({**r, "fused_score": fused_score, "ollama_score": valid_score})
 
     # Rerank the results based on fused score
@@ -289,10 +291,9 @@ def _rerank_results_with_ollama(results, query, frame_b64s, npz_name, model_id="
         if res["fused_score"] >= threshold:
             # Remove the fused_score and ollama_score keys before returning to maintain original structure
             final_results.append({k: v for k, v in res.items() if k not in ["fused_score", "ollama_score"]})
-        elif verbose:
-                print(f"Frame at {res['timestamp_seconds']:.1f}s did NOT pass reranked threshold (fused score: {res['fused_score']:.4f} < threshold: {threshold:.2f}). Discarded.", file=sys.stderr)
-
     return final_results
+
+
 
 
 def cmd_search(args):
