@@ -106,7 +106,7 @@ class VideoSearchEngine:
         else:
             norms = np.linalg.norm(embeddings, axis=1)
             norms[norms == 0] = 1.0
-            embeddings = embeddings / norms
+            embeddings = embeddings / norms[:, np.newaxis]
         if verbose:
             print(f"Extracted {len(embeddings)} frames at {sample_rate_sec}s interval", file=_sys.stderr, flush=True)
         return embeddings, timestamps_arr
