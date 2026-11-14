@@ -325,10 +325,7 @@ def _fuse_results_with_ollama(results, query, frame_b64s, npz_name, model_id="cl
                     }
                 }
             }
-
-            # if verbose:
-            #     print(f"Ollama request for frame at {r['timestamp_seconds']:.1f}s (model: {model})", file=sys.stderr)
-
+            
             try:
                 req = urllib.request.Request(
                     normalized_endpoint,
@@ -341,7 +338,7 @@ def _fuse_results_with_ollama(results, query, frame_b64s, npz_name, model_id="cl
                 valid_score = res_json["answers"]["is_valid"]["noul"]
                 if len(models_tried) > 1:
                     # We tried multiple models before finding one that works
-                    print(f"Falling back from {models_tried[0]} to '{model}' for frame at {r['timestamp_seconds']:.1f}s", file=sys.stderr, flush=True)
+                    print(f"Falling back from {models_tried[0]} to '{model}'", file=sys.stderr, flush=True)
                 frame_model = model
                 break
             except Exception as e:
