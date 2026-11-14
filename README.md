@@ -225,16 +225,28 @@ vsearch index myvideo.mp4 -o cache.npz --model openai/clip-vit-base-patch16
 
 ### `index`
 
-Process a local video file, extract keyframes, compute embeddings, and save a compressed archive.
+Process one or more video files, extract keyframes, compute embeddings, and save compressed archives.
+
+**Batch indexing** supports multiple inputs at once:
+- Single file: `vsearch index myvideo.mp4`
+- Multiple files: `vsearch index vid1.mp4 vid2.mp4 vid3.mp4`
+- Glob patterns: `vsearch index "*.mp4"` or `vsearch index ./videos/*.mp4`
+- Directories: `vsearch index ./videos/` (scans all video files in the dir)
+- Mixed: `vsearch index vid1.mp4 ./dir/*.mp4 /other/path/`
 
 Flags:
-- `video` - Path to input video file (required)
-- `-o, --output OUTPUT` - Path to save the output cache archive (.npz). If a directory, auto-generates filename: `{video_name}_{model_name}_{sample_rate}_{md5_prefix8}.npz`
+- `video` - Path to input video file(s), directory(ies), or glob pattern(s) (required)
+- `-o, --output OUTPUT` - Output path. Single video: .npz file or directory. Batch: **must be a directory**. Auto-generates filename per video: `{video_name}_{model_name}_{sample_rate}s_{md5_prefix8}.npz`
 - `-r, --sample-rate SAMPLE_RATE` - Frame sampling interval in seconds (default: 1)
-- `-bs, --batch-size BATCH_SIZE` - Number of frames to encode in a single CLIP forward pass during indexing (default: 32). Larger batches reduce Python overhead and can speed up indexing on multi-core CPUs, at the cost of higher peak memory usage.
+- `-bs, --batch-size BATCH_SIZE` - Number of frames to encode in a single CLIP forward pass during indexing (default: 32)
 - `--model MODEL` - CLIP model variant (default: openai/clip-vit-base-patch32)
+- `-R, --recursive` - Recursively scan directories for video files
+- `-e, --ext EXT` - Comma-separated video file extensions to match in directories (default: mp4,avi,mov,mkv,webm,flv,wmv)
+- `--dry-run` - List the video files that would be indexed without processing them (useful for testing glob/directory matching)
 
 Indexing always prints progress logs to stderr.
+
+Batch indexing runs **sequentially** (one video at a time). If a video fails to encode, processing continues with remaining videos; failures are reported at the end.
 
 The `.npz` cache stores:
 - `embeddings` - CLIP feature vectors per keyframe

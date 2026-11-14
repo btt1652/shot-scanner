@@ -1,6 +1,7 @@
 """Command-line interface for vsearch."""
 
 import argparse
+import glob
 import hashlib
 import json
 import os
@@ -15,44 +16,175 @@ from .engine import VideoSearchEngine, BATCH_SIZE
 from .config import load_config, get_config_value
 
 
+DEFAULT_VIDEO_EXTENSIONS = [".mp4", ".avi", ".mov", ".mkv", ".webm", ".flv", ".wmv"]
+
+
+def _resolve_video_paths(inputs, recursive=False, extensions=None):
+    """Resolve a list of inputs (files, directories, glob patterns) into concrete video file paths.
+
+    Args:
+        inputs: list of input strings (file paths, directory paths, or glob patterns)
+        recursive: if True, scan directories recursively for video files
+        extensions: list of extensions (with leading dot) to match in directories; default DEFAULT_VIDEO_EXTENSIONS
+
+    Returns:
+        (video_paths, missing) where video_paths is a de-duplicated list of absolute paths
+        and missing is a list of inputs that matched nothing.
+    """
+    if extensions is None:
+        extensions = DEFAULT_VIDEO_EXTENSIONS
+    exts_lower = tuple(e.lower() for e in extensions)
+
+    resolved = []
+    seen = set()
+    missing = []
+
+    def _add(path):
+        p = os.path.abspath(path)
+        if os.path.isfile(p) and p not in seen:
+            seen.add(p)
+            resolved.append(p)
+
+    for inp in inputs:
+        matched_any = False
+
+        # 1. Directory: scan for video files
+        if os.path.isdir(inp):
+            walker = os.walk(inp) if recursive else [(inp, [], os.listdir(inp))]
+            for root, dirs, files in walker:
+                for fname in files:
+                    if fname.lower().endswith(exts_lower):
+                        _add(os.path.join(root, fname))
+                        matched_any = True
+
+        # 2. Glob pattern
+        elif any(c in inp for c in "*?[]"):
+            for m in sorted(glob.glob(inp, recursive=recursive)):
+                if os.path.isfile(m):
+                    _add(m)
+                    matched_any = True
+
+        # 3. Literal file path
+        else:
+            if os.path.isfile(inp):
+                _add(inp)
+                matched_any = True
+
+        if not matched_any:
+            missing.append(inp)
+
+    return resolved, missing
+
+
 def cmd_index(args):
     cfg = load_config()
     model = get_config_value(cfg, "index", "model", getattr(args, "model", None))
     sample_rate = get_config_value(cfg, "index", "sample_rate", getattr(args, "sample_rate", None))
     batch_size = get_config_value(cfg, "index", "batch_size", getattr(args, "batch_size", BATCH_SIZE))
-    engine = VideoSearchEngine(model_id=model)
+    recursive = getattr(args, "recursive", False)
+    dry_run = getattr(args, "dry_run", False)
+    
+    # Parse extensions arg
+    ext_arg = getattr(args, "ext", None)
+    if ext_arg:
+        extensions = [e if e.startswith(".") else "." + e for e in ext_arg.split(",") if e.strip()]
+    else:
+        extensions = None
 
     # Print config values (always)
     print(f"Config: model={model}, sample_rate={sample_rate}s, batch_size={batch_size}", file=sys.stderr)
 
-    embeddings, timestamps = engine.extract_and_encode(
-        args.video, sample_rate, batch_size
-    )
+    video_paths, missing = _resolve_video_paths(args.video, recursive=recursive, extensions=extensions)
 
-    # Compute MD5 of the source video for integrity checking
-    video_md5 = hashlib.md5()
-    with open(args.video, "rb") as f:
-        for chunk in iter(lambda: f.read(1 << 20), b""):
-            video_md5.update(chunk)
-    video_md5_hex = video_md5.hexdigest()
+    if missing:
+        for m in missing:
+            print(f"Warning: no video matched input '{m}'", file=sys.stderr)
 
-    # Auto-generate filename if output is a directory
+    if not video_paths:
+        print("Error: no video files found to index.", file=sys.stderr)
+        sys.exit(1)
+
+    # Dry run: just list matched files
+    if dry_run:
+        print(f"Dry run: {len(video_paths)} video file(s) would be indexed:", file=sys.stderr)
+        for i, vp in enumerate(video_paths, 1):
+            print(f"  [{i}] {vp}", file=sys.stderr)
+        return
+
     output_path = get_config_value(cfg, "index", "output_dir", getattr(args, "output", None))
-    video_name = os.path.splitext(os.path.basename(args.video))[0]
-    if os.path.isdir(output_path):
+    batch_mode = len(video_paths) > 1
+
+    # Validate output path for batch mode
+    if batch_mode:
+        if output_path and output_path.lower().endswith(".npz"):
+            print(
+                f"Error: batch indexing of {len(video_paths)} videos requires -o to be a directory, not a .npz file.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        os.makedirs(output_path, exist_ok=True)
+        output_is_dir = True
+    else:
+        # Single video
+        if output_path and output_path.lower().endswith(".npz"):
+            output_is_dir = False
+        else:
+            # Treat as directory (create if needed)
+            if output_path:
+                os.makedirs(output_path, exist_ok=True)
+            output_is_dir = True
+
+    engine = VideoSearchEngine(model_id=model)
+
+    total = len(video_paths)
+    failures = []
+    for idx, video_path in enumerate(video_paths, 1):
+        prefix = f"[{idx}/{total}]" if total > 1 else ""
+        print(f"{prefix} Indexing {video_path}...", file=sys.stderr)
+
+        try:
+            embeddings, timestamps = engine.extract_and_encode(video_path, sample_rate, batch_size)
+        except Exception as e:
+            print(f"{prefix} Error encoding {video_path}: {e}", file=sys.stderr)
+            failures.append((video_path, str(e)))
+            continue
+
+        # Compute MD5 of the source video for integrity checking
+        video_md5 = hashlib.md5()
+        with open(video_path, "rb") as f:
+            for chunk in iter(lambda: f.read(1 << 20), b""):
+                video_md5.update(chunk)
+        video_md5_hex = video_md5.hexdigest()
+
+        # Auto-generate filename
+        video_name = os.path.splitext(os.path.basename(video_path))[0]
         model_name = model.split("/")[-1]  # e.g., clip-vit-base-patch32
         md5_prefix = video_md5_hex[:8]  # first 8 chars
-        output_path = os.path.join(output_path, f"{video_name}_{model_name}_{sample_rate}s_{md5_prefix}.npz")
-    np.savez_compressed(
-        output_path,
-        embeddings=embeddings,
-        timestamps=timestamps,
-        model=model,
-        video_path=args.video,
-        md5=video_md5_hex,
-    )
-    if verbose:
-        print(f"Cache saved to {output_path} (model: {model})", file=sys.stderr)
+        out_name = f"{video_name}_{model_name}_{sample_rate}s_{md5_prefix}.npz"
+
+        if output_is_dir:
+            out_file = os.path.join(output_path, out_name)
+        else:
+            out_file = output_path
+
+        np.savez_compressed(
+            out_file,
+            embeddings=embeddings,
+            timestamps=timestamps,
+            model=model,
+            video_path=video_path,
+            md5=video_md5_hex,
+        )
+        print(f"{prefix} Cache saved to {out_file} ({len(embeddings)} keyframes)", file=sys.stderr)
+
+    # Report failures
+    if failures:
+        print(f"\nCompleted with {len(failures)} failure(s):", file=sys.stderr)
+        for vp, err in failures:
+            print(f"  {vp}: {err}", file=sys.stderr)
+        sys.exit(1)
+
+    print(f"\nDone: indexed {total} video(s).", file=sys.stderr)
 
 
 def _format_results_text(results):
@@ -591,11 +723,14 @@ def main():
     sub = parser.add_subparsers(dest="command", required=True)
 
     p_index = sub.add_parser("index", help="Extract keyframes and build a .npz cache")
-    p_index.add_argument("video", help="Path to input video file")
-    p_index.add_argument("--output", "-o", default=None, help="Path to save the output cache archive (.npz). If a directory, auto-generates filename: {video_name}_{model_name}_{sample_rate}_{md5_prefix8}.npz")
+    p_index.add_argument("video", nargs="+", help="Input video file(s), directory(ies), or glob pattern(s) (e.g. '*.mp4', './videos/', 'vid1.mp4 ./dir/*.mp4')")
+    p_index.add_argument("--output", "-o", default=None, help="Path to save the output cache archive (.npz). If a directory, auto-generates filename: {video_name}_{model_name}_{sample_rate}s_{md5_prefix8}.npz")
     p_index.add_argument("--sample-rate", "-r", type=int, default=None, help="Frame sampling interval in seconds (default: 1)")
     p_index.add_argument("--batch-size", "-bs", type=int, default=None, help="Batch size for frame encoding during indexing (default: 32)")
     p_index.add_argument("--model", "-m",default=None, help="CLIP model variant (default: openai/clip-vit-base-patch32)")
+    p_index.add_argument("--recursive", "-R", action="store_true", default=None, help="Recursively scan directories for video files")
+    p_index.add_argument("--ext", "-e", default=None, help="Comma-separated video file extensions to match in directories (default: mp4,avi,mov,mkv,webm,flv,wmv)")
+    p_index.add_argument("--dry-run", action="store_true", default=None, help="List the video files that would be indexed without processing them")
     
     p_index.set_defaults(func=cmd_index)
 
