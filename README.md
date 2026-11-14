@@ -107,6 +107,7 @@ Search-mode defaults (used when running `vsearch search`):
 - `fuse_weight_clip` - Weight given to the CLIP similarity score (0.0 to 1.0) during fusion
 - `fuse_weight_ollama` - Weight given to the Ollama judgment score (0.0 to 1.0) during fusion
 - `percentile` - Percentile cutoff (0.0 to 1.0, e.g. 0.2 keeps top 20%). Setting this automatically enables percentile filtering.
+- `extensions` - Default list of video file extensions to match when scanning directories in batch index mode (default: `['mp4', 'avi', 'mov', 'mkv', 'webm', 'flv', 'wmv']`). Overridden by the `-e/--ext` CLI flag.
 
 **CLI flags always override config values when specified.** If a flag is not given, the config value is used. If neither is set, the built-in default applies.
 
@@ -257,10 +258,25 @@ The `.npz` cache stores:
 
 ### `search`
 
-Query a pre-computed cache using either a text prompt or a reference image path.
+Query one or more pre-computed caches using either a text prompt or a reference image path.
+
+**Multi-cache search** supports searching across `.npz` files:
+
+**Non-recursive** (default): only `.npz` files directly in the specified directory are searched:
+- `vsearch search ./caches/ -t "woman smiling"` → searches only `./caches/*.npz`, not subdirs
+- `vsearch search ./caches/ -t "woman smiling" -R` → also searches subdirectories recursively
+
+**Single cache**:
+- `vsearch search cache.npz -t "woman smiling"`
+
+**Glob patterns**:
+- `vsearch search "./caches/*.npz" -t "woman smiling"` → only files matching the glob in the current directory
+
+When searching a directory (non-recursive), all `.npz` files directly in that directory are loaded and results are merged globally (sorted by score descending). Each result includes `source_cache` and `source_video_path` metadata.
 
 Flags:
-- `cache` - Path to pre-computed embeddings cache (.npz) (required)
+- `cache` - Path to pre-computed embeddings cache (.npz) or directory containing multiple .npz files (required)
+- `-R, --recursive` - Recursively scan directories for .npz cache files (default: false, only scans top-level directory)
 - `-t, --text` - Natural language search prompt
 - `-i, --image` - Path to reference image file for visual similarity matching
 - `-k, --top-k` - Maximum number of top results to return (default: all). Use `0` for no results, `-1` for unlimited.
@@ -281,6 +297,27 @@ Flags:
 
 **MD5 integrity check:** If `--video` is provided, vsearch verifies its MD5 hash against the `md5` field stored in the cache. If they do not match, vsearch exits with an error.
 
+## Output Modes
+
+### Text mode (default)
+
+When `--json` is not specified, results are printed as human-readable text lines:
+
+```
+ts=00:00:09  sim=0.2092
+ts=00:17:21  sim=0.2047
+ts=00:18:33  sim=0.2012
+ts=00:18:00  sim=0.1964  source_cache=hegre.26.09.01.hegre.male.orgasm.cumpilation.4k_clip-vit-large-patch14_3s_df0d2e44.npz  source_video_path=/mnt/hdd/hegre.26.09.01.hegre.male.orgasm.cumpilation.4k.mp4
+```
+
+Each line contains:
+- `ts=<HH:MM:SS>` - Timestamp of the matching frame
+- `sim=<0.0-1.0>` - Cosine similarity score
+- `source_cache=<filename>` - Which .npz cache file the result came from (multi-cache mode)
+- `source_video_path=<path>` - Path to the source video file (multi-cache mode)
+
+**Note:** `source_cache` and `source_video_path` fields are included in every result, regardless of whether the search is single-cache or multi-cache. They are always present in text mode output.
+
 ## Expected JSON Output Schema (`--json` flag)
 
 When `--json` is specified, the application prints strictly valid JSON to stdout matching this schema:
@@ -292,13 +329,34 @@ When `--json` is specified, the application prints strictly valid JSON to stdout
     {
       "timestamp_seconds": 252.0,
       "timestamp_formatted": "04:12",
-      "score": 0.5123
+      "score": 0.5123,
+      "source_cache": "video1_clip-vit-large-patch14_3s_7f84405d.npz",
+      "source_video_path": "/mnt/hdd/video1.mp4"
     }
-  ]
+  ],
+  "metadata": {
+    "cache_count": 2,
+    "caches": [
+      {
+        "file": "video1_clip-vit-large-patch14_3s_7f84405d.npz",
+        "model": "openai/clip-vit-large-patch14",
+        "video_path": "/mnt/hdd/video1.mp4",
+        "md5": "7f84405d...",
+        "frames": 560
+      },
+      {
+        "file": "video2_clip-vit-large-patch14_3s_abcdef12.npz",
+        "model": "openai/clip-vit-large-patch14",
+        "video_path": "/mnt/hdd/video2.mp4",
+        "md5": "abcdef12...",
+        "frames": 420
+      }
+    ]
+  }
 }
 ```
 
-`score` is the raw cosine similarity (0.0–1.0). Min‑max normalization was removed entirely.
+`score` is the raw cosine similarity (0.0–1.0). `source_cache` and `source_video_path` are included per result to identify which cache and video each frame came from (always present, even for single-cache searches). `metadata.caches` lists every loaded cache. Min‑max normalization was removed entirely.
 
 ## Architecture
 

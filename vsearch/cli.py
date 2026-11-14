@@ -191,9 +191,11 @@ def _format_results_text(results):
     """Format results as human-readable text lines."""
     lines = []
     for r in results:
-        lines.append(
-            f"ts={r['timestamp_formatted']}  sim={r['score']:.4f}"
-        )
+        entry = f"ts={r['timestamp_formatted']}  sim={r['score']:.4f}"
+        # Include source_cache and source_video_path when present (multi-cache)
+        if 'source_cache' in r and 'source_video_path' in r:
+            entry += f"  source_cache={r['source_cache']}  source_video_path={r['source_video_path']}"
+        lines.append(entry)
     return "\n".join(lines)
 
 
@@ -258,17 +260,20 @@ def _extract_frame_at(video_path, timestamp, out_path):
 
 
 def _extract_frames_lazy(results, video_path, verbose=False, frame_scale=0.2):
-    """Yield frames one at a time (lazy generator) to avoid holding all in memory."""
-    if not video_path:
-        return
+    """Yield frames one at a time (lazy generator) to avoid holding all in memory.
+
+    Uses per-result source_video_path when available (multi-cache search).
+    """
     for r in results:
+        vp = r.get("source_video_path") or video_path
+        if not vp:
+            continue
         ts = r["timestamp_seconds"]
-        ts_str = f"{int(ts)//3600:02d}{int(ts)%3600//60:02d}{int(ts)%60:02d}"
-        frame_b64 = _extract_frame_base64(video_path, ts, frame_scale=frame_scale)
+        frame_b64 = _extract_frame_base64(vp, ts, frame_scale=frame_scale)
         if frame_b64:
             yield frame_b64
         elif verbose:
-            print(f"Failed to extract frame at {ts:.1f}s", file=sys.stderr)
+            print(f"Failed to extract frame at {ts:.1f}s from {vp}", file=sys.stderr)
 
 
 def _save_matched_frames(results, npz_name, video_path, output_dir, verbose=False):
@@ -284,18 +289,19 @@ def _save_matched_frames(results, npz_name, video_path, output_dir, verbose=Fals
         else:
             ts_formatted = f"{int(ts)//60:02d}:{int(ts)%60:02d}"
         # Use the original video filename (without extension) if provided, else npz_name
-        if video_path:
-            video_name = os.path.splitext(os.path.basename(video_path))[0]
+        vp = r.get("source_video_path") or video_path
+        if vp:
+            video_name = os.path.splitext(os.path.basename(vp))[0]
         else:
             video_name = npz_name
         out_path = os.path.join(output_dir, f"{video_name}_{ts_formatted}_{r['score']:.4f}.jpg")
-        if _extract_frame_at(video_path, ts, out_path):
+        if _extract_frame_at(vp, ts, out_path):
             saved += 1
             frame_paths.append(out_path)
             if verbose:
                 print(f"Saved frame at {ts:.1f}s -> {out_path}", file=sys.stderr)
         elif verbose:
-            print(f"Failed to extract frame at {ts:.1f}s", file=sys.stderr)
+            print(f"Failed to extract frame at {ts:.1f}s from {vp}", file=sys.stderr)
     return saved, frame_paths
 
 
@@ -513,6 +519,63 @@ def _fuse_results_with_ollama(results, query, frame_b64s, npz_name, model_id="cl
 
 
 
+def load_cache_file(cache_path):
+    """Load a single .npz cache file.
+
+    Returns a dict with keys:
+      embeddings, timestamps, model, video_path, md5, file_path
+    Raises ValueError if required fields are missing.
+    """
+    try:
+        data = np.load(cache_path, allow_pickle=False)
+        if "embeddings" not in data or "timestamps" not in data:
+            raise ValueError("Missing required fields: embeddings or timestamps")
+        cache_model = data.get("model")
+        cache_video_path = data.get("video_path")
+        stored_md5 = str(data["md5"].item()) if "md5" in data else "N/A"
+        return {
+            "embeddings": data["embeddings"],
+            "timestamps": data["timestamps"],
+            "model": cache_model,
+            "video_path": cache_video_path,
+            "md5": stored_md5,
+            "file_path": cache_path,
+            "file_name": os.path.basename(cache_path),
+        }
+    except Exception as e:
+        raise ValueError(f"Failed to load {cache_path}: {e}")
+
+
+def discover_cache_files(cache_path, recursive=False):
+    """Discover .npz cache files from a directory or a single file.
+
+    Args:
+        cache_path: Path to .npz file or directory.
+        recursive: If True, scan directories recursively for .npz files.
+
+    Returns sorted list of absolute file paths.
+    """
+    if os.path.isfile(cache_path):
+        return [os.path.abspath(cache_path)]
+    elif os.path.isdir(cache_path):
+        caches = []
+        if recursive:
+            for root, dirs, files in os.walk(cache_path):
+                for fname in sorted(files):
+                    if fname.lower().endswith(".npz"):
+                        caches.append(os.path.abspath(os.path.join(root, fname)))
+        else:
+            for fname in sorted(os.listdir(cache_path)):
+                if fname.lower().endswith(".npz"):
+                    fpath = os.path.join(cache_path, fname)
+                    if os.path.isfile(fpath):
+                        caches.append(os.path.abspath(fpath))
+        return caches
+    else:
+        print(f"Error: '{cache_path}' is neither a valid .npz file nor a directory.", file=sys.stderr)
+        sys.exit(1)
+
+
 def cmd_search(args):
     cfg = load_config()
 
@@ -533,6 +596,7 @@ def cmd_search(args):
     fuse_weight_ollama = cfg_val("fuse_weight_ollama", "fuse_weight_ollama")
     percentile = cfg_val("percentile", "percentile")
     frame_scale = cfg_val("ollama_frame_scale", "ollama_frame_scale")
+    recursive = getattr(args, "recursive", False)
 
     # Print config values in verbose mode
     if verbose:
@@ -541,104 +605,87 @@ def cmd_search(args):
         print(f"Config: top_k={top_k}, raw_floor={raw_floor:.2f}, json_output={json_output}{pct_str}", file=sys.stderr)
         print(f"        save_frames={save_frames}, video={video_path}, fuse={fuse}, ollama_host={ollama_endpoint}, ollama_model={_models}, fuse_threshold={fuse_threshold}, fuse_weight_clip={fuse_weight_clip:.2f}, fuse_weight_ollama={fuse_weight_ollama:.2f}, ollama_frame_scale={frame_scale:.2f}", file=sys.stderr)
 
-    data = np.load(args.cache, allow_pickle=False)
-    embeddings = data["embeddings"]
-    timestamps = data["timestamps"]
-    cache_model = data.get("model")
-    cache_video_path = data.get("video_path")
-    stored_md5 = str(data["md5"].item()) if "md5" in data else "N/A"
-
-    if verbose:
-        print(f"Cache Info: model={cache_model}, video_path={cache_video_path}, md5={stored_md5}", file=sys.stderr)
-
-    # Update video_path to use the one from cache
-    # Note: if user explicitly passed --video, we respect that.
-    if args.video is not None:
-        video_path = args.video
-    else:
-        video_path = cache_video_path if cache_video_path else data.get("video_path")
-
-    # MD5 is mandatory in cache
-    if "md5" not in data:
-        print(
-            f"Error: cache '{args.cache}' is missing required 'md5' field. "
-            f"Re-index the video to add integrity metadata.",
-            file=sys.stderr,
-        )
+    # Support single path or multiple paths (like index mode)
+    cache_args = args.cache
+    if not isinstance(cache_args, list):
+        cache_args = [cache_args]
+    cache_files = []
+    for ca in cache_args:
+        found = discover_cache_files(ca, recursive=recursive)
+        for f in found:
+            if f not in cache_files:
+                cache_files.append(f)
+    if not cache_files:
+        print(f"Error: no .npz caches found.", file=sys.stderr)
         sys.exit(1)
-    stored_md5 = str(data["md5"].item())
-
-    if args.video is not None:
-        if not os.path.exists(args.video):
-            print(f"Error: --video file '{args.video}' does not exist.", file=sys.stderr)
-            sys.exit(1)
-        actual_md5 = hashlib.md5()
-        with open(args.video, "rb") as f:
-            for chunk in iter(lambda: f.read(1 << 20), b""):
-                actual_md5.update(chunk)
-        actual_md5_hex = actual_md5.hexdigest()
-        if actual_md5_hex != stored_md5:
-            print(
-                f"Error: MD5 mismatch for --video '{args.video}'. "
-                f"Cache '{args.cache}' was indexed from a different video file "
-                f"(stored MD5: {stored_md5}).",
-                file=sys.stderr,
-            )
-            sys.exit(1)
-        if verbose:
-            print(f"MD5 verified for {args.video}", file=sys.stderr)
-
-    if video_path is not None:
-        video_path = str(video_path.item()) if hasattr(video_path, "item") else str(video_path)
-        if not os.path.exists(video_path):
-            print(f"Error: video file '{video_path}' does not exist in cache '{args.cache}'. "
-                      f"Re-index the video or manually provide --video flag when running search.",
-                      file=sys.stderr,)
-            sys.exit(1)
 
     # Derive cache name from the .npz filename for result/frame naming
-    npz_name = os.path.splitext(os.path.basename(args.cache))[0]
+    npz_name = os.path.splitext(os.path.basename(cache_files[0]))[0]
 
-    # Model must match the one used to index the cache. Derive it solely from the
-    # cache so a CLI flag can never cause a mismatch (bad/empty results).
-    npz_model = None
-    if "model" in data:
-        try:
-            npz_model = str(data["model"].item())
-        except Exception:
-            pass
-
-    if npz_model is not None:
-        model = npz_model
-        if verbose:
-            print(f"Using model from cache: {model}", file=sys.stderr)
+    # Determine query
+    if args.text is not None:
+        query = args.text
+    elif args.image is not None:
+        query = args.image
     else:
-        print(
-            f"Error: cache '{args.cache}' does not record the indexing model "
-            f"(missing 'model' field). Re-index the video to add model metadata.",
-            file=sys.stderr,
-        )
-        sys.exit(1)
+        print("search requires either --text or --image", file=sys.stderr)
+        sys.exit(2)
 
-    engine = VideoSearchEngine(model_id=model)
+    # Load all caches
+    loaded_caches = []
+    for cf in cache_files:
+        try:
+            loaded_caches.append(load_cache_file(cf))
+        except ValueError as e:
+            print(f"Warning: {e}. Skipping.", file=sys.stderr)
 
-    # Query: text or image
-    # When fuse is enabled, expand candidate pool to top_k * 2 to allow for
-    # frames that fail the Ollama fused score check; we keep a reserve buffer
-    # capped at top_k extra candidates.
+    # When fuse is enabled, expand candidate pool to top_k * 2
     search_top_k = top_k
     if fuse and top_k is not None and top_k > 0:
         search_top_k = top_k * 2
 
-    if args.text is not None:
-        query = args.text
-        results = engine.search_text(query, embeddings, timestamps, search_top_k, raw_floor, percentile=percentile)
-    elif args.image is not None:
-        query = args.image
-        results = engine.search_image(query, embeddings, timestamps, search_top_k, raw_floor, percentile=percentile)
+    # Determine the effective video_path (for backward compat and fusion fallback)
+    if args.video is not None:
+        video_path = args.video
     else:
-        print("search requires either --text or --image", file=sys.stderr)
-        sys.exit(2)
+        video_path = None
+        for c in loaded_caches:
+            if c["video_path"]:
+                video_path = c["video_path"]
+                break
+
+    if not loaded_caches:
+        print("Error: no usable caches found.", file=sys.stderr)
+        sys.exit(1)
+
+    # Run search per cache and combine results
+    engine = None
+    all_results = []
+    for c in loaded_caches:
+        this_model = c["model"]
+        this_model = str(this_model.item()) if hasattr(this_model, "item") else (str(this_model) if this_model is not None else None)
+        if not this_model:
+            print(f"Error: cache '{c['file_path']}' does not record the indexing model (missing 'model'). Re-index the video.", file=sys.stderr)
+            sys.exit(1)
+        if engine is None:
+            engine = VideoSearchEngine(model_id=this_model)
+        if verbose:
+            print(f"Using model from cache: {this_model}", file=sys.stderr)
+        this_video_path = c["video_path"]
+        if this_video_path is not None:
+            this_video_path = str(this_video_path.item()) if hasattr(this_video_path, "item") else str(this_video_path)
+        if args.text is not None:
+            cache_results = engine.search_text(query, c["embeddings"], c["timestamps"], search_top_k, raw_floor, percentile=percentile)
+        else:
+            cache_results = engine.search_image(query, c["embeddings"], c["timestamps"], search_top_k, raw_floor, percentile=percentile)
+        for r in cache_results:
+            r["source_cache"] = c["file_name"]
+            r["source_video_path"] = this_video_path
+            all_results.append(r)
+
+    # Global sort by score descending
+    all_results.sort(key=lambda r: r.get("score", 0.0), reverse=True)
+    results = all_results
 
     # Perform Ollama validation first (so failing frames are discarded before saving)
     if fuse:
@@ -648,8 +695,14 @@ def cmd_search(args):
         if not ollama_models:
             ollama_models = ["clef-flash"]
         if not video_path:
-            print("--video is required when using --decision_model_fuse", file=sys.stderr)
-            sys.exit(2)
+            # Fall back to per-result video_path (multi-cache)
+            for r in results:
+                if r.get("source_video_path"):
+                    video_path = r["source_video_path"]
+                    break
+            if not video_path:
+                print("--video is required when using --decision_model_fuse and no cache has a video_path", file=sys.stderr)
+                sys.exit(2)
 
         # Extract frames lazily and validate top-down
         frame_b64_gen = _extract_frames_lazy(results, video_path, verbose, frame_scale=frame_scale)
@@ -664,8 +717,14 @@ def cmd_search(args):
     # Save frames for remaining (validated) results only
     if save_frames:
         if not video_path:
-            print("--video is required when using --save-frames", file=sys.stderr)
-            sys.exit(2)
+            # Fall back to per-result video_path (multi-cache)
+            for r in results:
+                if r.get("source_video_path"):
+                    video_path = r["source_video_path"]
+                    break
+            if not video_path:
+                print("--video is required when using --save-frames and no cache has a video_path", file=sys.stderr)
+                sys.exit(2)
 
         os.makedirs(save_frames, exist_ok=True)
         saved_count, frame_paths = _save_matched_frames(results, npz_name, video_path, save_frames, verbose)
@@ -688,6 +747,28 @@ def cmd_search(args):
                 return v.decode("utf-8", errors="replace")
             return v
 
+        # Build per-cache metadata summary
+        caches_meta = []
+        for c in loaded_caches:
+            cm = c["model"]
+            cm = str(cm.item()) if hasattr(cm, "item") else (str(cm) if cm is not None else None)
+            cvp = c["video_path"]
+            cvp = str(cvp.item()) if hasattr(cvp, "item") else (str(cvp) if cvp is not None else None)
+            caches_meta.append({
+                "file": c["file_name"],
+                "model": cm,
+                "video_path": cvp,
+                "md5": c["md5"],
+                "frames": int(len(c["timestamps"])),
+            })
+
+        # Backward-compatible single-cache fields (first cache)
+        first_cache = loaded_caches[0]
+        _cm = first_cache["model"]
+        _cm = str(_cm.item()) if hasattr(_cm, "item") else (str(_cm) if _cm is not None else None)
+        _cvp = first_cache["video_path"]
+        _cvp = str(_cvp.item()) if hasattr(_cvp, "item") else (str(_cvp) if _cvp is not None else None)
+
         payload = {
             "query": query,
             "results": results,
@@ -705,9 +786,11 @@ def cmd_search(args):
                 "fuse_weight_ollama": _safe(fuse_weight_ollama),
                 "ollama_frame_scale": _safe(frame_scale),
                 "percentile": _safe(percentile),
-                "cache_model": _safe(cache_model),
-                "cache_video_path": _safe(cache_video_path),
-                "cache_md5": _safe(stored_md5),
+                "cache_model": _safe(_cm),
+                "cache_video_path": _safe(_cvp),
+                "cache_md5": _safe(first_cache["md5"]),
+                "cache_count": len(loaded_caches),
+                "caches": caches_meta,
             },
         }
         print(json.dumps(payload))
@@ -716,6 +799,7 @@ def cmd_search(args):
             print(_format_results_text(results))
         else:
             print("No matches found.")
+
 
 
 def main():
@@ -735,7 +819,7 @@ def main():
     p_index.set_defaults(func=cmd_index)
 
     p_search = sub.add_parser("search", help="Query a pre-computed cache")
-    p_search.add_argument("cache", help="Path to pre-computed embeddings cache (.npz)")
+    p_search.add_argument("cache", nargs="+", help="Path to pre-computed embeddings cache (.npz), directory, or glob pattern (e.g. '*.npz', './caches/', 'cache1.npz cache2.npz')")
     p_search.add_argument("--text", "-t", default=None, help="Natural language search prompt")
     p_search.add_argument("--image", "-i", default=None, help="Path to reference image file")
     p_search.add_argument("--top-k", "-k", type=int, default=None, help="Maximum number of top results to return (default: all)")
@@ -752,6 +836,7 @@ def main():
     p_search.add_argument("--ollama-host","-oh", default=None, help="Ollama server addr (default: 192.168.1.190). Falls back to localhost if unreachable")
     p_search.add_argument("--ollama-frame-scale","-ofs", type=float, default=None, help="Scale factor for frames sent to Ollama decision model (0.0-1.0, default: 0.2). Lower values = faster inference")
     p_search.add_argument("--ollama-model","-dm", default=None, help="Ollama decision model name(s), comma-separated fallback list tried in order for validation")
+    p_search.add_argument("--recursive", "-R", action="store_true", default=None, help="Recursively scan directories for .npz cache files")
     p_search.set_defaults(func=cmd_search)
 
     args = parser.parse_args()
