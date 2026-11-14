@@ -36,12 +36,13 @@ def default_config() -> dict:
             "json_output": False,
             "save_frames": None,
             "video": None,
-            "decision_model_rerank": False,
-            "ollama_host": ["192.168.1.190", "localhost"],
+            "decision_model_fuse": False,
+            "ollama_host": "192.168.1.190",
+            "ollama_frame_scale": 0.2,
             "ollama_decision_model": ["clef-flash", "d3:4b"],
-            "rerank_threshold": 0.5,
-            "rerank_weight_clip": 0.3,
-            "rerank_weight_ollama": 0.7,
+            "fuse_threshold": 0.5,
+            "fuse_weight_clip": 0.3,
+            "fuse_weight_ollama": 0.7,
             "percentile": 0.1
         }
     }

@@ -43,7 +43,7 @@ video_path → Extract frames (OpenCV) → Encode images to embeddings → Save 
 ```
 cache.npz + query (text/image) → Load embeddings → Encode query → Raw cosine similarity
     → Sort descending → raw_floor / percentile filter → Top-k cap
-    → Optional frame extraction → Optional Ollama reranking → Output
+    → Optional frame extraction → Optional Ollama fusion → Output
 ```
 - Loads cached embeddings and model
 - Encodes query (text/image) using same CLIP model
@@ -51,12 +51,12 @@ cache.npz + query (text/image) → Load embeddings → Encode query → Raw cosi
 - Applies the calibrated floor (`raw_floor`) and/or optional percentile cutoff, then the `top_k` cap
 - Ranks by raw similarity (highest first)
 - **Frame extraction**: For each ranked result, extracts frame from cached `video_path`
-- **Reranking**: If `--decision_model_rerank` enabled, checks each remaining frame with the Ollama decision model **after** the CLIP ranking, filtering and top-k cap:
+- **Fusion**: If `--decision-model-fuse` enabled, checks each remaining frame with the Ollama decision model **after** the CLIP ranking, filtering and top-k cap:
   - Each frame is scored by Ollama and fused with its CLIP cosine similarity
-  - Fused score: `(cosine_similarity * rerank_weight_clip) + (ollama_score * rerank_weight_ollama)`
-  - Results are re-sorted by fused score; results whose fused score is below `rerank_threshold` are discarded
+  - Fused score: `(cosine_similarity * fuse_weight_clip) + (ollama_score * fuse_weight_ollama)`
+  - Results are re-sorted by fused score; results whose fused score is below `fuse_threshold` are discarded
   - Passing results are returned with their original timestamps and scores
-  - Configurable via `rerank_threshold` in `config.toml` or `--decision-model-rerank` CLI flag
+  - Configurable via `fuse_threshold` in `config.toml` or `--decision-model-fuse` CLI flag
 
 ### Output formats
 - **Default**: Human-readable table to stdout
@@ -99,12 +99,13 @@ Search-mode defaults (used when running `vsearch search`):
 - `json_output` - Output results in JSON format
 - `save_frames` - Directory to save matched frame images
 - `video` - Path to original video file
-- `decision_model_rerank` - Enable Ollama decision model reranking
-- `ollama_host` - Ollama API endpoint (first priority). Accepts a single URL or a list of endpoints tried in order until one is reachable. Bare hosts are accepted too, e.g. `192.168.1.190` or `localhost:11434`.
+- `decision_model_fuse` - Enable Ollama decision model fusion (true/false)
+- `ollama_host` - Ollama API endpoint (single string, e.g. `"192.168.1.190"`). If unreachable, automatically falls back to `localhost`. Fallback state is remembered for the current run.
 - `ollama_decision_model` - Ollama decision model name, or a list of model names tried in order (primary first, fallback second) if a model call fails
-- `rerank_threshold` - Threshold for the fused reranking score
-- `rerank_weight_clip` - Weight given to the CLIP similarity score (0.0 to 1.0) during reranking
-- `rerank_weight_ollama` - Weight given to the Ollama judgment score (0.0 to 1.0) during reranking
+- `ollama_frame_scale` - Scale factor for frames sent to Ollama decision model (0.0-1.0, default: 0.2). Lower values = faster inference on CPU
+- `fuse_threshold` - Threshold for the fused score (default: 0.5). Results with score < threshold are discarded.
+- `fuse_weight_clip` - Weight given to the CLIP similarity score (0.0 to 1.0) during fusion
+- `fuse_weight_ollama` - Weight given to the Ollama judgment score (0.0 to 1.0) during fusion
 - `percentile` - Percentile cutoff (0.0 to 1.0, e.g. 0.2 keeps top 20%). Setting this automatically enables percentile filtering.
 
 **CLI flags always override config values when specified.** If a flag is not given, the config value is used. If neither is set, the built-in default applies.
@@ -123,32 +124,38 @@ raw_floor = 0.25
 json_output = false
 save_frames = ""
 video = ""
-decision_model_rerank = false
-ollama_host = ["192.168.1.190", "localhost"]
+decision_model_fuse = false
+ollama_host = "192.168.1.190"
+ollama_frame_scale = 0.2
 ollama_decision_model = ["d3:4b", "clef-flash"]
-rerank_threshold = 0.5
-rerank_weight_clip = 0.3
-rerank_weight_ollama = 0.7
+fuse_threshold = 0.5
+fuse_weight_clip = 0.3
+fuse_weight_ollama = 0.7
 percentile = 0.1
 ```
 
 ## Ollama endpoint resolution
 
-When `decision_model_rerank` is enabled, the Ollama endpoint is resolved at search time:
+When `decision_model_fuse` is enabled, the Ollama endpoint is resolved at search time:
 
-1. Each endpoint in `ollama_host` is tried in order (primary first).
-2. The first reachable endpoint is used for validation.
-3. If none is reachable, the first endpoint in the list is used anyway (validation requests will fail per-frame and be discarded).
+1. The primary endpoint in `ollama_host` is tried first.
+2. If reachable, it is used and the result is cached for the current run.
+3. If unreachable, automatically falls back to `localhost`. The fallback state is remembered for the current run (no re-checking).
+4. If both are unreachable, the primary endpoint is used anyway (validation requests will fail per-frame and be discarded).
 
-This lets you configure a remote server as primary and a local fallback in a single key, e.g.:
+This lets you configure a remote server as primary with automatic local fallback:
 
 ```toml
-ollama_host = ["192.168.1.190", "localhost"]
+ollama_host = "192.168.1.190"
 ```
 
-Bare hosts (with or without a port) are normalized to `http://<host>:11434/v1/systemone`. The same list can be passed on the CLI with `--ollama-endpoint 192.168.1.190,localhost`.
+Bare hosts (with or without a port) are normalized to `http://<host>:11434/v1/systemone`. The same can be passed on the CLI with `--ollama-host 192.168.1.190`.
 
-The decision model (`ollama_decision_model`) also accepts a list and works the same way at validation time: each frame is sent to the first model; if that model call fails (e.g. model not loaded on the server), the next model is tried for that frame before the frame is discarded. Pass a fallback list on the CLI with `--ollama-model d3:4b,clef-flash`.
+### Model fallback
+
+The decision model (`ollama_decision_model`) also accepts a list and works the same way at validation time: each frame is sent to the first model; if that model call fails with a definitive error (e.g. model not found / 404), the next model is tried for that frame. **Timeouts are not treated as permanent failures** - the model will be retried on the next frame. Once a model succeeds, it is remembered as the resolved model for all subsequent frames in the run.
+
+Pass a fallback list on the CLI with `--ollama-model d3:4b,clef-flash`.
 
 ## Scoring & Thresholding
 
@@ -183,19 +190,19 @@ Order of operations for a search:
 2. Sort descending.
 3. Apply `raw_floor` and (if enabled) the percentile cutoff.
 4. Apply the `top_k` cap.
-5. (Optional) rerank the remaining frames with Ollama, then re-sort and apply `rerank_threshold`.
+5. (Optional) fuse the remaining frames with Ollama, then re-sort and apply `fuse_threshold`.
 
 So `top_k` is a **fixed-count cap** of the highest-scoring frames that already passed the other filters, while `percentile` filters by **share of the total frame set** (whose count you don't know up front).
 
-### Reranking (Ollama decision model)
+### Fusing (Ollama decision model)
 
-Reranking runs **last** — after the CLIP raw-cosine ranking, `raw_floor`/percentile filtering and the `top_k` cap. When `decision_model_rerank` is enabled, the system:
+Fusion runs **last** — after the CLIP raw-cosine ranking, `raw_floor`/percentile filtering and the `top_k` cap. When `decision_model_fuse` is enabled, the system:
 1. Takes the frames remaining after step 4 above (CLIP-ranked, filtered, top-k capped).
 2. Extracts each frame and queries Ollama for a validation score (`ollama_score`, `[0, 1]`).
-3. Calculates a **fused score**: `(cosine_similarity * rerank_weight_clip) + (ollama_score * rerank_weight_ollama)`.
+3. Calculates a **fused score**: `(cosine_similarity * fuse_weight_clip) + (ollama_score * fuse_weight_ollama)`.
    - The CLIP term is the frame's **raw cosine similarity** (the same value reported as `score`).
 4. Re-sorts these frames by the fused score (descending).
-5. Discards any results where the fused score is below `rerank_threshold`.
+5. Discards any results where the fused score is below `fuse_threshold`.
 
 This ensures that results that are visually strong but perhaps slightly less "certain" from the LLM still rank highly, while very high-confidence LLM matches move to the top.
 
@@ -250,14 +257,15 @@ Flags:
 - `--percentile` - Percentile cutoff (0.0 to 1.0, e.g. 0.2 keeps top 20%). Setting this enables percentile filtering automatically.
 - `--save-frames, -f` - Directory to save matched frame images as `{cache_name}_{HHMMSS}_{score}.jpg`
 - `--video` - Path to original video file (required with --save-frames if not recorded in cache, or if video was moved)
-- `--decision-model-rerank` - Use local Ollama decision model to rerank top-K selected frames. Each frame is checked independently; results whose fused score is below `rerank_threshold` are discarded from match results.
-- `--rerank_threshold` - Threshold for the fused reranking score (default: 0.5). Results with score < threshold are discarded.
-- `--rerank_weight_clip` - Weight given to the CLIP similarity score in the fused reranking score (default: 0.3). CLI flag; also configurable via `rerank_weight_clip` in `config.toml`.
-- `--rerank_weight_ollama` - Weight given to the Ollama judgment score in the fused reranking score (default: 0.7). CLI flag; also configurable via `rerank_weight_ollama` in `config.toml`.
-- `--ollama_host` - Ollama API endpoint (default: http://localhost:11434/v1/systemone)
-- `--ollama_model` - Ollama model name for decision validation. Config key: `ollama_decision_model`.
+- `--decision-model-fuse` - Use local Ollama decision model to fuse top-K selected frames. Each frame is checked independently; results whose fused score is below `fuse_threshold` are discarded from match results.
+- `--fuse-threshold` - Threshold for the fused score (default: 0.5). Results with score < threshold are discarded.
+- `--fuse-weight-clip` - Weight given to the CLIP similarity score in the fused score (default: 0.3). CLI flag; also configurable via `fuse_weight_clip` in `config.toml`.
+- `--fuse-weight-ollama` - Weight given to the Ollama judgment score in the fused score (default: 0.7). CLI flag; also configurable via `fuse_weight_ollama` in `config.toml`.
+- `--ollama-host` - Ollama server addr (default: 192.168.1.190). Falls back to localhost if unreachable. Config key: `ollama_host`.
+- `--ollama-frame-scale` - Scale factor for frames sent to Ollama decision model (0.0-1.0, default: 0.2). Lower values = faster inference on CPU. Config key: `ollama_frame_scale`.
+- `--ollama-model` - Ollama model name for decision validation. Config key: `ollama_decision_model`.
 
-**Auto video path:** If `--save_frames` or `--decision_model_rerank` is used, vsearch looks for `video_path` stored in the `.npz` cache from the indexing step. If the cached video path exists, it is used automatically — you don't need to pass `--video`. If the video was moved and the cached path no longer exists, vsearch exits with an error and you must provide `--video` with the new path.
+**Auto video path:** If `--save-frames` or `--decision-model-fuse` is used, vsearch looks for `video_path` stored in the `.npz` cache from the indexing step. If the cached video path exists, it is used automatically — you don't need to pass `--video`. If the video was moved and the cached path no longer exists, vsearch exits with an error and you must provide `--video` with the new path.
 
 **MD5 integrity check:** If `--video` is provided, vsearch verifies its MD5 hash against the `md5` field stored in the cache. If they do not match, vsearch exits with an error.
 

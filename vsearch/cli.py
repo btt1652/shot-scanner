@@ -60,13 +60,22 @@ def _format_results_text(results):
     lines = []
     for r in results:
         lines.append(
-            f"{r['timestamp_formatted']}  sim={r['score']:.4f}"
+            f"ts={r['timestamp_formatted']}  sim={r['score']:.4f}"
         )
     return "\n".join(lines)
 
 
-def _extract_frame_base64(video_path, timestamp):
-    """Extract a single frame from video at given timestamp and return base64-encoded JPEG."""
+def _extract_frame_base64(video_path, timestamp, frame_scale=0.2):
+    """Extract a single frame from video at given timestamp and return base64-encoded JPEG.
+    
+    Args:
+        video_path: Path to video file
+        timestamp: Frame timestamp in seconds
+        frame_scale: Scale factor for frame (0.0-1.0, default: 0.2)
+                   Image is resized to this percentage of original size before sending to Ollama.
+                   Lower values = faster inference (more tokens = slower)
+                   Typical range: 0.1-0.3 (faster inference) or 0.5-1.0 (higher accuracy)
+    """
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
         return ""
@@ -80,8 +89,17 @@ def _extract_frame_base64(video_path, timestamp):
     if not ret:
         return ""
     img = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    # Downscale frame before sending to Ollama decision model to speed up inference
+    # Vision models process pixels as tokens - full-res frames are very slow on CPU
+    # Scale by frame_scale percentage of original size while preserving aspect ratio
+    h, w = img.shape[:2]
+    new_h = int(h * frame_scale)
+    new_w = int(w * frame_scale)
+    if new_h < 1 or new_w < 1:
+        new_h, new_w = max(1, int(h * frame_scale)), max(1, int(w * frame_scale))
+    img_small = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_AREA)
     # Encode to JPEG using imencode
-    success, encoded = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 85])
+    success, encoded = cv2.imencode(".jpg", img_small, [cv2.IMWRITE_JPEG_QUALITY, 90])
     if not success:
         return ""
     # Convert to base64
@@ -107,14 +125,14 @@ def _extract_frame_at(video_path, timestamp, out_path):
     return True
 
 
-def _extract_frames_lazy(results, video_path, verbose=False):
+def _extract_frames_lazy(results, video_path, verbose=False, frame_scale=0.2):
     """Yield frames one at a time (lazy generator) to avoid holding all in memory."""
     if not video_path:
         return
     for r in results:
         ts = r["timestamp_seconds"]
         ts_str = f"{int(ts)//3600:02d}{int(ts)%3600//60:02d}{int(ts)%60:02d}"
-        frame_b64 = _extract_frame_base64(video_path, ts)
+        frame_b64 = _extract_frame_base64(video_path, ts, frame_scale=frame_scale)
         if frame_b64:
             yield frame_b64
         elif verbose:
@@ -205,34 +223,64 @@ def _ollama_endpoint_reachable(endpoint, timeout=5.0):
         return False
 
 
-def resolve_ollama_endpoint(endpoints, verbose=False):
-    """Use the first reachable Ollama endpoint from the list (primary first, fallback second).
+# Module-level state to remember fallback resolution for the current run
+_ollama_resolved_endpoint = None
+_ollama_failed_models = set()
+_ollama_resolved_model = None
 
-    Accepts a list of endpoint URLs (or a single string). Returns the endpoint to use.
+
+def resolve_ollama_endpoint(primary_endpoint, verbose=False):
+    """Resolve the Ollama endpoint with automatic fallback to localhost.
+
+    Tries the primary endpoint first. If unreachable, falls back to localhost.
+    Remembers the resolved endpoint for the current run to avoid re-checking.
+
+    Args:
+        primary_endpoint: The primary Ollama endpoint (e.g., '192.168.1.190')
+        verbose: Whether to print verbose output
+
+    Returns:
+        The resolved endpoint URL to use for this run
     """
-    if not endpoints:
-        return None
-    if not isinstance(endpoints, (list, tuple)):
-        endpoints = [endpoints]
-    for ep in endpoints:
-        if ep and _ollama_endpoint_reachable(ep):
-            return _normalize_ollama_endpoint(ep)
-    if verbose and endpoints:
-        print(f"Ollama endpoint(s) {list(endpoints)} unreachable; using first endpoint {endpoints[0]} as fallback", file=sys.stderr, flush=True)
-    return _normalize_ollama_endpoint(endpoints[0])
+    global _ollama_resolved_endpoint
+    
+    # Return cached result if already resolved
+    if _ollama_resolved_endpoint is not None:
+        return _ollama_resolved_endpoint
+    
+    # Normalize primary endpoint
+    primary = _normalize_ollama_endpoint(primary_endpoint) if primary_endpoint else None
+    fallback = _normalize_ollama_endpoint("localhost")
+    
+    # Try primary endpoint
+    if primary and _ollama_endpoint_reachable(primary):
+        _ollama_resolved_endpoint = primary
+        if verbose:
+            print(f"Ollama endpoint {primary} reachable", file=sys.stderr, flush=True)
+        return primary
+    
+    # Fallback to localhost
+    if verbose and primary:
+        print(f"Ollama endpoint {primary} unreachable; falling back to {fallback}", file=sys.stderr, flush=True)
+    elif verbose:
+        print(f"No primary Ollama endpoint configured; using {fallback}", file=sys.stderr, flush=True)
+    
+    _ollama_resolved_endpoint = fallback
+    return fallback
 
 
-def _rerank_results_with_ollama(results, query, frame_b64s, npz_name, model_id="clef-flash", ollama_endpoint="http://localhost:11434/v1/systemone", threshold=0.5, verbose=False, weight_clip=0.5, weight_ollama=0.5):
+def _fuse_results_with_ollama(results, query, frame_b64s, npz_name, model_id="clef-flash", ollama_endpoint="http://localhost:11434/v1/systemone", threshold=0.5, verbose=False, weight_clip=0.5, weight_ollama=0.5):
     """Use Ollama's decision capability to validate frames individually.
 
     Every frame in `frame_b64s` is validated against the Ollama decision model.
     `model_id` can be a single model name or a list/comma-separated string;
     models are tried in order per frame until one succeeds.
-    The results are then reranked using a fused score of CLIP similarity and Ollama's judgment.
+    The results are then fused using a weighted score of CLIP similarity and Ollama's judgment.
     Only frames whose fused score passes the threshold are kept; failing frames are
     discarded while passing frames are retained with their original metadata.
     The returned list preserves the original result order for passing frames only.
     """
+    global _ollama_resolved_model, _ollama_failed_models
     if not frame_b64s:
         print("Warning: No frames were extracted. Skipping Ollama validation.", file=sys.stderr)
         return results
@@ -252,9 +300,20 @@ def _rerank_results_with_ollama(results, query, frame_b64s, npz_name, model_id="
             print("Warning: Frame extraction ended early. Stopping validation.", file=sys.stderr)
             break
 
+        # Use resolved model if available, otherwise try all models
+        if _ollama_resolved_model is not None and _ollama_resolved_model in model_ids:
+            current_models = [_ollama_resolved_model]
+        else:
+            current_models = model_ids
+
         valid_score = None
         last_err = None
-        for model in model_ids:
+        frame_model = None
+        models_tried = []
+        for model in current_models:
+            if model in _ollama_failed_models:
+                continue
+            models_tried.append(model)
             payload = {
                 "model": model,
                 "state": f"A user is searching for: {query}",
@@ -276,26 +335,39 @@ def _rerank_results_with_ollama(results, query, frame_b64s, npz_name, model_id="
                     data=json.dumps(payload).encode("utf-8"),
                     headers={"Content-Type": "application/json"}
                 )
-                with urllib.request.urlopen(req, timeout=60) as response:
+                with urllib.request.urlopen(req, timeout=300) as response:
                     res_json = json.loads(response.read().decode("utf-8"))
 
                 valid_score = res_json["answers"]["is_valid"]["noul"]
+                if len(models_tried) > 1:
+                    # We tried multiple models before finding one that works
+                    print(f"Falling back from {models_tried[0]} to '{model}' for frame at {r['timestamp_seconds']:.1f}s", file=sys.stderr, flush=True)
+                frame_model = model
                 break
             except Exception as e:
                 last_err = e
+                # Only mark model as failed for definitive errors (not timeouts)
+                # Timeouts are transient - the server may be busy but still usable
+                if "timed out" not in str(e).lower():
+                    _ollama_failed_models.add(model)
                 if verbose:
                     print(f"Model '{model}' failed for frame at {r['timestamp_seconds']:.1f}s: {e}", file=sys.stderr)
-        
+
         if valid_score is None:
+            if last_err is None:
+                last_err = Exception("All Ollama models are unavailable (previously failed for this session)")
             print(f"Error validating frame at {r['timestamp_seconds']:.1f}s: {last_err}. Discarded.", file=sys.stderr)
             continue
+
+        if frame_model and frame_model not in _ollama_failed_models:
+            _ollama_resolved_model = frame_model
 
         # Fused score calculation
         fused_score = (r['score'] * weight_clip) + (valid_score * weight_ollama)
         if fused_score >= threshold:
-            print(f"{r['timestamp_formatted']} sim={r['score']:.4f} ollama={valid_score:.4f} fused={fused_score:.4f}", file=sys.stderr)
+            print(f"ts={r['timestamp_formatted']} sim={r['score']:.4f} ollama={valid_score:.4f} fused={fused_score:.4f}", file=sys.stderr)
         else:
-            print(f"{r['timestamp_formatted']} sim={r['score']:.4f} ollama={valid_score:.4f} fused={fused_score:.4f} discard", file=sys.stderr)
+            print(f"ts={r['timestamp_formatted']} sim={r['score']:.4f} ollama={valid_score:.4f} fused={fused_score:.4f} discard", file=sys.stderr)
         scored_results.append({**r, "fused_score": fused_score, "ollama_score": valid_score})
 
     # Rerank the results based on fused score
@@ -324,21 +396,21 @@ def cmd_search(args):
     save_frames = cfg_val("save_frames", "save_frames")
     verbose = not json_output
     video_path = cfg_val("video", "video")
-    rerank = cfg_val("decision_model_rerank", "decision_model_rerank")
+    fuse = cfg_val("decision_model_fuse", "decision_model_fuse")
     ollama_endpoint = cfg_val("ollama_host", "ollama_host")
     ollama_model = cfg_val("ollama_decision_model", "ollama_model")
-    rerank_threshold = cfg_val("rerank_threshold", "rerank_threshold")
-    rerank_weight_clip = cfg_val("rerank_weight_clip", "rerank_weight_clip")
-    rerank_weight_ollama = cfg_val("rerank_weight_ollama", "rerank_weight_ollama")
+    fuse_threshold = cfg_val("fuse_threshold", "fuse_threshold")
+    fuse_weight_clip = cfg_val("fuse_weight_clip", "fuse_weight_clip")
+    fuse_weight_ollama = cfg_val("fuse_weight_ollama", "fuse_weight_ollama")
     percentile = cfg_val("percentile", "percentile")
+    frame_scale = cfg_val("ollama_frame_scale", "ollama_frame_scale")
 
     # Print config values in verbose mode
     if verbose:
-        _eps = ollama_endpoint if isinstance(ollama_endpoint, (list, tuple)) else ([ollama_endpoint] if ollama_endpoint else [])
         _models = _as_list(ollama_model)
         pct_str = f", percentile={percentile:.2f}" if percentile and percentile > 0.0 else ""
         print(f"Config: top_k={top_k}, raw_floor={raw_floor:.2f}, json_output={json_output}{pct_str}", file=sys.stderr)
-        print(f"        save_frames={save_frames}, video={video_path}, rerank={rerank}, ollama_host={_eps}, ollama_model={_models}, rerank_threshold={rerank_threshold}, rerank_weight_clip={rerank_weight_clip:.2f}, rerank_weight_ollama={rerank_weight_ollama:.2f}", file=sys.stderr)
+        print(f"        save_frames={save_frames}, video={video_path}, fuse={fuse}, ollama_host={ollama_endpoint}, ollama_model={_models}, fuse_threshold={fuse_threshold}, fuse_weight_clip={fuse_weight_clip:.2f}, fuse_weight_ollama={fuse_weight_ollama:.2f}, ollama_frame_scale={frame_scale:.2f}", file=sys.stderr)
 
     data = np.load(args.cache, allow_pickle=False)
     embeddings = data["embeddings"]
@@ -422,11 +494,11 @@ def cmd_search(args):
     engine = VideoSearchEngine(model_id=model)
 
     # Query: text or image
-    # When rerank is enabled, expand candidate pool to top_k * 2 to allow for
+    # When fuse is enabled, expand candidate pool to top_k * 2 to allow for
     # frames that fail the Ollama fused score check; we keep a reserve buffer
     # capped at top_k extra candidates.
     search_top_k = top_k
-    if rerank and top_k is not None and top_k > 0:
+    if fuse and top_k is not None and top_k > 0:
         search_top_k = top_k * 2
 
     if args.text is not None:
@@ -440,30 +512,30 @@ def cmd_search(args):
         sys.exit(2)
 
     # Perform Ollama validation first (so failing frames are discarded before saving)
-    if rerank:
+    if fuse:
         # Resolve Ollama endpoint: first reachable from the list (primary first, fallback second)
         ollama_endpoint = resolve_ollama_endpoint(ollama_endpoint, verbose=verbose)
         ollama_models = _as_list(ollama_model)
         if not ollama_models:
             ollama_models = ["clef-flash"]
         if not video_path:
-            print("--video is required when using --decision_model_rerank", file=sys.stderr)
+            print("--video is required when using --decision_model_fuse", file=sys.stderr)
             sys.exit(2)
 
         # Extract frames lazily and validate top-down
-        frame_b64_gen = _extract_frames_lazy(results, video_path, verbose)
-        results = _rerank_results_with_ollama(results, query, frame_b64_gen, npz_name, model_id=ollama_model, ollama_endpoint=ollama_endpoint, threshold=rerank_threshold, verbose=verbose, weight_clip=rerank_weight_clip, weight_ollama=rerank_weight_ollama)
+        frame_b64_gen = _extract_frames_lazy(results, video_path, verbose, frame_scale=frame_scale)
+        results = _fuse_results_with_ollama(results, query, frame_b64_gen, npz_name, model_id=ollama_model, ollama_endpoint=ollama_endpoint, threshold=fuse_threshold, verbose=verbose, weight_clip=fuse_weight_clip, weight_ollama=fuse_weight_ollama)
 
-    # If rerank was enabled, results were already sorted/filtered by fused score;
+    # If fuse was enabled, results were already sorted/filtered by fused score;
     # slice back to the requested top_k so we don't return more than the user asked for.
-    if rerank and top_k is not None and top_k > 0:
+    if fuse and top_k is not None and top_k > 0:
         results = results[:top_k]
 
 
     # Save frames for remaining (validated) results only
     if save_frames:
         if not video_path:
-            print("--video is required when using --save_frames", file=sys.stderr)
+            print("--video is required when using --save-frames", file=sys.stderr)
             sys.exit(2)
 
         os.makedirs(save_frames, exist_ok=True)
@@ -496,12 +568,13 @@ def cmd_search(args):
                 "json_output": _safe(json_output),
                 "save_frames": _safe(save_frames),
                 "video": _safe(video_path),
-                "rerank": _safe(rerank), 
+                "fuse": _safe(fuse), 
                 "ollama_host": _safe(ollama_endpoint),
                 "ollama_model": _safe(ollama_model),
-                "rerank_threshold": _safe(rerank_threshold),
-                "rerank_weight_clip": _safe(rerank_weight_clip),
-                "rerank_weight_ollama": _safe(rerank_weight_ollama),
+                "fuse_threshold": _safe(fuse_threshold),
+                "fuse_weight_clip": _safe(fuse_weight_clip),
+                "fuse_weight_ollama": _safe(fuse_weight_ollama),
+                "ollama_frame_scale": _safe(frame_scale),
                 "percentile": _safe(percentile),
                 "cache_model": _safe(cache_model),
                 "cache_video_path": _safe(cache_video_path),
@@ -538,14 +611,15 @@ def main():
     p_search.add_argument("--raw-floor", "-rf", type=float, default=None, help="Absolute noise floor for raw similarity (default: 0.25)")
     p_search.add_argument("--percentile", "-p", type=float, default=None, help="Percentile cutoff (0.0-1.0, e.g., 0.2 keeps top 20%% of frames). Setting this enables percentile filtering automatically.")
     
-    p_search.add_argument("--save_frames", "-sf", default=None, help="Directory to save matched frame images as {cache_name}_{HHMMSS}_{score}.jpg")
+    p_search.add_argument("--save-frames", "-sf", default=None, help="Directory to save matched frame images as {cache_name}_{HHMMSS}_{score}.jpg")
     p_search.add_argument("--video", "-vid", default=None, help="Path to original video file (required with --save-frames)")
-    p_search.add_argument("--decision_model-rerank","-dmr", action="store_true", default=None, help="Use local Ollama decision model to rerank top results. Results failing the fused score threshold are discarded from match results.")
-    p_search.add_argument("--rerank_threshold","-rt", type=float, default=None, help="Threshold for the fused reranking score (default: 0.5). Results with score < threshold are discarded.")
-    p_search.add_argument("--rerank_weight_clip","-rwc", type=float, default=None, help="Weight given to CLIP similarity in fused score (default: 0.3).")
-    p_search.add_argument("--rerank_weight_ollama","-rwo", type=float, default=None, help="Weight given to Ollama judgment in fused score (default: 0.7).")
-    p_search.add_argument("--ollama_host","-oe", default=None, help="Ollama server addr, or a comma-separated list of endpoints tried in order (default: [192.168.1.190, localhost])")
-    p_search.add_argument("--ollama_model","-dm", default=None, help="Ollama decision model name(s), comma-separated fallback list tried in order for validation")
+    p_search.add_argument("--decision-model-fuse","-dmf", action="store_true", default=None, help="Use local Ollama decision model to fuse top results. Results failing the fused score threshold are discarded from match results.")
+    p_search.add_argument("--fuse-threshold","-ft", type=float, default=None, help="Threshold for the fused score (default: 0.5). Results with score < threshold are discarded.")
+    p_search.add_argument("--fuse-weight-clip","-fwc", type=float, default=None, help="Weight given to CLIP similarity in fused score (default: 0.3).")
+    p_search.add_argument("--fuse-weight-ollama","-fwo", type=float, default=None, help="Weight given to Ollama judgment in fused score (default: 0.7).")
+    p_search.add_argument("--ollama-host","-oh", default=None, help="Ollama server addr (default: 192.168.1.190). Falls back to localhost if unreachable")
+    p_search.add_argument("--ollama-frame-scale","-ofs", type=float, default=None, help="Scale factor for frames sent to Ollama decision model (0.0-1.0, default: 0.2). Lower values = faster inference")
+    p_search.add_argument("--ollama-model","-dm", default=None, help="Ollama decision model name(s), comma-separated fallback list tried in order for validation")
     p_search.set_defaults(func=cmd_search)
 
     args = parser.parse_args()
