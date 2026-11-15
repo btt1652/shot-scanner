@@ -47,7 +47,9 @@ def _hash_params(params):
         f"{params.get('decision_model_sample_rate')}|"
         f"{params.get('ollama_frame_scale')}|"
         f"{params.get('scene_change')}|"
-        f"{params.get('scene_threshold')}"
+        f"{params.get('scene_threshold')}|"
+        f"{params.get('ollama_state_template')}|"
+        f"{params.get('ollama_instructions_template')}"
     )
     return hashlib.md5(s.encode("utf-8")).hexdigest()[:16]
 
@@ -325,7 +327,7 @@ def _extract_scene_timestamps(video_path, scene_threshold=0.4, verbose=False, ti
     return timestamps
 
 
-def _validate_frame_with_ollama(frame_b64, query, model_ids, endpoint, verbose=False):
+def _validate_frame_with_ollama(frame_b64, model_ids, endpoint, verbose=False, state_template=None, instructions_template=None):
     """Validate a single frame against Ollama decision model. Returns (score, model_used) or (None, None)."""
     global _ollama_failed_models, _ollama_resolved_model
     
@@ -343,14 +345,16 @@ def _validate_frame_with_ollama(frame_b64, query, model_ids, endpoint, verbose=F
         if model in _ollama_failed_models:
             continue
         models_tried.append(model)
+        state = state_template or ""
+        instructions = instructions_template or ""
         payload = {
             "model": model,
-            "state": f"A user is searching for: {query}",
+            "state": state,
             "images": [frame_b64],
             "questions": {
                 "is_valid": {
                     "type": "noul",
-                    "instructions": f"Does the image match the query: {query}?"
+                    "instructions": instructions
                 }
             }
         }
@@ -485,15 +489,18 @@ def cmd_search(args):
     scene_threshold = cfg_val("scene_threshold", "scene_threshold")
     sample_merge = cfg_val("sample_merge", "sample_merge")
     merge_gap = cfg_val("merge_gap", "merge_gap")
+    state_template = cfg_val("ollama_state_template", "ollama_state")
+    instructions_template = cfg_val("ollama_instructions_template", "ollama_instructions")
 
-    # Determine query
-    if args.text is not None:
-        query = args.text
-    elif args.image is not None:
-        query = args.image
-    else:
-        print("search requires either --text or --image", file=sys.stderr)
-        sys.exit(2)
+    # Apply defaults if config/CLI left templates empty
+    if not state_template:
+        state_template = ""
+    if not instructions_template:
+        instructions_template = ""
+
+    # State/instructions are the query — use state for cache identity
+    query = state_template or instructions_template or ""
+
 
     # Resolve video input
     video_input = args.video
@@ -514,7 +521,7 @@ def cmd_search(args):
     if verbose:
         _models = _as_list(ollama_model)
         print(f"Config: top_k={top_k}, global_k={global_k}, json_output={json_output}", file=sys.stderr)
-        print(f"        save_frames={save_frames}, video={video_path}, decision_model_floor={decision_model_floor}, decision_model_sample_rate={decision_model_sample_rate}, scene_change={scene_change}, scene_threshold={scene_threshold}, sample_merge={sample_merge}, merge_gap={merge_gap}, ollama_workers={ollama_workers}, ollama_host={ollama_endpoint}, ollama_model={_models}, ollama_frame_scale={frame_scale:.2f}", file=sys.stderr)
+        print(f"        save_frames={save_frames}, video={video_path}, decision_model_floor={decision_model_floor}, decision_model_sample_rate={decision_model_sample_rate}, scene_change={scene_change}, scene_threshold={scene_threshold}, sample_merge={sample_merge}, merge_gap={merge_gap}, ollama_workers={ollama_workers}, ollama_host={ollama_endpoint}, ollama_model={_models}, ollama_frame_scale={frame_scale:.2f}, ollama_state={state_template!r}, ollama_instructions={instructions_template!r}", file=sys.stderr)
 
     sample_rate = decision_model_sample_rate if decision_model_sample_rate else 1
     cap_target = global_k if (global_k is not None and global_k > 0) else (top_k if top_k and top_k > 0 else 0)
@@ -538,7 +545,13 @@ def cmd_search(args):
             with ThreadPoolExecutor(max_workers=ollama_workers) as executor:
                 future_to_frame = {
                     executor.submit(
-                        _validate_frame_with_ollama, b64, query, model_ids, ollama_endpoint, verbose
+                        _validate_frame_with_ollama,
+                        b64,
+                        model_ids,
+                        ollama_endpoint,
+                        verbose,
+                        state_template,
+                        instructions_template,
                     ): (ts, b64, vp)
                     for ts, b64, vp in frames_batch
                 }
@@ -568,7 +581,7 @@ def cmd_search(args):
                         print(f"ts={ts_formatted} ollama={score:.4f} discard", file=sys.stderr)
         else:
             for ts, b64, vp in frames_batch:
-                score, _model = _validate_frame_with_ollama(b64, query, model_ids, ollama_endpoint, verbose)
+                score, _model = _validate_frame_with_ollama(b64, model_ids, ollama_endpoint, verbose, state_template, instructions_template)
                 if score is None:
                     if verbose:
                         print(f"Error validating frame at {ts:.1f}s. Discarded.", file=sys.stderr)
@@ -619,6 +632,8 @@ def cmd_search(args):
         "ollama_frame_scale": frame_scale,
         "scene_change": scene_change,
         "scene_threshold": scene_threshold,
+        "ollama_state_template": state_template,
+        "ollama_instructions_template": instructions_template,
     }
 
     cache_results = None
@@ -673,6 +688,7 @@ def cmd_search(args):
                 if fps is None or fps <= 0:
                     fps = 30.0
                 stride = max(1, int(fps * sample_rate))
+                total_sampled = int((total_frames + stride - 1) / stride) if total_frames is not None else 0
 
                 frame_index = 0
                 while True:
@@ -687,8 +703,8 @@ def cmd_search(args):
                         total_extracted += 1
 
                         if verbose and total_extracted % 10 == 0:
-                            remaining_frames = int(total_frames - frame_index) if total_frames is not None else 0
-                            print(f"Sampled ts={ts:.2f}s (extracted={total_extracted}/{remaining_frames}, validated={total_validated}, passing={len(final_results)})", file=sys.stderr)
+                            # Show progress as extracted/total_sampled so at end it reads extracted=720/720
+                            print(f"Sampled ts={ts:.2f}s (extracted={total_extracted}/{total_sampled}, validated={total_validated}, passing={len(final_results)})", file=sys.stderr)
 
                         if len(batch) >= batch_size:
                             _flush_batch()
@@ -778,8 +794,8 @@ def main():
 
     p_search = sub.add_parser("search", help="Search videos using the decision model")
     p_search.add_argument("--video", "-vid", default=None, help="Path to video file, directory, or glob pattern")
-    p_search.add_argument("--text", "-t", default=None, help="Natural language search prompt")
-    p_search.add_argument("--image", "-i", default=None, help="Path to reference image file (used as query string)")
+    
+    
     p_search.add_argument("--top-k", "-k", type=int, default=None, help="Maximum number of top results to return (default: all passing)")
     p_search.add_argument("--global-k", "-gk", type=int, default=None, help="Global top-K across all videos, overriding --top-k")
     p_search.add_argument("--json", action="store_true", default=None, help="Output results in strict JSON format")
@@ -797,6 +813,8 @@ def main():
     p_search.add_argument("--save-cache", "-sc", type=str, default=None, nargs="?", const=".", help="Path to cache directory for saving search results. Defaults to current directory (.) if used without a path")
     p_search.add_argument("--sample-merge", "-sm", action="store_true", default=None, help="Merge adjacent passing samples into contiguous time ranges (blind sampling mode only)")
     p_search.add_argument("--merge-gap", "-mg", type=float, default=None, help="Max seconds between adjacent samples to merge into one range (default: same as --decision-model-sample-rate)")
+    p_search.add_argument("--ollama-state", "-s", type=str, default=None, help="State context string for Ollama (default: empty)")
+    p_search.add_argument("--ollama-instructions", "-oi", type=str, default=None, help="Instructions string for Ollama (default: empty)")
     p_search.set_defaults(func=cmd_search)
 
     args = parser.parse_args()

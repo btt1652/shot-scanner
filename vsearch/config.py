@@ -34,6 +34,8 @@ def default_config() -> dict:
             "ollama_frame_scale": 0.2,
             "ollama_decision_model": ["d3:9b", "d3:4b"],
             "ollama_workers": 1,
+            "ollama_state_template": "",
+            "ollama_instructions_template": "",
             "scene_change": False,
             "scene_threshold": 0.4,
             "sample_merge": False,

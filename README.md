@@ -13,25 +13,25 @@ A lightweight command-line interface that searches local video files using an Ol
 2. Search a video with a text prompt:
 
    ```
-   vsearch search --video myvideo.mp4 -t "a person running"
+   vsearch search --video myvideo.mp4 --ollama-state "A user is searching for: a person running" --ollama-instructions "Does the image match the query: a person running?" -k 5
    ```
 
 3. Limit the number of results:
 
    ```
-   vsearch search --video myvideo.mp4 -t "a person running" -k 5
+   vsearch search --video myvideo.mp4 --ollama-state "A user is searching for: a person running" --ollama-instructions "Does the image match the query: a person running?" -k 5
    ```
 
 4. Save matched frames as JPEG images:
 
    ```
-   vsearch search --video myvideo.mp4 -t "a person running" -sf /tmp/frames
+   vsearch search --video myvideo.mp4 --ollama-state "A user is searching for: a person running" --ollama-instructions "Does the image match the query: a person running?" -sf /tmp/frames
    ```
 
 5. Output JSON:
 
    ```
-   vsearch search --video myvideo.mp4 -t "a person running" --json
+   vsearch search --video myvideo.mp4 --ollama-state "A user is searching for: a person running" --ollama-instructions "Does the image match the query: a person running?" --json
    ```
 
 ## Decision-Model-Only Mode
@@ -59,8 +59,8 @@ CLIP is not involved in scoring at all.
 | Flag | Short | Description |
 |------|-------|-------------|
 | `--video` | `-vid` | Path to a video file, directory, or glob pattern (required) |
-| `--text` | `-t` | Natural-language search prompt |
-| `--image` | `-i` | Path to a reference image file (used as the query string) |
+| `--ollama-state` | `-s` | State context string sent to Ollama (default: empty) |
+| `--ollama-instructions` | `-oi` | Instructions string sent to Ollama (default: empty) |
 | `--top-k` | `-k` | Maximum number of results to return (default: all passing) |
 | `--global-k` | `-gk` | Global top-K across all videos, overriding `--top-k` |
 | `--json` | | Output results as strict JSON |
@@ -83,35 +83,40 @@ The config file contains a single `[search]` section:
 
 ```toml
 [search]
-top_k = -1
+top_k = 5
 json_output = false
 save_frames = ""
 video = ""
-decision_model_floor = 0.5
-decision_model_sample_rate = 1
+decision_model_floor = 0.8
+decision_model_sample_rate = 3
 ollama_host = "192.168.1.190"
 ollama_frame_scale = 0.2
-ollama_decision_model = ["d3:9b", "d3:4b"]
-ollama_workers = 1
+ollama_decision_model = ["clef-flash:9b", "d3:4b"]
+ollama_workers = 4
 scene_change = false
 scene_threshold = 0.4
 sample_merge = false
 merge_gap = 60
-```
+ollama_state_template = ""
+ollama_instructions_template = ""
 
 ### Key config values
 
-- `top_k` — maximum results returned (default: `-1` = all passing)
+- `top_k` — maximum results returned (default: `5`)
 - `json_output` — default to JSON output (`true`/`false`)
 - `save_frames` — default output directory for saved frames
-- `decision_model_floor` — Ollama score threshold (default: `0.5`)
-- `decision_model_sample_rate` — sampling interval in seconds (default: `1`)
+- `decision_model_floor` — Ollama score threshold (default: `0.8`)
+- `decision_model_sample_rate` — sampling interval in seconds (default: `3`)
 - `ollama_host` — Ollama endpoint (falls back to `localhost` if unreachable)
 - `ollama_frame_scale` — image scale factor sent to Ollama (default: `0.2`)
-- `ollama_decision_model` — model name or fallback list
-- `ollama_workers` — concurrent validation threads (default: `1`)
+- `ollama_decision_model` — model name or fallback list (default: `["clef-flash:9b", "d3:4b"]`)
+- `ollama_workers` — concurrent validation threads (default: `4`)
 - `scene_change` — use scene-change detection instead of blind sampling (default: `false`)
 - `scene_threshold` — scene detection sensitivity (default: `0.4`)
+- `sample_merge` — merge adjacent passing samples into time ranges (default: `false`)
+- `merge_gap` — max seconds between samples to merge (default: `60`)
+- `ollama_state_template` — state context string sent to Ollama (default: empty)
+- `ollama_instructions_template` — instructions string sent to Ollama (default: empty)
 
 ## Performance Tips
 
@@ -145,8 +150,8 @@ Cache files are named as:
 Where:
 - `video_name` — filename without extension
 - `video_hash` — SHA256 of video path + size + modification time
-- `query_hash` — MD5 of the text/image query
-- `params_hash` — MD5 of `(decision_model_floor, decision_model_sample_rate, ollama_frame_scale, scene_change, scene_threshold)`
+- `query_hash` — MD5 of the state/instructions query
+- `params_hash` — MD5 of `(decision_model_floor, decision_model_sample_rate, ollama_frame_scale, scene_change, scene_threshold, ollama_state, ollama_instructions)`
 
 ### Lookup Cache (`--cache`)
 
@@ -154,10 +159,10 @@ Use `--cache /path/to/cache` to look up existing cached results. If a matching c
 
 ```bash
 # First run: no cache, performs full search
-vsearch search --video myvideo.mp4 --text "a person" --save-cache /tmp/cache
+vsearch search --video myvideo.mp4 --ollama-state "A user is searching for: a person" --ollama-instructions "Does the image match the query: a person?" --save-cache /tmp/cache
 
 # Second run: cache hit, returns instantly without Ollama
-vsearch search --video myvideo.mp4 --text "a person" --cache /tmp/cache
+vsearch search --video myvideo.mp4 --ollama-state "A user is searching for: a person" --ollama-instructions "Does the image match the query: a person?" --cache /tmp/cache
 ```
 
 ### Save Cache (`--save-cache`)
@@ -166,13 +171,13 @@ Use `--save-cache /path/to/cache` (or just `--save-cache` to default to the curr
 
 ```bash
 # Save to explicit directory
-vsearch search --video myvideo.mp4 --text "a person" --save-cache /tmp/cache
+vsearch search --video myvideo.mp4 --ollama-state "A user is searching for: a person" --ollama-instructions "Does the image match the query: a person?" --save-cache /tmp/cache
 
 # Save to current directory (.)
-vsearch search --video myvideo.mp4 --text "a person" --save-cache
+vsearch search --video myvideo.mp4 --ollama-state "A user is searching for: a person" --ollama-instructions "Does the image match the query: a person?" --save-cache
 
 # Combined: look up cache first, save new results if not found
-vsearch search --video myvideo.mp4 --text "a person" --cache /tmp/cache --save-cache /tmp/cache
+vsearch search --video myvideo.mp4 --ollama-state "A user is searching for: a person" --ollama-instructions "Does the image match the query: a person?" --cache /tmp/cache --save-cache /tmp/cache
 ```
 
 ### Cache Hit Behavior
@@ -187,13 +192,15 @@ vsearch search --video myvideo.mp4 --text "a person" --cache /tmp/cache --save-c
 ```json
 {
   "video_path": "/mnt/hdd/myvideo.mp4",
-  "query": "a person running",
+  "query": "A user is searching for: a person running",
   "parameters": {
-    "decision_model_floor": 0.5,
+    "decision_model_floor": 0.8,
     "decision_model_sample_rate": 3,
     "ollama_frame_scale": 0.2,
     "scene_change": false,
-    "scene_threshold": 0.4
+    "scene_threshold": 0.4,
+    "ollama_state_template": "A user is searching for: {query}",
+    "ollama_instructions_template": "Does the image match the query: {query}?"
   },
   "results": [
     {
@@ -218,7 +225,7 @@ vsearch search --video myvideo.mp4 --text "a person" --cache /tmp/cache --save-c
 The `--scene-change` and `--scene-threshold` flags enable automatic scene change detection. Instead of blindly sampling every `decision_model_sample_rate` seconds, the app uses FFmpeg’s scene filter to detect scenes and only validates the key frames at those transitions:
 
 ```bash
-vsearch search --scene-change --scene-threshold 0.5 --video video.mp4 --text "a person"
+vsearch search --scene-change --scene-threshold 0.5 --video video.mp4 --ollama-state "A user is searching for: a person" --ollama-instructions "Does the image match the query: a person?"
 ```
 
 **How it works:**
@@ -255,7 +262,7 @@ If you want to merge adjacent passing samples into contiguous time ranges (usefu
 
 ```bash
 # Merge samples within 60 seconds into ranges
-vsearch search --video movie.mp4 --text "a person running" \
+vsearch search --video movie.mp4 --ollama-state "A user is searching for: a person running" --ollama-instructions "Does the image match the query: a person running?" \
   --sample-merge --merge-gap 60 --top-k 5
 ```
 
