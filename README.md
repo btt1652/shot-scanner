@@ -274,12 +274,19 @@ Query one or more pre-computed caches using either a text prompt or a reference 
 
 When searching a directory (non-recursive), all `.npz` files directly in that directory are loaded and results are merged globally (sorted by score descending). Each result includes `source_cache` and `source_video_path` metadata.
 
+**Top-K behavior in multi-cache mode:**
+
+- **`-k N` + `--decision-model-fuse`:** Up to **N fused-valid frames per source cache** are returned (e.g., `-k 10` with 3 caches → up to 30 frames total, keeping the best N frames per cache).
+- **`-k N` without `--decision-model-fuse`:** Each cache contributes up to N raw CLIP results before merging (same per-cache behavior, just without Ollama fusion).
+- **`-gk N` / `--global-k N`:** Takes the **top N frames globally across all merged caches**, overriding any per-cache `-k` slice. Use this when you want a single flat result list of N frames regardless of how many caches were searched.
+
 Flags:
 - `cache` - Path to pre-computed embeddings cache (.npz) or directory containing multiple .npz files (required)
 - `-R, --recursive` - Recursively scan directories for .npz cache files (default: false, only scans top-level directory)
 - `-t, --text` - Natural language search prompt
 - `-i, --image` - Path to reference image file for visual similarity matching
-- `-k, --top-k` - Maximum number of top results to return (default: all). Use `0` for no results, `-1` for unlimited.
+- `-k, --top-k` - Maximum number of top results to return (default: all). Use `0` for no results, `-1` for unlimited. In multi-cache mode with `--decision-model-fuse`, this means N frames per source cache.
+- `-gk, --global-k` - Maximum number of top results to return **globally across all merged caches** (overriding per-cache `-k`). Only has an effect when combined with multiple caches.
 - `--json` - Output results in strict JSON format to stdout for AI agent consumption
 - `--raw-floor` - Absolute calibrated cosine similarity floor (default: 0.25). Results below this similarity are discarded.
 - `--percentile` - Percentile cutoff (0.0 to 1.0, e.g. 0.2 keeps top 20%). Setting this enables percentile filtering automatically.
@@ -292,6 +299,8 @@ Flags:
 - `--ollama-host` - Ollama server addr (default: 192.168.1.190). Falls back to localhost if unreachable. Config key: `ollama_host`.
 - `--ollama-frame-scale` - Scale factor for frames sent to Ollama decision model (0.0-1.0, default: 0.2). Lower values = faster inference on CPU. Config key: `ollama_frame_scale`.
 - `--ollama-model` - Ollama model name for decision validation. Config key: `ollama_decision_model`.
+
+**Note:** Using both `-k` and `-gk` together (e.g., `-k 10 -gk 30`) results in `-gk 30` taking precedence — the final global slice to 30 frames across all caches wins.
 
 **Auto video path:** If `--save-frames` or `--decision-model-fuse` is used, vsearch looks for `video_path` stored in the `.npz` cache from the indexing step. If the cached video path exists, it is used automatically — you don't need to pass `--video`. If the video was moved and the cached path no longer exists, vsearch exits with an error and you must provide `--video` with the new path.
 

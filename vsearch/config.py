@@ -32,6 +32,7 @@ def default_config() -> dict:
         },
         "search": {
             "top_k": -1,
+            "global_k": None,
             "raw_floor": 0.25,
             "json_output": False,
             "save_frames": None,

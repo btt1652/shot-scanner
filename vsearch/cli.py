@@ -1,13 +1,14 @@
 """Command-line interface for vsearch."""
 
 import argparse
+import base64
 import glob
 import hashlib
 import json
 import os
+import subprocess
 import sys
 import urllib.request
-import base64
 
 import cv2
 import numpy as np
@@ -201,62 +202,108 @@ def _format_results_text(results):
 
 def _extract_frame_base64(video_path, timestamp, frame_scale=0.2):
     """Extract a single frame from video at given timestamp and return base64-encoded JPEG.
-    
-    Args:
-        video_path: Path to video file
-        timestamp: Frame timestamp in seconds
-        frame_scale: Scale factor for frame (0.0-1.0, default: 0.2)
-                   Image is resized to this percentage of original size before sending to Ollama.
-                   Lower values = faster inference (more tokens = slower)
-                   Typical range: 0.1-0.3 (faster inference) or 0.5-1.0 (higher accuracy)
+    Uses ffmpeg with fast seek (-ss before -i) to avoid interlaced-frame issues.
     """
-    cap = cv2.VideoCapture(video_path)
-    if not cap.isOpened():
+    cmd = [
+        'ffmpeg', '-y', '-v', 'error',
+        '-ss', str(timestamp),
+        '-i', video_path,
+        '-frames:v', '1',
+        '-f', 'image2pipe',
+        '-vcodec', 'mjpeg',
+        '-'
+    ]
+    try:
+        result = subprocess.run(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=True,
+            timeout=15,
+        )
+        img_bytes = result.stdout
+        if not img_bytes:
+            raise subprocess.CalledProcessError(1, cmd)
+        img = cv2.imdecode(np.frombuffer(img_bytes, dtype=np.uint8), cv2.IMREAD_COLOR)
+        if img is None:
+            raise subprocess.CalledProcessError(1, cmd)
+        h, w = img.shape[:2]
+        new_h = int(h * frame_scale)
+        new_w = int(w * frame_scale)
+        if new_h < 1 or new_w < 1:
+            new_h, new_w = max(1, int(h * frame_scale)), max(1, int(w * frame_scale))
+        img_small = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_AREA)
+        success, encoded = cv2.imencode(".jpg", img_small, [cv2.IMWRITE_JPEG_QUALITY, 90])
+        if not success:
+            return ""
+        return base64.b64encode(encoded.tobytes()).decode("utf-8")
+    except subprocess.CalledProcessError:
+        # Fallback to OpenCV if ffmpeg fails
+        cap = cv2.VideoCapture(video_path)
+        if not cap.isOpened():
+            return ""
+        fps = cap.get(cv2.CAP_PROP_FPS)
+        if fps is None or fps <= 0:
+            fps = 30.0
+        frame_number = int(timestamp * fps)
+        cap.set(cv2.CAP_PROP_POS_FRAMES, frame_number)
+        ret, frame = cap.read()
+        cap.release()
+        if not ret:
+            return ""
+        img = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        h, w = img.shape[:2]
+        new_h = int(h * frame_scale)
+        new_w = int(w * frame_scale)
+        if new_h < 1 or new_w < 1:
+            new_h, new_w = max(1, int(h * frame_scale)), max(1, int(w * frame_scale))
+        img_small = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_AREA)
+        success, encoded = cv2.imencode(".jpg", img_small, [cv2.IMWRITE_JPEG_QUALITY, 90])
+        if not success:
+            return ""
+        return base64.b64encode(encoded.tobytes()).decode("utf-8")
+    except Exception:
         return ""
-    fps = cap.get(cv2.CAP_PROP_FPS)
-    if fps is None or fps <= 0:
-        fps = 30.0
-    frame_number = int(timestamp * fps)
-    cap.set(cv2.CAP_PROP_POS_FRAMES, frame_number)
-    ret, frame = cap.read()
-    cap.release()
-    if not ret:
-        return ""
-    img = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-    # Downscale frame before sending to Ollama decision model to speed up inference
-    # Vision models process pixels as tokens - full-res frames are very slow on CPU
-    # Scale by frame_scale percentage of original size while preserving aspect ratio
-    h, w = img.shape[:2]
-    new_h = int(h * frame_scale)
-    new_w = int(w * frame_scale)
-    if new_h < 1 or new_w < 1:
-        new_h, new_w = max(1, int(h * frame_scale)), max(1, int(w * frame_scale))
-    img_small = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_AREA)
-    # Encode to JPEG using imencode
-    success, encoded = cv2.imencode(".jpg", img_small, [cv2.IMWRITE_JPEG_QUALITY, 90])
-    if not success:
-        return ""
-    # Convert to base64
-    return base64.b64encode(encoded.tobytes()).decode("utf-8")
 
 
 def _extract_frame_at(video_path, timestamp, out_path):
-    """Extract a single frame at given timestamp and save to out_path as JPEG."""
-    cap = cv2.VideoCapture(video_path)
-    if not cap.isOpened():
+    """Extract a single frame at given timestamp and save to out_path as JPEG.
+    Uses ffmpeg with fast seek (-ss before -i) to avoid interlaced-frame issues.
+    """
+    cmd = [
+        'ffmpeg', '-y', '-v', 'error',
+        '-ss', str(timestamp),
+        '-i', video_path,
+        '-frames:v', '1',
+        out_path
+    ]
+    try:
+        subprocess.run(
+            cmd,
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL
+        )
+        return True
+    except subprocess.CalledProcessError:
+        # Fallback to OpenCV
+        cap = cv2.VideoCapture(video_path)
+        if not cap.isOpened():
+            return False
+        fps = cap.get(cv2.CAP_PROP_FPS)
+        if fps is None or fps <= 0:
+            fps = 30.0
+        frame_number = int(timestamp * fps)
+        cap.set(cv2.CAP_PROP_POS_FRAMES, frame_number)
+        ret, frame = cap.read()
+        cap.release()
+        if not ret:
+            return False
+        img = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        cv2.imwrite(out_path, cv2.cvtColor(img, cv2.COLOR_RGB2BGR), [cv2.IMWRITE_JPEG_QUALITY, 85])
+        return True
+    except Exception:
         return False
-    fps = cap.get(cv2.CAP_PROP_FPS)
-    if fps is None or fps <= 0:
-        fps = 30.0
-    frame_number = int(timestamp * fps)
-    cap.set(cv2.CAP_PROP_POS_FRAMES, frame_number)
-    ret, frame = cap.read()
-    cap.release()
-    if not ret:
-        return False
-    img = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-    cv2.imwrite(out_path, cv2.cvtColor(img, cv2.COLOR_RGB2BGR), [cv2.IMWRITE_JPEG_QUALITY, 85])
-    return True
 
 
 def _extract_frames_lazy(results, video_path, verbose=False, frame_scale=0.2):
@@ -583,6 +630,7 @@ def cmd_search(args):
         return get_config_value(cfg, "search", key, getattr(args, cli_arg, None))
 
     top_k = cfg_val("top_k", "top_k")
+    global_k = cfg_val("global_k", "global_k")
     raw_floor = cfg_val("raw_floor", "raw_floor")
     json_output = cfg_val("json_output", "json")
     save_frames = cfg_val("save_frames", "save_frames")
@@ -602,7 +650,7 @@ def cmd_search(args):
     if verbose:
         _models = _as_list(ollama_model)
         pct_str = f", percentile={percentile:.2f}" if percentile and percentile > 0.0 else ""
-        print(f"Config: top_k={top_k}, raw_floor={raw_floor:.2f}, json_output={json_output}{pct_str}", file=sys.stderr)
+        print(f"Config: top_k={top_k}, global_k={global_k}, raw_floor={raw_floor:.2f}, json_output={json_output}{pct_str}", file=sys.stderr)
         print(f"        save_frames={save_frames}, video={video_path}, fuse={fuse}, ollama_host={ollama_endpoint}, ollama_model={_models}, fuse_threshold={fuse_threshold}, fuse_weight_clip={fuse_weight_clip:.2f}, fuse_weight_ollama={fuse_weight_ollama:.2f}, ollama_frame_scale={frame_scale:.2f}", file=sys.stderr)
 
     # Support single path or multiple paths (like index mode)
@@ -708,10 +756,23 @@ def cmd_search(args):
         frame_b64_gen = _extract_frames_lazy(results, video_path, verbose, frame_scale=frame_scale)
         results = _fuse_results_with_ollama(results, query, frame_b64_gen, npz_name, model_id=ollama_model, ollama_endpoint=ollama_endpoint, threshold=fuse_threshold, verbose=verbose, weight_clip=fuse_weight_clip, weight_ollama=fuse_weight_ollama)
 
-    # If fuse was enabled, results were already sorted/filtered by fused score;
-    # slice back to the requested top_k so we don't return more than the user asked for.
-    if fuse and top_k is not None and top_k > 0:
-        results = results[:top_k]
+    # Slice the final results before saving/output:
+    #   - If --global-k / -gk is set: take the top global_k frames globally
+    #     across all merged caches (e.g., -gk 10 with 3 caches -> exactly 10 total).
+    #   - Otherwise, if fuse was enabled and -k N is set: take up to N fused-valid
+    #     frames PER SOURCE cache (e.g., -k 10 with 3 caches -> up to 30 frames).
+    if global_k is not None and global_k > 0:
+        results = results[:global_k]
+    elif fuse and top_k is not None and top_k > 0:
+        per_cache_counts = {}
+        sliced_results = []
+        for r in results:  # results are sorted by fused_score descending
+            ck = r.get("source_cache") or "__single__"
+            cnt = per_cache_counts.get(ck, 0)
+            if cnt < top_k:
+                sliced_results.append(r)
+                per_cache_counts[ck] = cnt + 1
+        results = sliced_results
 
 
     # Save frames for remaining (validated) results only
@@ -823,6 +884,7 @@ def main():
     p_search.add_argument("--text", "-t", default=None, help="Natural language search prompt")
     p_search.add_argument("--image", "-i", default=None, help="Path to reference image file")
     p_search.add_argument("--top-k", "-k", type=int, default=None, help="Maximum number of top results to return (default: all)")
+    p_search.add_argument("--global-k", "-gk", type=int, default=None, help="Global top-K across all merged caches, overriding per-cache -k (default: per-cache -k when fuse is on, else unlimited)")
     p_search.add_argument("--json", action="store_true", default=None, help="Output results in strict JSON format")
     p_search.add_argument("--raw-floor", "-rf", type=float, default=None, help="Absolute noise floor for raw similarity (default: 0.25)")
     p_search.add_argument("--percentile", "-p", type=float, default=None, help="Percentile cutoff (0.0-1.0, e.g., 0.2 keeps top 20%% of frames). Setting this enables percentile filtering automatically.")
@@ -836,7 +898,7 @@ def main():
     p_search.add_argument("--ollama-host","-oh", default=None, help="Ollama server addr (default: 192.168.1.190). Falls back to localhost if unreachable")
     p_search.add_argument("--ollama-frame-scale","-ofs", type=float, default=None, help="Scale factor for frames sent to Ollama decision model (0.0-1.0, default: 0.2). Lower values = faster inference")
     p_search.add_argument("--ollama-model","-dm", default=None, help="Ollama decision model name(s), comma-separated fallback list tried in order for validation")
-    p_search.add_argument("--recursive", "-R", action="store_true", default=None, help="Recursively scan directories for .npz cache files")
+    p_search.add_argument("--recursive", "-R", action="store_true", default=False, help="Recursively scan directories for .npz cache files (default: non-recursive, only scans top-level directory)")
     p_search.set_defaults(func=cmd_search)
 
     args = parser.parse_args()
