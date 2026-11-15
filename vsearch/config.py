@@ -1,8 +1,7 @@
 """Config handling for vsearch.
 
-The config file (TOML) grouping:
-  [index]    - index-mode defaults
-  [search]   - search-mode defaults
+The config file (TOML) contains a single [search] section for
+decision-model-only search defaults.
 
 CLI flags always override config values when given.
 
@@ -24,12 +23,6 @@ def get_config_path() -> Path:
 
 def default_config() -> dict:
     return {
-        "index": {
-            "output_dir": ".",
-            "model": "openai/clip-vit-large-patch14",
-            "sample_rate": 1,
-            "batch_size": 32
-        },
         "search": {
             "top_k": -1,
             "global_k": None,
@@ -38,15 +31,21 @@ def default_config() -> dict:
             "save_frames": None,
             "video": None,
             "decision_model_fuse": False,
+            "decision_model_only": False,
+            "decision_model_threshold": 0.5,
+            "decision_model_sample_rate": 1,
             "ollama_host": "192.168.1.190",
             "ollama_frame_scale": 0.2,
-            "ollama_decision_model": ["clef-flash", "d3:4b"],
+            "ollama_decision_model": ["d3:9b", "d3:4b"],
             "fuse_threshold": 0.5,
             "fuse_weight_clip": 0.3,
             "fuse_weight_ollama": 0.7,
-            "percentile": 0.1
+            "percentile": 0.1,
+            "ollama_workers": 1,
+            "ollama_candidates": None
         }
     }
+
 
 def load_config() -> dict:
     """Load configuration from file or return defaults if file doesn't exist."""
@@ -68,7 +67,7 @@ def load_config() -> dict:
     return config
 
 def get_config_value(config: dict, section: str, key: str, cli_value=None):
-    """Get config value, using cli_value if provided, else config/index/search then global."""
+    """Get config value, using cli_value if provided, else config/search then global."""
     if cli_value is not None:
         return cli_value
     return config.get(section, {}).get(key, config.get("global", {}).get(key))
