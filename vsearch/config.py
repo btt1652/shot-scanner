@@ -1,7 +1,6 @@
 """Config handling for vsearch.
 
-The config file (TOML) contains a single [search] section for
-decision-model-only search defaults.
+The config file (TOML) contains a single [search] section for decision-model-only search defaults.
 
 CLI flags always override config values when given.
 
@@ -15,34 +14,27 @@ from pathlib import Path
 CONFIG_DIR = Path(__file__).resolve().parent.parent
 CONFIG_FILE = CONFIG_DIR / "config.toml"
 
-# Config is always loaded from the repo directory (.vsearch/config.toml)
+
 def get_config_path() -> Path:
     """Get the path to the config file, creating directories if needed."""
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     return CONFIG_FILE
 
+
 def default_config() -> dict:
     return {
         "search": {
             "top_k": -1,
-            "global_k": None,
-            "raw_floor": 0.25,
             "json_output": False,
             "save_frames": None,
             "video": None,
-            "decision_model_fuse": False,
-            "decision_model_only": False,
             "decision_model_threshold": 0.5,
             "decision_model_sample_rate": 1,
             "ollama_host": "192.168.1.190",
             "ollama_frame_scale": 0.2,
             "ollama_decision_model": ["d3:9b", "d3:4b"],
-            "fuse_threshold": 0.5,
-            "fuse_weight_clip": 0.3,
-            "fuse_weight_ollama": 0.7,
-            "percentile": 0.1,
             "ollama_workers": 1,
-            "ollama_candidates": None
+            "ollama_candidates": None,
         }
     }
 
@@ -65,6 +57,7 @@ def load_config() -> dict:
             print(f"Warning: Could not parse config file {config_path}: {e}", file=sys.stderr)
 
     return config
+
 
 def get_config_value(config: dict, section: str, key: str, cli_value=None):
     """Get config value, using cli_value if provided, else config/search then global."""

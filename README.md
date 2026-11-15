@@ -81,30 +81,21 @@ The config file contains a single `[search]` section:
 ```toml
 [search]
 top_k = -1
-global_k = null
-raw_floor = 0.25
 json_output = false
 save_frames = ""
 video = ""
-decision_model_fuse = false
-decision_model_only = false
 decision_model_threshold = 0.5
 decision_model_sample_rate = 1
 ollama_host = "192.168.1.190"
 ollama_frame_scale = 0.2
 ollama_decision_model = ["d3:9b", "d3:4b"]
-fuse_threshold = 0.5
-fuse_weight_clip = 0.3
-fuse_weight_ollama = 0.7
-percentile = 0.1
-ollama_workers = 4
+ollama_workers = 1
 ollama_candidates = 0
 ```
 
 ### Key config values
 
 - `top_k` — maximum results returned (default: `-1` = all passing)
-- `global_k` — global cap across all videos
 - `json_output` — default to JSON output (`true`/`false`)
 - `save_frames` — default output directory for saved frames
 - `decision_model_threshold` — Ollama score threshold (default: `0.5`)

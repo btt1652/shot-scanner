@@ -1,22 +1,15 @@
-# Default configuration for vsearch
-global = {}
+# vsearch - Default configuration
+# Decision-model-only search mode: uses an Ollama decision model as the sole judge
 
 [search]
 top_k = -1
-raw_floor = 0.25
 json_output = false
 save_frames = ""
 video = ""
-decision_model_fuse = false
-decision_model_only = false
 decision_model_threshold = 0.5
 decision_model_sample_rate = 1
 ollama_host = "192.168.1.190"
 ollama_frame_scale = 0.2
 ollama_decision_model = ["d3:9b", "d3:4b"]
-fuse_threshold = 0.5
-fuse_weight_clip = 0.3
-fuse_weight_ollama = 0.7
-percentile = 0.1
-ollama_workers = 4
+ollama_workers = 1
 ollama_candidates = 0
