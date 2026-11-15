@@ -14,3 +14,5 @@ ollama_decision_model = ["d3:9b", "d3:4b"]
 ollama_workers = 4
 scene_change = false
 scene_threshold = 0.4
+sample_merge = false
+merge_gap = 60
