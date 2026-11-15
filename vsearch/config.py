@@ -28,7 +28,7 @@ def default_config() -> dict:
             "json_output": False,
             "save_frames": None,
             "video": None,
-            "decision_model_threshold": 0.5,
+            "decision_model_floor": 0.5,
             "decision_model_sample_rate": 1,
             "ollama_host": "192.168.1.190",
             "ollama_frame_scale": 0.2,

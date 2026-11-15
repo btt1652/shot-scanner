@@ -326,7 +326,7 @@ def cmd_search(args):
     save_frames = cfg_val("save_frames", "save_frames")
     verbose = not json_output
     video_path = cfg_val("video", "video")
-    decision_model_threshold = cfg_val("decision_model_threshold", "decision_model_threshold")
+    decision_model_floor = cfg_val("decision_model_floor", "decision_model_floor")
     decision_model_sample_rate = cfg_val("decision_model_sample_rate", "decision_model_sample_rate")
     ollama_workers = cfg_val("ollama_workers", "ollama_workers")
     ollama_endpoint = cfg_val("ollama_host", "ollama_host")
@@ -364,7 +364,7 @@ def cmd_search(args):
     if verbose:
         _models = _as_list(ollama_model)
         print(f"Config: top_k={top_k}, global_k={global_k}, json_output={json_output}", file=sys.stderr)
-        print(f"        save_frames={save_frames}, video={video_path}, decision_model_threshold={decision_model_threshold}, decision_model_sample_rate={decision_model_sample_rate}, scene_change={scene_change}, scene_threshold={scene_threshold}, ollama_workers={ollama_workers}, ollama_host={ollama_endpoint}, ollama_model={_models}, ollama_frame_scale={frame_scale:.2f}", file=sys.stderr)
+        print(f"        save_frames={save_frames}, video={video_path}, decision_model_floor={decision_model_floor}, decision_model_sample_rate={decision_model_sample_rate}, scene_change={scene_change}, scene_threshold={scene_threshold}, ollama_workers={ollama_workers}, ollama_host={ollama_endpoint}, ollama_model={_models}, ollama_frame_scale={frame_scale:.2f}", file=sys.stderr)
 
     sample_rate = decision_model_sample_rate if decision_model_sample_rate else 1
     cap_target = global_k if (global_k is not None and global_k > 0) else (top_k if top_k and top_k > 0 else 0)
@@ -405,7 +405,7 @@ def cmd_search(args):
                             print(f"Error validating frame at {ts:.1f}s. Discarded.", file=sys.stderr)
                         continue
                     ts_formatted = f"{int(ts)//3600:02d}:{int(ts)%3600//60:02d}:{int(ts)%60:02d}"
-                    if score >= decision_model_threshold:
+                    if score >= decision_model_floor:
                         if verbose:
                             print(f"ts={ts_formatted} ollama={score:.4f} pass", file=sys.stderr)
                         results.append({
@@ -424,7 +424,7 @@ def cmd_search(args):
                         print(f"Error validating frame at {ts:.1f}s. Discarded.", file=sys.stderr)
                     continue
                 ts_formatted = f"{int(ts)//3600:02d}:{int(ts)%3600//60:02d}:{int(ts)%60:02d}"
-                if score >= decision_model_threshold:
+                if score >= decision_model_floor:
                     if verbose:
                         print(f"ts={ts_formatted} ollama={score:.4f} pass", file=sys.stderr)
                     results.append({
@@ -552,7 +552,7 @@ def cmd_search(args):
             "query": query,
             "results": serializable,
             "metadata": {
-                "decision_model_threshold": _safe(decision_model_threshold),
+                "decision_model_floor": _safe(decision_model_floor),
                 "decision_model_sample_rate": _safe(sample_rate),
                 "ollama_host": _safe(ollama_endpoint),
                 "ollama_model": _safe(model_ids),
@@ -587,7 +587,7 @@ def main():
     p_search.add_argument("--global-k", "-gk", type=int, default=None, help="Global top-K across all videos, overriding --top-k")
     p_search.add_argument("--json", action="store_true", default=None, help="Output results in strict JSON format")
     p_search.add_argument("--save-frames", "-sf", default=None, help="Directory to save matched frame images as {video_name}_{HHMMSS}_{score}.jpg")
-    p_search.add_argument("--decision-model-threshold", "-dmt", type=float, default=None, help="Threshold for Ollama score (default: 0.5). Results below are discarded.")
+    p_search.add_argument("--decision-model-floor", "-dmt", type=float, default=None, help="Threshold for Ollama score (default: 0.5). Results below are discarded.")
     p_search.add_argument("--decision-model-sample-rate", "-dmsr", type=int, default=None, help="Frame sampling interval in seconds (default: 1)")
     p_search.add_argument("--scene-change", action="store_true", default=None, help="Use scene-change detection instead of blind sampling")
     p_search.add_argument("--scene-threshold", type=float, default=0.4, help="Scene change threshold (0.0-1.0, default: 0.4)")

@@ -42,7 +42,7 @@ A lightweight command-line interface that searches local video files using an Ol
 
 1. Frames are sampled from the video at `--decision-model-sample-rate` intervals.
 2. Each frame is resized (`--ollama-frame-scale`) and sent to the Ollama server.
-3. Frames whose score is below `--decision-model-threshold` are discarded.
+3. Frames whose score is below `--decision-model-floor` are discarded.
 4. Passing frames are sorted by Ollama score descending.
 5. Top-K / Global-K caps are applied.
 
@@ -65,7 +65,7 @@ CLIP is not involved in scoring at all.
 | `--global-k` | `-gk` | Global top-K across all videos, overriding `--top-k` |
 | `--json` | | Output results as strict JSON |
 | `--save-frames` | `-sf` | Directory to save matched frame JPEGs |
-| `--decision-model-threshold` | `-dmt` | Ollama score threshold (default: 0.5) |
+| `--decision-model-floor` | `-dmt` | Ollama score threshold (default: 0.5) |
 | `--decision-model-sample-rate` | `-dmsr` | Frame sampling interval in seconds (default: 1) |
 | `--ollama-workers` | `-ow` | Concurrent Ollama validation threads (default: 1) |
 | `--ollama-host` | `-oh` | Ollama server address (default: `192.168.1.190`). Falls back to `localhost` if unreachable |
@@ -85,7 +85,7 @@ top_k = -1
 json_output = false
 save_frames = ""
 video = ""
-decision_model_threshold = 0.5
+decision_model_floor = 0.5
 decision_model_sample_rate = 1
 ollama_host = "192.168.1.190"
 ollama_frame_scale = 0.2
@@ -100,7 +100,7 @@ scene_threshold = 0.4
 - `top_k` — maximum results returned (default: `-1` = all passing)
 - `json_output` — default to JSON output (`true`/`false`)
 - `save_frames` — default output directory for saved frames
-- `decision_model_threshold` — Ollama score threshold (default: `0.5`)
+- `decision_model_floor` — Ollama score threshold (default: `0.5`)
 - `decision_model_sample_rate` — sampling interval in seconds (default: `1`)
 - `ollama_host` — Ollama endpoint (falls back to `localhost` if unreachable)
 - `ollama_frame_scale` — image scale factor sent to Ollama (default: `0.2`)
@@ -114,7 +114,7 @@ scene_threshold = 0.4
 - **Scale down images** with `--ollama-frame-scale` (e.g. `0.15`) — lower = faster inference.
 - **Parallel validation** with `--ollama-workers 4` (or higher) — each thread handles one frame.
 - **Coarser sampling** with `--decision-model-sample-rate 5` — one frame every 5 seconds.
-- **Lower the threshold** with `--decision-model-threshold 0.4` to keep more passing frames.
+- **Lower the threshold** with `--decision-model-floor 0.4` to keep more passing frames.
 - **Scene-change detection** with `--scene-change` — automatically extracts frames at scene boundaries instead of uniform sampling, often much more efficient.
 
 ## Architecture
