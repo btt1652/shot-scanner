@@ -419,6 +419,12 @@ def _merge_to_ranges(results, merge_gap, extend=0.0):
     """
     if not results:
         return []
+    # Flatten raw samples from cached ranges (for cache-hit scenarios)
+    if all("start_seconds" in r for r in results):
+        flat = []
+        for r in results:
+            flat.extend(r.get("samples", []))
+        results = flat
     ordered = sorted(results, key=lambda r: r["timestamp_seconds"])
     ranges = []
     cur = {"start": ordered[0]["timestamp_seconds"], "end": ordered[0]["timestamp_seconds"], "scores": [ordered[0]["score"]], "samples": [ordered[0]]}
@@ -701,10 +707,6 @@ def cmd_search(args):
         final_results.extend(out)
         total_validated += len(batch)
 
-    # Save cache when --save-cache flag provided
-    if save_cache_dir and final_results:
-        _save_cache(save_cache_dir, video_paths[0] if video_paths else "", query, cache_params, final_results, cache_metadata if cache_metadata else {}, verbose=verbose)
-
     # Merge adjacent passing samples into ranges (blind sampling mode only)
     if sample_merge and final_results and not scene_change:
         gap = merge_gap if merge_gap is not None else sample_rate
@@ -717,6 +719,10 @@ def cmd_search(args):
         final_results = final_results[:global_k]
     elif top_k is not None and top_k > 0:
         final_results = final_results[:top_k]
+
+    # Save cache after merge (so cache contains merged ranges when sample_merge enabled)
+    if save_cache_dir and final_results:
+        _save_cache(save_cache_dir, video_paths[0] if video_paths else "", query, cache_params, final_results, cache_metadata if cache_metadata else {}, verbose=verbose)
 
     # Save matched frames
     if save_frames and final_results:
