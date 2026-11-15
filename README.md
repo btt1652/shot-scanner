@@ -125,6 +125,90 @@ scene_threshold = 0.4
 - **Endpoint fallback** — if the configured Ollama host is unreachable, `localhost:11434` is used automatically.
 - **Parallel validation** — frames are validated concurrently via `ThreadPoolExecutor`.
 
+
+## Search Cache
+
+Search results can be cached to JSON files to avoid re-running expensive Ollama validation on the same video + query combination. Cache is **opt-in** — it's only used when you explicitly pass the `--cache` or `--save-cache` flags.
+
+### Cache File Naming
+
+Cache files are named as:
+
+```
+<video_name>_<video_hash>_<query_hash>_<params_hash>.json
+```
+
+Where:
+- `video_name` — filename without extension
+- `video_hash` — SHA256 of video path + size + modification time
+- `query_hash` — MD5 of the text/image query
+- `params_hash` — MD5 of `(decision_model_floor, decision_model_sample_rate, ollama_frame_scale, scene_change, scene_threshold)`
+
+### Lookup Cache (`--cache`)
+
+Use `--cache /path/to/cache` to look up existing cached results. If a matching cache file exists (same video, query, and parameters), the search is skipped and cached results are returned instantly:
+
+```bash
+# First run: no cache, performs full search
+vsearch search --video myvideo.mp4 --text "a person" --save-cache /tmp/cache
+
+# Second run: cache hit, returns instantly without Ollama
+vsearch search --video myvideo.mp4 --text "a person" --cache /tmp/cache
+```
+
+### Save Cache (`--save-cache`)
+
+Use `--save-cache /path/to/cache` (or just `--save-cache` to default to the current directory) to save results after a search completes. The file is written only if the search actually ran (not when a cache hit occurred):
+
+```bash
+# Save to explicit directory
+vsearch search --video myvideo.mp4 --text "a person" --save-cache /tmp/cache
+
+# Save to current directory (.)
+vsearch search --video myvideo.mp4 --text "a person" --save-cache
+
+# Combined: look up cache first, save new results if not found
+vsearch search --video myvideo.mp4 --text "a person" --cache /tmp/cache --save-cache /tmp/cache
+```
+
+### Cache Hit Behavior
+
+- **Cache hit**: No Ollama calls, no frame extraction — results loaded from disk
+- **Cache miss**: Full search runs, results saved to cache directory (if `--save-cache` provided)
+- **Parameter mismatch**: If parameters differ (e.g., different threshold), cache is treated as miss
+- **Video change**: If video file size or modification time changes, cache is invalidated
+
+### Cache File Format
+
+```json
+{
+  "video_path": "/mnt/hdd/myvideo.mp4",
+  "query": "a person running",
+  "parameters": {
+    "decision_model_floor": 0.5,
+    "decision_model_sample_rate": 3,
+    "ollama_frame_scale": 0.2,
+    "scene_change": false,
+    "scene_threshold": 0.4
+  },
+  "results": [
+    {
+      "timestamp_seconds": 125.3,
+      "timestamp_formatted": "00:02:05",
+      "score": 0.6412,
+      "source_video_path": "/mnt/hdd/myvideo.mp4"
+    }
+  ],
+  "metadata": {
+    "total_extracted": 45,
+    "total_validated": 40,
+    "search_time_seconds": 12.5,
+    "cached": false,
+    "created_at": "2025-01-15T10:30:00Z"
+  }
+}
+```
+
 ## Scene Change Detection
 
 The `--scene-change` and `--scene-threshold` flags enable automatic scene change detection. Instead of blindly sampling every `decision_model_sample_rate` seconds, the app uses FFmpeg’s scene filter to detect scenes and only validates the key frames at those transitions:

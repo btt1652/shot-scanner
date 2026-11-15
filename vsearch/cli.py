@@ -5,12 +5,14 @@ No CLIP embeddings or .npz caches are required.
 """
 import argparse
 import base64
+import hashlib
 import io
 import json
 import os
 import subprocess
 import sys
 import threading
+import time
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -21,6 +23,94 @@ from PIL import Image
 from .config import load_config, get_config_value
 
 DEFAULT_VIDEO_EXTENSIONS = [".mp4", ".avi", ".mov", ".mkv", ".webm", ".flv", ".wmv"]
+
+
+def _hash_video(video_path):
+    """Return a short hash identifying a video file by path + size + mtime."""
+    try:
+        stat = os.stat(video_path)
+        key = f"{os.path.abspath(video_path)}|{stat.st_size}|{int(stat.st_mtime)}"
+    except OSError:
+        key = os.path.abspath(video_path)
+    return hashlib.sha256(key.encode("utf-8")).hexdigest()[:16]
+
+
+def _hash_query(query):
+    """Return a short hash of the query string."""
+    return hashlib.md5(query.encode("utf-8")).hexdigest()[:16]
+
+
+def _hash_params(params):
+    """Return a short hash of the search parameters that affect results."""
+    s = (
+        f"{params.get('decision_model_floor')}|"
+        f"{params.get('decision_model_sample_rate')}|"
+        f"{params.get('ollama_frame_scale')}|"
+        f"{params.get('scene_change')}|"
+        f"{params.get('scene_threshold')}"
+    )
+    return hashlib.md5(s.encode("utf-8")).hexdigest()[:16]
+
+
+def _cache_filename(video_path, query, params):
+    """Build cache filename: <video_name>_<video_hash>_<query_hash>_<params_hash>.json"""
+    video_name = os.path.splitext(os.path.basename(video_path))[0]
+    vh = _hash_video(video_path)
+    qh = _hash_query(query)
+    ph = _hash_params(params)
+    return f"{video_name}_{vh}_{qh}_{ph}.json"
+
+
+def _try_load_cache(cache_dir, video_path, query, params, verbose=False):
+    """Try to load cached results. Returns (results, metadata) or (None, None)."""
+    if not cache_dir:
+        return None, None
+    fname = _cache_filename(video_path, query, params)
+    cache_file = os.path.join(cache_dir, fname)
+    if not os.path.exists(cache_file):
+        if verbose:
+            print(f"Cache miss: {cache_file}", file=sys.stderr)
+        return None, None
+    try:
+        with open(cache_file, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        # Verify parameters match exactly
+        if data.get("parameters") != params:
+            if verbose:
+                print(f"Cache parameters mismatch for {cache_file}", file=sys.stderr)
+            return None, None
+        if verbose:
+            print(f"Cache hit: {cache_file} ({len(data.get('results', []))} results)", file=sys.stderr)
+        return data.get("results", []), data.get("metadata", {})
+    except (json.JSONDecodeError, OSError) as e:
+        if verbose:
+            print(f"Warning: Failed to read cache file {cache_file}: {e}", file=sys.stderr)
+        return None, None
+
+
+def _save_cache(cache_dir, video_path, query, params, results, metadata, verbose=False):
+    """Save search results to a cache JSON file."""
+    if not cache_dir:
+        return
+    fname = _cache_filename(video_path, query, params)
+    cache_file = os.path.join(cache_dir, fname)
+    try:
+        os.makedirs(cache_dir, exist_ok=True)
+        data = {
+            "video_path": video_path,
+            "query": query,
+            "parameters": params,
+            "results": results,
+            "metadata": metadata,
+        }
+        with open(cache_file, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+        if verbose:
+            print(f"Cache saved: {cache_file}", file=sys.stderr)
+    except OSError as e:
+        if verbose:
+            print(f"Warning: Failed to save cache file {cache_file}: {e}", file=sys.stderr)
+
 
 def _resolve_video_paths(inputs, recursive=False, extensions=None):
     """Resolve a list of inputs (files, directories, glob patterns) into concrete video file paths."""
@@ -458,79 +548,108 @@ def cmd_search(args):
         total_validated += len(batch)
         batch = []
 
-    for vp in video_paths:
-        cap = cv2.VideoCapture(vp)
-        if not cap.isOpened():
-            print(f"Warning: Cannot open video {vp}, skipping", file=sys.stderr)
-            continue
+    # Cache lookup when --cache flag provided
+    cache_dir = getattr(args, "cache", None)
+    # Save-cache directory (--save-cache). Defaults to None (no save) if flag not used.
+    save_cache_dir = getattr(args, "save_cache", None)
 
-        # Get total frame count (if available)
-        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) if cap.get(cv2.CAP_PROP_FRAME_COUNT) is not None else None
+    cache_params = {
+        "decision_model_floor": decision_model_floor,
+        "decision_model_sample_rate": sample_rate,
+        "ollama_frame_scale": frame_scale,
+        "scene_change": scene_change,
+        "scene_threshold": scene_threshold,
+    }
 
-        if scene_change:
-            # --- Scene-change detection mode ---
-            scene_ts = _extract_scene_timestamps(vp, scene_threshold=scene_threshold, verbose=verbose)
-            if not scene_ts:
-                print(f"Warning: No scene changes detected in {vp}; falling back to keyframes", file=sys.stderr)
-                scene_ts = _extract_keyframe_timestamps(vp, verbose=verbose)
-            scene_counter = 0
-            for ts in scene_ts:
-                if collect_target and len(final_results) >= collect_target:
-                    break
-                cap.set(cv2.CAP_PROP_POS_MSEC, ts * 1000.0)
-                ret, frame_bgr = cap.read()
-                if not ret:
-                    continue
-                b64 = _b64_from_bgr(frame_bgr)
-                batch.append((ts, b64, vp))
-                total_extracted += 1
-                if verbose and total_extracted % 10 == 0:
-                    remaining_frames = len(scene_ts) - scene_counter - 1
-                    print(f"Sampled ts={ts:.2f}s (extracted={total_extracted}/{remaining_frames}, validated={total_validated}, passing={len(final_results)})", file=sys.stderr)
-                if len(batch) >= batch_size:
-                    _flush_batch()
+    cache_results = None
+    cache_metadata = {}
+    if cache_dir:
+        cache_results, cache_metadata = _try_load_cache(cache_dir, video_paths[0], query, cache_params, verbose=verbose)
+        if cache_results is not None:
+            final_results = cache_results
+            # Skip frame extraction and Ollama validation; use cached results
+            if verbose:
+                print(f"Loaded {len(final_results)} result(s) from cache", file=sys.stderr)
+
+    cache_hit = cache_results is not None
+    if not cache_hit:
+        for vp in video_paths:
+            cap = cv2.VideoCapture(vp)
+            if not cap.isOpened():
+                print(f"Warning: Cannot open video {vp}, skipping", file=sys.stderr)
+                continue
+
+            # Get total frame count (if available)
+            total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) if cap.get(cv2.CAP_PROP_FRAME_COUNT) is not None else None
+
+            if scene_change:
+                # --- Scene-change detection mode ---
+                scene_ts = _extract_scene_timestamps(vp, scene_threshold=scene_threshold, verbose=verbose)
+                if not scene_ts:
+                    print(f"Warning: No scene changes detected in {vp}; falling back to keyframes", file=sys.stderr)
+                    scene_ts = _extract_keyframe_timestamps(vp, verbose=verbose)
+                scene_counter = 0
+                for ts in scene_ts:
                     if collect_target and len(final_results) >= collect_target:
                         break
-                scene_counter += 1
-        else:
-            # --- Blind uniform sampling mode ---
-            fps = cap.get(cv2.CAP_PROP_FPS)
-            if fps is None or fps <= 0:
-                fps = 30.0
-            stride = max(1, int(fps * sample_rate))
-
-            frame_index = 0
-            while True:
-                ret, frame_bgr = cap.read()
-                if not ret:
-                    break
-
-                if frame_index % stride == 0:
+                    cap.set(cv2.CAP_PROP_POS_MSEC, ts * 1000.0)
+                    ret, frame_bgr = cap.read()
+                    if not ret:
+                        continue
                     b64 = _b64_from_bgr(frame_bgr)
-                    ts = frame_index / fps
                     batch.append((ts, b64, vp))
                     total_extracted += 1
-
                     if verbose and total_extracted % 10 == 0:
-                        remaining_frames = int(total_frames - frame_index) if total_frames is not None else 0
+                        remaining_frames = len(scene_ts) - scene_counter - 1
                         print(f"Sampled ts={ts:.2f}s (extracted={total_extracted}/{remaining_frames}, validated={total_validated}, passing={len(final_results)})", file=sys.stderr)
-
                     if len(batch) >= batch_size:
                         _flush_batch()
                         if collect_target and len(final_results) >= collect_target:
                             break
+                    scene_counter += 1
+            else:
+                # --- Blind uniform sampling mode ---
+                fps = cap.get(cv2.CAP_PROP_FPS)
+                if fps is None or fps <= 0:
+                    fps = 30.0
+                stride = max(1, int(fps * sample_rate))
 
-                frame_index += 1
+                frame_index = 0
+                while True:
+                    ret, frame_bgr = cap.read()
+                    if not ret:
+                        break
 
-        cap.release()
-        if collect_target and len(final_results) >= collect_target:
-            break
+                    if frame_index % stride == 0:
+                        b64 = _b64_from_bgr(frame_bgr)
+                        ts = frame_index / fps
+                        batch.append((ts, b64, vp))
+                        total_extracted += 1
+
+                        if verbose and total_extracted % 10 == 0:
+                            remaining_frames = int(total_frames - frame_index) if total_frames is not None else 0
+                            print(f"Sampled ts={ts:.2f}s (extracted={total_extracted}/{remaining_frames}, validated={total_validated}, passing={len(final_results)})", file=sys.stderr)
+
+                        if len(batch) >= batch_size:
+                            _flush_batch()
+                            if collect_target and len(final_results) >= collect_target:
+                                break
+
+                    frame_index += 1
+
+            cap.release()
+            if collect_target and len(final_results) >= collect_target:
+                break
 
     # Validate remaining batch
     if batch:
         out = _validate_batch(batch)
         final_results.extend(out)
         total_validated += len(batch)
+
+    # Save cache when --save-cache flag provided
+    if save_cache_dir and final_results:
+        _save_cache(save_cache_dir, video_paths[0] if video_paths else "", query, cache_params, final_results, cache_metadata if cache_metadata else {}, verbose=verbose)
 
     # Sort by score descending, apply caps
     final_results.sort(key=lambda x: x["score"], reverse=True)
@@ -603,6 +722,8 @@ def main():
     p_search.add_argument("--ollama-frame-scale", "-ofs", type=float, default=None, help="Scale factor for frames sent to Ollama (0.0-1.0, default: 0.2). Lower = faster")
     p_search.add_argument("--ollama-model", "-dm", default=None, help="Ollama model name(s), comma-separated fallback list tried in order")
     p_search.add_argument("--recursive", "-R", action="store_true", default=False, help="Recursively scan directories for video files")
+    p_search.add_argument("--cache", "-c", type=str, default=None, help="Path to cache directory to look up existing cache files. Only used when this flag is given")
+    p_search.add_argument("--save-cache", "-sc", type=str, default=None, nargs="?", const=".", help="Path to cache directory for saving search results. Defaults to current directory (.) if used without a path")
     p_search.set_defaults(func=cmd_search)
 
     args = parser.parse_args()
