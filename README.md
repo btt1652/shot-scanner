@@ -112,8 +112,39 @@ ollama_candidates = 0
 - **Parallel validation** with `--ollama-workers 4` (or higher) — each thread handles one frame.
 - **Coarser sampling** with `--decision-model-sample-rate 5` — one frame every 5 seconds.
 - **Lower the threshold** with `--decision-model-threshold 0.4` to keep more passing frames.
+- **Scene-change detection** with `--scene-change` — automatically extracts frames at scene boundaries instead of uniform sampling, often much more efficient.
 
 ## Architecture
+
+- **No indexing step** — videos are read directly with OpenCV.
+- **No `.npz` cache** — frames are extracted and validated on the fly.
+- **Ollama-only scoring** — `final_score = Ollama_score`; CLIP is never invoked.
+- **Endpoint fallback** — if the configured Ollama host is unreachable, `localhost:11434` is used automatically.
+- **Parallel validation** — frames are validated concurrently via `ThreadPoolExecutor`.
+
+## Scene Change Detection
+
+The `--scene-change` and `--scene-threshold` flags enable automatic scene change detection. Instead of blindly sampling every `decision_model_sample_rate` seconds, the app uses FFmpeg’s scene filter to detect scenes and only validates the key frames at those transitions:
+
+```bash
+vsearch search --scene-change --scene-threshold 0.5 --video video.mp4 --text "a person"
+```
+
+**How it works:**
+
+1. `ffmpeg` runs `-vf "select='gt(scene,THRESHOLD)',metadata=print"` on the video and parses the scene-change timestamps (`pts_time`) from stderr.
+2. For each timestamp, the app extracts that frame (using OpenCV seek) and passes it to Ollama.
+3. Only scene boundaries are validated, which can drastically reduce processing time and focus validation on moments that likely contain content changes.
+
+**Performance benefits:**
+- Many scenes can be detected with fewer frames than uniform sampling.
+- Scene thresholds (`0.0‑1.0`) control sensitivity: `0.4` (default) captures moderate changes; `0.7` requires strong changes.
+- If no scene changes are detected (e.g., static videos), the app falls back to keyframe detection.
+- Scene detection is performed once and then frames are processed using the same validation pipeline as normal sampling.
+
+**Configuration:**
+- `scene_change = false` – disable scene detection (uniform sampling).
+- `scene_threshold = 0.4` – scene-change sensitivity threshold.
 
 - **No indexing step** — videos are read directly with OpenCV.
 - **No `.npz` cache** — frames are extracted and validated on the fly.

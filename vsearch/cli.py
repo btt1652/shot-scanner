@@ -234,6 +234,66 @@ def _extract_frame_at(video_path, timestamp, out_path):
     except Exception:
         return False
 
+def _extract_keyframe_timestamps(video_path, verbose=False):
+    """Return timestamps of I-frames (keyframes) in a video using ffmpeg."""
+    cmd = [
+        'ffmpeg', '-nostdin', '-hide_banner',
+        '-i', video_path,
+        '-skip_frame', 'nokey', '-vsync', 'vfr',
+        '-f', 'null', '-',
+    ]
+    try:
+        proc = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=600)
+    except Exception as e:
+        if verbose:
+            print(f"Keyframe detection failed for {video_path}: {e}", file=sys.stderr)
+        return []
+    stderr = proc.stderr.decode("utf-8", errors="replace")
+    timestamps = []
+    for line in stderr.splitlines():
+        if "pts_time:" in line:
+            try:
+                val = float(line.split("pts_time:", 1)[1].strip().split()[0])
+                timestamps.append(val)
+            except (ValueError, IndexError):
+                continue
+    return sorted(set(timestamps))
+
+
+def _extract_scene_timestamps(video_path, scene_threshold=0.4, verbose=False, timeout=600):
+    """Detect scene-change timestamps in a video using ffmpeg's scene filter.
+
+    Runs ffmpeg with select='gt(scene,THRESHOLD)',metadata=print and parses the
+    scene-change timestamps from stderr. Returns a sorted list of seconds.
+    """
+    cmd = [
+        'ffmpeg', '-nostdin', '-hide_banner',
+        '-i', video_path,
+        '-vf', f"select='gt(scene,{scene_threshold})',metadata=print",
+        '-an', '-f', 'null', '-',
+    ]
+    try:
+        proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout)
+    except Exception as e:
+        if verbose:
+            print(f"Scene detection failed for {video_path}: {e}", file=sys.stderr)
+        return []
+    stderr = proc.stderr.decode("utf-8", errors="replace")
+    timestamps = []
+    for line in stderr.splitlines():
+        if "pts_time:" in line:
+            try:
+                val = float(line.split("pts_time:", 1)[1].strip().split()[0])
+                timestamps.append(val)
+            except (ValueError, IndexError):
+                continue
+    # De-dup and sort
+    timestamps = sorted(set(timestamps))
+    if verbose:
+        print(f"Scene detection: {len(timestamps)} scene change(s) found (threshold={scene_threshold}) in {video_path}", file=sys.stderr)
+    return timestamps
+
+
 def _validate_frame_with_ollama(frame_b64, query, model_ids, endpoint, verbose=False):
     """Validate a single frame against Ollama decision model. Returns (score, model_used) or (None, None)."""
     global _ollama_failed_models, _ollama_resolved_model
@@ -333,6 +393,8 @@ def cmd_search(args):
     ollama_model = cfg_val("ollama_decision_model", "ollama_model")
     frame_scale = cfg_val("ollama_frame_scale", "ollama_frame_scale")
     recursive = getattr(args, "recursive", False)
+    scene_change = getattr(args, "scene_change", False)
+    scene_threshold = getattr(args, "scene_threshold", 0.4)
 
     # Determine query
     if args.text is not None:
@@ -362,7 +424,8 @@ def cmd_search(args):
     if verbose:
         _models = _as_list(ollama_model)
         print(f"Config: top_k={top_k}, global_k={global_k}, json_output={json_output}", file=sys.stderr)
-        print(f"        save_frames={save_frames}, video={video_path}, decision_model_threshold={decision_model_threshold}, decision_model_sample_rate={decision_model_sample_rate}, ollama_workers={ollama_workers}, ollama_host={ollama_endpoint}, ollama_model={_models}, ollama_frame_scale={frame_scale:.2f}", file=sys.stderr)
+        scene_str = f", scene_change={scene_change}" if scene_change else ""
+        print(f"        save_frames={save_frames}, video={video_path}, decision_model_threshold={decision_model_threshold}, decision_model_sample_rate={decision_model_sample_rate}{scene_str}, ollama_workers={ollama_workers}, ollama_host={ollama_endpoint}, ollama_model={_models}, ollama_frame_scale={frame_scale:.2f}", file=sys.stderr)
 
     sample_rate = decision_model_sample_rate if decision_model_sample_rate else 1
     cap_target = global_k if (global_k is not None and global_k > 0) else (top_k if top_k and top_k > 0 else 0)
@@ -435,51 +498,83 @@ def cmd_search(args):
                     print(f"ts={ts_formatted} ollama={score:.4f} discard", file=sys.stderr)
         return results
 
+    def _b64_from_bgr(frame_bgr):
+        """Encode a BGR numpy frame to scaled JPEG base64."""
+        rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+        pil_img = Image.fromarray(rgb)
+        scale = frame_scale if frame_scale else 0.2
+        new_w = max(1, int(pil_img.width * scale))
+        new_h = max(1, int(pil_img.height * scale))
+        pil_img = pil_img.resize((new_w, new_h), Image.LANCZOS)
+        buffered = io.BytesIO()
+        pil_img.save(buffered, format="JPEG", quality=80)
+        return base64.b64encode(buffered.getvalue()).decode("utf-8")
+
+    def _flush_batch():
+        nonlocal batch, total_validated
+        if not batch:
+            return
+        out = _validate_batch(batch)
+        final_results.extend(out)
+        total_validated += len(batch)
+        batch = []
+
     for vp in video_paths:
         cap = cv2.VideoCapture(vp)
         if not cap.isOpened():
             print(f"Warning: Cannot open video {vp}, skipping", file=sys.stderr)
             continue
 
-        fps = cap.get(cv2.CAP_PROP_FPS)
-        if fps is None or fps <= 0:
-            fps = 30.0
-        stride = max(1, int(fps * sample_rate))
-
-        frame_index = 0
-        while True:
-            ret, frame_bgr = cap.read()
-            if not ret:
-                break
-
-            if frame_index % stride == 0:
-                rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
-                pil_img = Image.fromarray(rgb)
-                scale = frame_scale if frame_scale else 0.2
-                new_w = max(1, int(pil_img.width * scale))
-                new_h = max(1, int(pil_img.height * scale))
-                pil_img = pil_img.resize((new_w, new_h), Image.LANCZOS)
-
-                buffered = io.BytesIO()
-                pil_img.save(buffered, format="JPEG", quality=80)
-                frame_b64 = base64.b64encode(buffered.getvalue()).decode("utf-8")
-
-                ts = frame_index / fps
-                batch.append((ts, frame_b64, vp))
+        if scene_change:
+            # --- Scene-change detection mode ---
+            scene_ts = _extract_scene_timestamps(vp, scene_threshold=scene_threshold, verbose=verbose)
+            if not scene_ts:
+                print(f"Warning: No scene changes detected in {vp}; falling back to keyframes", file=sys.stderr)
+                scene_ts = _extract_keyframe_timestamps(vp, verbose=verbose)
+            for ts in scene_ts:
+                if collect_target and len(final_results) >= collect_target:
+                    break
+                cap.set(cv2.CAP_PROP_POS_MSEC, ts * 1000.0)
+                ret, frame_bgr = cap.read()
+                if not ret:
+                    continue
+                b64 = _b64_from_bgr(frame_bgr)
+                batch.append((ts, b64, vp))
                 total_extracted += 1
-
                 if verbose and total_extracted % 10 == 0:
-                    print(f"Sampled ts={ts:.2f}s (extracted_total={total_extracted}, validated={total_validated}, passing={len(final_results)})", file=sys.stderr)
-
+                    print(f"Scene ts={ts:.2f}s (extracted_total={total_extracted}, validated={total_validated}, passing={len(final_results)})", file=sys.stderr)
                 if len(batch) >= batch_size:
-                    out = _validate_batch(batch)
-                    final_results.extend(out)
-                    total_validated += len(batch)
-                    batch = []
+                    _flush_batch()
                     if collect_target and len(final_results) >= collect_target:
                         break
+        else:
+            # --- Blind uniform sampling mode ---
+            fps = cap.get(cv2.CAP_PROP_FPS)
+            if fps is None or fps <= 0:
+                fps = 30.0
+            stride = max(1, int(fps * sample_rate))
 
-            frame_index += 1
+            frame_index = 0
+            while True:
+                ret, frame_bgr = cap.read()
+                if not ret:
+                    break
+
+                if frame_index % stride == 0:
+                    b64 = _b64_from_bgr(frame_bgr)
+                    ts = frame_index / fps
+                    batch.append((ts, b64, vp))
+                    total_extracted += 1
+
+                    if verbose and total_extracted % 10 == 0:
+                        print(f"Sampled ts={ts:.2f}s (extracted_total={total_extracted}, validated={total_validated}, passing={len(final_results)})", file=sys.stderr)
+
+                    if len(batch) >= batch_size:
+                        _flush_batch()
+                        if collect_target and len(final_results) >= collect_target:
+                            break
+
+                frame_index += 1
 
         cap.release()
         if collect_target and len(final_results) >= collect_target:
@@ -555,6 +650,8 @@ def main():
     p_search.add_argument("--save-frames", "-sf", default=None, help="Directory to save matched frame images as {video_name}_{HHMMSS}_{score}.jpg")
     p_search.add_argument("--decision-model-threshold", "-dmt", type=float, default=None, help="Threshold for Ollama score (default: 0.5). Results below are discarded.")
     p_search.add_argument("--decision-model-sample-rate", "-dmsr", type=int, default=None, help="Frame sampling interval in seconds (default: 1)")
+    p_search.add_argument("--scene-change", action="store_true", default=None, help="Use scene-change detection instead of blind sampling")
+    p_search.add_argument("--scene-threshold", type=float, default=0.4, help="Scene change threshold (0.0-1.0, default: 0.4)")
     p_search.add_argument("--ollama-workers", "-ow", type=int, default=None, help="Number of frames validated concurrently against Ollama (default: 1)")
     p_search.add_argument("--ollama-candidates", "-oc", type=int, default=None, help="Max number of candidate frames to validate (default: unlimited)")
     p_search.add_argument("--ollama-host", "-oh", default=None, help="Ollama server address (default: 192.168.1.190). Falls back to localhost if unreachable")
