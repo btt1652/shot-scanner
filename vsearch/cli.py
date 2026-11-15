@@ -140,65 +140,6 @@ def resolve_ollama_endpoint(primary_endpoint, verbose=False):
     _ollama_resolved_endpoint = fallback
     return fallback
 
-def _extract_frame_base64(video_path, timestamp, frame_scale=0.2):
-    """Extract a single frame from video at given timestamp and return base64-encoded JPEG."""
-    cmd = [
-        'ffmpeg', '-y', '-v', 'error',
-        '-ss', str(timestamp),
-        '-i', video_path,
-        '-frames:v', '1',
-        '-f', 'image2pipe',
-        '-vcodec', 'mjpeg',
-        '-'
-    ]
-    try:
-        import subprocess
-        result = subprocess.run(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            check=True,
-            timeout=15,
-        )
-        img_bytes = result.stdout
-        if not img_bytes:
-            raise subprocess.CalledProcessError(1, cmd)
-        img = cv2.imdecode(np.frombuffer(img_bytes, dtype=np.uint8), cv2.IMREAD_COLOR)
-        if img is None:
-            raise subprocess.CalledProcessError(1, cmd)
-        h, w = img.shape[:2]
-        new_h = max(1, int(h * frame_scale))
-        new_w = max(1, int(w * frame_scale))
-        img_small = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_AREA)
-        success, encoded = cv2.imencode(".jpg", img_small, [cv2.IMWRITE_JPEG_QUALITY, 90])
-        if not success:
-            return ""
-        return base64.b64encode(encoded.tobytes()).decode("utf-8")
-    except subprocess.CalledProcessError:
-        cap = cv2.VideoCapture(video_path)
-        if not cap.isOpened():
-            return ""
-        fps = cap.get(cv2.CAP_PROP_FPS)
-        if fps is None or fps <= 0:
-            fps = 30.0
-        frame_number = int(timestamp * fps)
-        cap.set(cv2.CAP_PROP_POS_FRAMES, frame_number)
-        ret, frame = cap.read()
-        cap.release()
-        if not ret:
-            return ""
-        img = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        h, w = img.shape[:2]
-        new_h = max(1, int(h * frame_scale))
-        new_w = max(1, int(w * frame_scale))
-        img_small = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_AREA)
-        success, encoded = cv2.imencode(".jpg", img_small, [cv2.IMWRITE_JPEG_QUALITY, 90])
-        if not success:
-            return ""
-        return base64.b64encode(encoded.tobytes()).decode("utf-8")
-    except Exception:
-        return ""
-
 def _extract_frame_at(video_path, timestamp, out_path):
     """Extract a single frame at given timestamp and save to out_path as JPEG."""
     cmd = [
@@ -388,13 +329,12 @@ def cmd_search(args):
     decision_model_threshold = cfg_val("decision_model_threshold", "decision_model_threshold")
     decision_model_sample_rate = cfg_val("decision_model_sample_rate", "decision_model_sample_rate")
     ollama_workers = cfg_val("ollama_workers", "ollama_workers")
-    ollama_candidates = cfg_val("ollama_candidates", "ollama_candidates")
     ollama_endpoint = cfg_val("ollama_host", "ollama_host")
     ollama_model = cfg_val("ollama_decision_model", "ollama_model")
     frame_scale = cfg_val("ollama_frame_scale", "ollama_frame_scale")
-    recursive = getattr(args, "recursive", False)
-    scene_change = getattr(args, "scene_change", False)
-    scene_threshold = getattr(args, "scene_threshold", 0.4)
+    recursive = cfg_val("recursive", "recursive")
+    scene_change = cfg_val("scene_change", "scene_change")
+    scene_threshold = cfg_val("scene_threshold", "scene_threshold")
 
     # Determine query
     if args.text is not None:
@@ -424,8 +364,7 @@ def cmd_search(args):
     if verbose:
         _models = _as_list(ollama_model)
         print(f"Config: top_k={top_k}, global_k={global_k}, json_output={json_output}", file=sys.stderr)
-        scene_str = f", scene_change={scene_change}" if scene_change else ""
-        print(f"        save_frames={save_frames}, video={video_path}, decision_model_threshold={decision_model_threshold}, decision_model_sample_rate={decision_model_sample_rate}{scene_str}, ollama_workers={ollama_workers}, ollama_host={ollama_endpoint}, ollama_model={_models}, ollama_frame_scale={frame_scale:.2f}", file=sys.stderr)
+        print(f"        save_frames={save_frames}, video={video_path}, decision_model_threshold={decision_model_threshold}, decision_model_sample_rate={decision_model_sample_rate}, scene_change={scene_change}, scene_threshold={scene_threshold}, ollama_workers={ollama_workers}, ollama_host={ollama_endpoint}, ollama_model={_models}, ollama_frame_scale={frame_scale:.2f}", file=sys.stderr)
 
     sample_rate = decision_model_sample_rate if decision_model_sample_rate else 1
     cap_target = global_k if (global_k is not None and global_k > 0) else (top_k if top_k and top_k > 0 else 0)
@@ -653,7 +592,6 @@ def main():
     p_search.add_argument("--scene-change", action="store_true", default=None, help="Use scene-change detection instead of blind sampling")
     p_search.add_argument("--scene-threshold", type=float, default=0.4, help="Scene change threshold (0.0-1.0, default: 0.4)")
     p_search.add_argument("--ollama-workers", "-ow", type=int, default=None, help="Number of frames validated concurrently against Ollama (default: 1)")
-    p_search.add_argument("--ollama-candidates", "-oc", type=int, default=None, help="Max number of candidate frames to validate (default: unlimited)")
     p_search.add_argument("--ollama-host", "-oh", default=None, help="Ollama server address (default: 192.168.1.190). Falls back to localhost if unreachable")
     p_search.add_argument("--ollama-frame-scale", "-ofs", type=float, default=None, help="Scale factor for frames sent to Ollama (0.0-1.0, default: 0.2). Lower = faster")
     p_search.add_argument("--ollama-model", "-dm", default=None, help="Ollama model name(s), comma-separated fallback list tried in order")

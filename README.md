@@ -68,11 +68,12 @@ CLIP is not involved in scoring at all.
 | `--decision-model-threshold` | `-dmt` | Ollama score threshold (default: 0.5) |
 | `--decision-model-sample-rate` | `-dmsr` | Frame sampling interval in seconds (default: 1) |
 | `--ollama-workers` | `-ow` | Concurrent Ollama validation threads (default: 1) |
-| `--ollama-candidates` | `-oc` | Maximum candidate frames to validate (default: unlimited) |
 | `--ollama-host` | `-oh` | Ollama server address (default: `192.168.1.190`). Falls back to `localhost` if unreachable |
 | `--ollama-frame-scale` | `-ofs` | Scale factor for frames sent to Ollama (0.0–1.0, default: 0.2). Lower = faster |
 | `--ollama-model` | `-dm` | Ollama model name(s), comma-separated fallback list |
 | `--recursive` | `-R` | Recursively scan directories for video files |
+| `--scene-change` | | Use scene-change detection instead of blind sampling |
+| `--scene-threshold` | | Scene detection sensitivity, 0.0–1.0 (default: 0.4) |
 
 ## Configuration (`config.toml`)
 
@@ -90,7 +91,8 @@ ollama_host = "192.168.1.190"
 ollama_frame_scale = 0.2
 ollama_decision_model = ["d3:9b", "d3:4b"]
 ollama_workers = 1
-ollama_candidates = 0
+scene_change = false
+scene_threshold = 0.4
 ```
 
 ### Key config values
@@ -104,7 +106,8 @@ ollama_candidates = 0
 - `ollama_frame_scale` — image scale factor sent to Ollama (default: `0.2`)
 - `ollama_decision_model` — model name or fallback list
 - `ollama_workers` — concurrent validation threads (default: `1`)
-- `ollama_candidates` — max candidate frames to validate
+- `scene_change` — use scene-change detection instead of blind sampling (default: `false`)
+- `scene_threshold` — scene detection sensitivity (default: `0.4`)
 
 ## Performance Tips
 

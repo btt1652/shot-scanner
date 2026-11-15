@@ -2,16 +2,15 @@
 # Decision-model-only search mode: uses an Ollama decision model as the sole judge
 
 [search]
-top_k = -1
+top_k = 5
 json_output = false
 save_frames = ""
 video = ""
 decision_model_threshold = 0.5
-decision_model_sample_rate = 1
+decision_model_sample_rate = 3
 ollama_host = "192.168.1.190"
 ollama_frame_scale = 0.2
 ollama_decision_model = ["d3:9b", "d3:4b"]
-ollama_workers = 1
-ollama_candidates = 0
+ollama_workers = 4
 scene_change = false
 scene_threshold = 0.4
