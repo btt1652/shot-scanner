@@ -464,12 +464,16 @@ def cmd_search(args):
             print(f"Warning: Cannot open video {vp}, skipping", file=sys.stderr)
             continue
 
+        # Get total frame count (if available)
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) if cap.get(cv2.CAP_PROP_FRAME_COUNT) is not None else None
+
         if scene_change:
             # --- Scene-change detection mode ---
             scene_ts = _extract_scene_timestamps(vp, scene_threshold=scene_threshold, verbose=verbose)
             if not scene_ts:
                 print(f"Warning: No scene changes detected in {vp}; falling back to keyframes", file=sys.stderr)
                 scene_ts = _extract_keyframe_timestamps(vp, verbose=verbose)
+            scene_counter = 0
             for ts in scene_ts:
                 if collect_target and len(final_results) >= collect_target:
                     break
@@ -481,11 +485,13 @@ def cmd_search(args):
                 batch.append((ts, b64, vp))
                 total_extracted += 1
                 if verbose and total_extracted % 10 == 0:
-                    print(f"Scene ts={ts:.2f}s (extracted_total={total_extracted}, validated={total_validated}, passing={len(final_results)})", file=sys.stderr)
+                    remaining_frames = len(scene_ts) - scene_counter - 1
+                    print(f"Sampled ts={ts:.2f}s (extracted={total_extracted}/{remaining_frames}, validated={total_validated}, passing={len(final_results)})", file=sys.stderr)
                 if len(batch) >= batch_size:
                     _flush_batch()
                     if collect_target and len(final_results) >= collect_target:
                         break
+                scene_counter += 1
         else:
             # --- Blind uniform sampling mode ---
             fps = cap.get(cv2.CAP_PROP_FPS)
@@ -506,7 +512,8 @@ def cmd_search(args):
                     total_extracted += 1
 
                     if verbose and total_extracted % 10 == 0:
-                        print(f"Sampled ts={ts:.2f}s (extracted_total={total_extracted}, validated={total_validated}, passing={len(final_results)})", file=sys.stderr)
+                        remaining_frames = int(total_frames - frame_index) if total_frames is not None else 0
+                        print(f"Sampled ts={ts:.2f}s (extracted={total_extracted}/{remaining_frames}, validated={total_validated}, passing={len(final_results)})", file=sys.stderr)
 
                     if len(batch) >= batch_size:
                         _flush_batch()
