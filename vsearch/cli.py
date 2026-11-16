@@ -483,6 +483,14 @@ def cmd_search(args):
                     if score >= decision_model_floor:
                         passing += 1
                         print(f"ts={ts_formatted} score={score:.4f} pass", file=sys.stderr)
+                        # Save frame immediately when it passes the floor
+                        if save_frames:
+                            _save_matched_frames([{
+                                "timestamp_seconds": ts,
+                                "timestamp_formatted": ts_formatted,
+                                "score": score,
+                                "source_video_path": vp,
+                            }], vp, save_frames)
                     else:
                         print(f"ts={ts_formatted} score={score:.4f} discard", file=sys.stderr)
         else:
@@ -501,6 +509,14 @@ def cmd_search(args):
                 if score >= decision_model_floor:
                     passing += 1
                     print(f"ts={ts_formatted} score={score:.4f} pass", file=sys.stderr)
+                    # Save frame immediately when it passes the floor
+                    if save_frames:
+                        _save_matched_frames([{
+                            "timestamp_seconds": ts,
+                            "timestamp_formatted": ts_formatted,
+                            "score": score,
+                            "source_video_path": vp,
+                        }], vp, save_frames)
                 else:
                     print(f"ts={ts_formatted} score={score:.4f} discard", file=sys.stderr)
         return results, passing
