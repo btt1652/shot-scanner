@@ -82,7 +82,7 @@ def _try_load_cache(cache_dir, video_path, sample_rate, frame_scale, state, inst
         total_validated = data.get("total_validated")
         if total_sampled is not None and total_validated is not None:
             if total_validated < total_sampled:
-                print(f"Cache incomplete: {cache_file} (validated={total_validated}/{total_sampled}), ignoring", file=sys.stderr)
+                print(f"Cache incomplete: {cache_file} (validated={total_validated}/{total_sampled})", file=sys.stderr)
                 return None, None
         results = [r for r in all_results if r.get("score", 0) >= decision_model_floor]
         print(f"Cache hit: {cache_file} ({len(results)} results after floor filter, {len(all_results)} total)", file=sys.stderr)
@@ -98,7 +98,7 @@ def _save_cache(cache_dir, video_path, sample_rate, frame_scale, state, instruct
         return
     fname = _cache_filename(video_path, sample_rate, frame_scale, state, instructions, model)
     cache_file = os.path.join(cache_dir, fname)
-    print(f"Cache saving: {cache_file}", file=sys.stderr)
+    # print(f"Cache saving: {cache_file}", file=sys.stderr)
     try:
         os.makedirs(cache_dir, exist_ok=True)
         data = {
@@ -639,7 +639,7 @@ def cmd_search(args):
 
                 if total_extracted % 10 == 0:
                     # Show progress as extracted/total_sampled so at end it reads extracted=720/720
-                    print(f"Video: {vp} (extracted={total_extracted}/{total_sampled}, validated={total_validated}, passing={passing_count})", file=sys.stderr)
+                    print(f"{vp} (extracted={total_extracted}/{total_sampled}, validated={total_validated}, passing={passing_count})", file=sys.stderr)
 
                 if len(batch) >= batch_size:
                     _flush_batch()
