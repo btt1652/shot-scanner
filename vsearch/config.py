@@ -27,7 +27,6 @@ def default_config() -> dict:
             "top_k": -1,
             "json_output": False,
             "save_frames": None,
-            "video": None,
             "decision_model_floor": 0.5,
             "decision_model_sample_rate": 1,
             "ollama_host": "192.168.1.190",
@@ -38,6 +37,8 @@ def default_config() -> dict:
             "ollama_instructions_template": "",
             "scene_change": False,
             "scene_threshold": 0.4,
+            "cache_dir": "/tmp",
+            "save_cache_dir": "/tmp",
         }
     }
 

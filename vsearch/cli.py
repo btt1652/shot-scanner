@@ -25,49 +25,44 @@ from .config import load_config, get_config_value
 DEFAULT_VIDEO_EXTENSIONS = [".mp4", ".avi", ".mov", ".mkv", ".webm", ".flv", ".wmv"]
 
 
-def _hash_video(video_path):
-    """Return a short hash identifying a video file by path + size + mtime."""
-    try:
-        stat = os.stat(video_path)
-        key = f"{os.path.abspath(video_path)}|{stat.st_size}|{int(stat.st_mtime)}"
-    except OSError:
-        key = os.path.abspath(video_path)
-    return hashlib.sha256(key.encode("utf-8")).hexdigest()[:16]
+def _hash_video_content(video_path, chunk_mb=8):
+    """Hash first and last N MB of video file using BLAKE2b. Returns raw digest bytes."""
+    size = os.path.getsize(video_path)
+    chunk = chunk_mb * 1024 * 1024
+    h = hashlib.blake2b(digest_size=32)
+    with open(video_path, "rb") as f:
+        h.update(f.read(min(chunk, size)))
+        if size > 2 * chunk:
+            f.seek(-chunk, os.SEEK_END)
+            h.update(f.read(chunk))
+    return h.digest()
 
 
-def _hash_query(query):
-    """Return a short hash of the query string."""
-    return hashlib.md5(query.encode("utf-8")).hexdigest()[:16]
+def _hash_params(sample_rate, frame_scale, state, instructions, model):
+    """Hash search params (sample-rate, frame-scale, state, instructions, model)."""
+    s = f"{sample_rate}|{frame_scale}|{state}|{instructions}|{model}"
+    return hashlib.blake2b(s.encode("utf-8"), digest_size=32).digest()
 
 
-def _hash_params(params):
-    """Return a short hash of the search parameters that affect results."""
-    s = (
-        f"{params.get('decision_model_floor')}|"
-        f"{params.get('decision_model_sample_rate')}|"
-        f"{params.get('ollama_frame_scale')}|"
-        f"{params.get('scene_change')}|"
-        f"{params.get('scene_threshold')}|"
-        f"{params.get('ollama_state_template')}|"
-        f"{params.get('ollama_instructions_template')}"
-    )
-    return hashlib.md5(s.encode("utf-8")).hexdigest()[:16]
+def _cache_filename(video_path, sample_rate, frame_scale, state, instructions, model):
+    """Build cache filename: <single_hash>.json from content + params."""
+    content_bytes = _hash_video_content(video_path)
+    params_bytes = _hash_params(sample_rate, frame_scale, state, instructions, model)
+    h = hashlib.blake2b()
+    h.update(content_bytes)
+    h.update(params_bytes)
+    return f"{h.hexdigest()[:16]}.json"
 
 
-def _cache_filename(video_path, query, params):
-    """Build cache filename: <video_name>_<video_hash>_<query_hash>_<params_hash>.json"""
-    video_name = os.path.splitext(os.path.basename(video_path))[0]
-    vh = _hash_video(video_path)
-    qh = _hash_query(query)
-    ph = _hash_params(params)
-    return f"{video_name}_{vh}_{qh}_{ph}.json"
+def _try_load_cache(cache_dir, video_path, sample_rate, frame_scale, state, instructions, model, decision_model_floor, verbose=False):
+    """Try to load cached results. Returns (results, metadata) or (None, None).
 
-
-def _try_load_cache(cache_dir, video_path, query, params, verbose=False):
-    """Try to load cached results. Returns (results, metadata) or (None, None)."""
+    Filters all_results by decision_model_floor at load time so cache is
+    reusable across different floor thresholds.
+    """
     if not cache_dir:
         return None, None
-    fname = _cache_filename(video_path, query, params)
+    fname = _cache_filename(video_path, sample_rate, frame_scale, state, instructions, model)
     cache_file = os.path.join(cache_dir, fname)
     if not os.path.exists(cache_file):
         if verbose:
@@ -76,39 +71,46 @@ def _try_load_cache(cache_dir, video_path, query, params, verbose=False):
     try:
         with open(cache_file, "r", encoding="utf-8") as f:
             data = json.load(f)
-        # Verify parameters match exactly
-        if data.get("parameters") != params:
-            if verbose:
-                print(f"Cache parameters mismatch for {cache_file}", file=sys.stderr)
-            return None, None
+        all_results = data.get("all_results")
+        if all_results is None:
+            all_results = data.get("results", [])
+        results = [r for r in all_results if r.get("score", 0) >= decision_model_floor]
         if verbose:
-            print(f"Cache hit: {cache_file} ({len(data.get('results', []))} results)", file=sys.stderr)
-        return data.get("results", []), data.get("metadata", {})
+            print(f"Cache hit: {cache_file} ({len(results)} results after floor filter, {len(all_results)} total)", file=sys.stderr)
+        return results, data.get("metadata", {})
     except (json.JSONDecodeError, OSError) as e:
         if verbose:
             print(f"Warning: Failed to read cache file {cache_file}: {e}", file=sys.stderr)
         return None, None
 
 
-def _save_cache(cache_dir, video_path, query, params, results, metadata, verbose=False):
-    """Save search results to a cache JSON file."""
+def _save_cache(cache_dir, video_path, sample_rate, frame_scale, state, instructions, model, all_results, metadata, verbose=False):
+    """Save all validated results to a cache JSON file."""
     if not cache_dir:
         return
-    fname = _cache_filename(video_path, query, params)
+    fname = _cache_filename(video_path, sample_rate, frame_scale, state, instructions, model)
     cache_file = os.path.join(cache_dir, fname)
     try:
         os.makedirs(cache_dir, exist_ok=True)
         data = {
             "video_path": video_path,
-            "query": query,
-            "parameters": params,
-            "results": results,
+            "query": state or instructions or "",
+            "parameters": {
+                "decision_model_sample_rate": sample_rate,
+                "ollama_frame_scale": frame_scale,
+                "scene_change": False,
+                "scene_threshold": None,
+                "ollama_state_template": state,
+                "ollama_instructions_template": instructions,
+                "ollama_model": model,
+            },
+            "all_results": all_results,
             "metadata": metadata,
         }
         with open(cache_file, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2)
         if verbose:
-            print(f"Cache saved: {cache_file}", file=sys.stderr)
+            print(f"Cache saved: {cache_file} ({len(all_results)} results)", file=sys.stderr)
     except OSError as e:
         if verbose:
             print(f"Warning: Failed to save cache file {cache_file}: {e}", file=sys.stderr)
@@ -422,7 +424,6 @@ def cmd_search(args):
     json_output = cfg_val("json_output", "json")
     save_frames = cfg_val("save_frames", "save_frames")
     verbose = not json_output
-    video_path = cfg_val("video", "video")
     decision_model_floor = cfg_val("decision_model_floor", "decision_model_floor")
     decision_model_sample_rate = cfg_val("decision_model_sample_rate", "decision_model_sample_rate")
     ollama_workers = cfg_val("ollama_workers", "ollama_workers")
@@ -434,7 +435,9 @@ def cmd_search(args):
     scene_threshold = cfg_val("scene_threshold", "scene_threshold")
     state_template = cfg_val("ollama_state_template", "ollama_state")
     instructions_template = cfg_val("ollama_instructions_template", "ollama_instructions")
-    
+    cache_dir = cfg_val("cache_dir", "cache")
+    save_cache_dir = cfg_val("save_cache_dir", "save_cache")
+
     # Apply defaults if config/CLI left templates empty
     if not state_template:
         state_template = ""
@@ -444,13 +447,13 @@ def cmd_search(args):
     # State/instructions are the query — use state for cache identity
     query = state_template or instructions_template or ""
     
-    # Resolve video input
-    video_input = args.video
+    # Resolve video input from positional args
+    video_input = getattr(args, "video_paths", None)
     if not video_input:
-        print("Error: --video is required", file=sys.stderr)
+        print("Error: video path(s) required", file=sys.stderr)
         sys.exit(1)
-    
-    video_paths, missing = _resolve_video_paths([video_input], recursive=recursive)
+
+    video_paths, missing = _resolve_video_paths(video_input, recursive=recursive)
     if not video_paths:
         print(f"Error: no video files found from input '{video_input}'", file=sys.stderr)
         sys.exit(1)
@@ -463,7 +466,7 @@ def cmd_search(args):
     if verbose:
         _models = _as_list(ollama_model)
         print(f"Config: top_k={top_k}, global_k={global_k}, json_output={json_output}", file=sys.stderr)
-        print(f"        save_frames={save_frames}, video={video_path}, decision_model_floor={decision_model_floor}, decision_model_sample_rate={decision_model_sample_rate}, scene_change={scene_change}, scene_threshold={scene_threshold}, ollama_workers={ollama_workers}, ollama_host={ollama_endpoint}, ollama_model={_models}, ollama_frame_scale={frame_scale:.2f}, ollama_state={state_template!r}, ollama_instructions={instructions_template!r}", file=sys.stderr)
+        print(f"        save_frames={save_frames}, video={video_paths[0]}, decision_model_floor={decision_model_floor}, decision_model_sample_rate={decision_model_sample_rate}, scene_change={scene_change}, scene_threshold={scene_threshold}, ollama_workers={ollama_workers}, ollama_host={ollama_endpoint}, ollama_model={_models}, ollama_frame_scale={frame_scale:.2f}, ollama_state={state_template!r}, ollama_instructions={instructions_template!r}", file=sys.stderr)
 
     sample_rate = decision_model_sample_rate if decision_model_sample_rate else 1
     cap_target = global_k if (global_k is not None and global_k > 0) else (top_k if top_k and top_k > 0 else 0)
@@ -475,14 +478,17 @@ def cmd_search(args):
         model_ids = ["clef-flash"]
 
     batch = []
+    all_results = []
     final_results = []
+    passing_count = 0
     total_extracted = 0
     total_validated = 0
 
     def _validate_batch(frames_batch):
-        """Validate a batch of (ts, b64, vp) frames using ThreadPoolExecutor. Returns passing results."""
+        """Validate a batch of (ts, b64, vp) frames. Returns (all_results, passing_count)."""
         global _ollama_failed_models
         results = []
+        passing = 0
         if ollama_workers and ollama_workers > 1 and len(frames_batch) > 1:
             with ThreadPoolExecutor(max_workers=ollama_workers) as executor:
                 future_to_frame = {
@@ -510,15 +516,16 @@ def cmd_search(args):
                             print(f"Error validating frame at {ts:.1f}s. Discarded.", file=sys.stderr)
                         continue
                     ts_formatted = f"{int(ts)//3600:02d}:{int(ts)%3600//60:02d}:{int(ts)%60:02d}"
+                    results.append({
+                        "timestamp_seconds": ts,
+                        "timestamp_formatted": ts_formatted,
+                        "score": score,
+                        "source_video_path": vp,
+                    })
                     if score >= decision_model_floor:
+                        passing += 1
                         if verbose:
                             print(f"ts={ts_formatted} ollama={score:.4f} pass", file=sys.stderr)
-                        results.append({
-                            "timestamp_seconds": ts,
-                            "timestamp_formatted": ts_formatted,
-                            "score": score,
-                            "source_video_path": vp,
-                        })
                     elif verbose:
                         print(f"ts={ts_formatted} ollama={score:.4f} discard", file=sys.stderr)
         else:
@@ -529,18 +536,19 @@ def cmd_search(args):
                         print(f"Error validating frame at {ts:.1f}s. Discarded.", file=sys.stderr)
                     continue
                 ts_formatted = f"{int(ts)//3600:02d}:{int(ts)%3600//60:02d}:{int(ts)%60:02d}"
+                results.append({
+                    "timestamp_seconds": ts,
+                    "timestamp_formatted": ts_formatted,
+                    "score": score,
+                    "source_video_path": vp,
+                })
                 if score >= decision_model_floor:
+                    passing += 1
                     if verbose:
                         print(f"ts={ts_formatted} ollama={score:.4f} pass", file=sys.stderr)
-                    results.append({
-                        "timestamp_seconds": ts,
-                        "timestamp_formatted": ts_formatted,
-                        "score": score,
-                        "source_video_path": vp,
-                    })
                 elif verbose:
                     print(f"ts={ts_formatted} ollama={score:.4f} discard", file=sys.stderr)
-        return results
+        return results, passing
 
     def _b64_from_bgr(frame_bgr):
         """Encode a BGR numpy frame to scaled JPEG base64."""
@@ -555,117 +563,124 @@ def cmd_search(args):
         return base64.b64encode(buffered.getvalue()).decode("utf-8")
 
     def _flush_batch():
-        nonlocal batch, total_validated
+        nonlocal batch, total_validated, passing_count
         if not batch:
             return
-        out = _validate_batch(batch)
-        final_results.extend(out)
+        out, passing = _validate_batch(batch)
+        all_results.extend(out)
+        passing_count += passing
         total_validated += len(batch)
         batch = []
 
-    # Cache lookup when --cache flag provided
-    cache_dir = getattr(args, "cache", None)
+    # Cache lookup when --cache flag provided (CLI overrides config)
+    cache_dir = getattr(args, "cache", None) or cache_dir
     # Save-cache directory (--save-cache). Defaults to None (no save) if flag not used.
-    save_cache_dir = getattr(args, "save_cache", None)
+    save_cache_dir = getattr(args, "save_cache", None) or save_cache_dir
 
-    cache_params = {
-        "decision_model_floor": decision_model_floor,
-        "decision_model_sample_rate": sample_rate,
-        "ollama_frame_scale": frame_scale,
-        "scene_change": scene_change,
-        "scene_threshold": scene_threshold,
-        "ollama_state_template": state_template,
-        "ollama_instructions_template": instructions_template,
-    }
+    model_for_cache = _ollama_resolved_model or (model_ids[0] if model_ids else None)
 
-    cache_results = None
-    cache_metadata = {}
-    if cache_dir:
-        cache_results, cache_metadata = _try_load_cache(cache_dir, video_paths[0], query, cache_params, verbose=verbose)
-        if cache_results is not None:
-            final_results = cache_results
-            # Skip frame extraction and Ollama validation; use cached results
-            if verbose:
-                print(f"Loaded {len(final_results)} result(s) from cache", file=sys.stderr)
+    # Process each video: check cache first, then search if miss
+    for vp in video_paths:
+        if collect_target and passing_count >= collect_target:
+            break
 
-    cache_hit = cache_results is not None
-    if not cache_hit:
-        for vp in video_paths:
-            cap = cv2.VideoCapture(vp)
-            if not cap.isOpened():
-                print(f"Warning: Cannot open video {vp}, skipping", file=sys.stderr)
+        # Check cache (sample mode only)
+        if cache_dir and not scene_change:
+            cache_results, _cache_meta = _try_load_cache(
+                cache_dir, vp,
+                sample_rate, frame_scale,
+                state_template, instructions_template, model_for_cache,
+                decision_model_floor, verbose=verbose,
+            )
+            if cache_results is not None:
+                all_results.extend(cache_results)
+                passing_count += len(cache_results)
+                if verbose:
+                    print(f"Loaded {len(cache_results)} result(s) from cache for {vp}", file=sys.stderr)
                 continue
 
-            # Get total frame count (if available)
-            total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) if cap.get(cv2.CAP_PROP_FRAME_COUNT) is not None else None
+        cap = cv2.VideoCapture(vp)
+        if not cap.isOpened():
+            print(f"Warning: Cannot open video {vp}, skipping", file=sys.stderr)
+            continue
 
-            if scene_change:
-                # --- Scene-change detection mode ---
-                scene_ts = _extract_scene_timestamps(vp, scene_threshold=scene_threshold, verbose=verbose)
-                if not scene_ts:
-                    print(f"Warning: No scene changes detected in {vp}; falling back to keyframes", file=sys.stderr)
-                    scene_ts = _extract_keyframe_timestamps(vp, verbose=verbose)
-                scene_counter = 0
-                for ts in scene_ts:
-                    if collect_target and len(final_results) >= collect_target:
+        # Get total frame count (if available)
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) if cap.get(cv2.CAP_PROP_FRAME_COUNT) is not None else None
+
+        if scene_change:
+            # --- Scene-change detection mode ---
+            scene_ts = _extract_scene_timestamps(vp, scene_threshold=scene_threshold, verbose=verbose)
+            if not scene_ts:
+                print(f"Warning: No scene changes detected in {vp}; falling back to keyframes", file=sys.stderr)
+                scene_ts = _extract_keyframe_timestamps(vp, verbose=verbose)
+            scene_counter = 0
+            for ts in scene_ts:
+                if collect_target and passing_count >= collect_target:
+                    break
+                cap.set(cv2.CAP_PROP_POS_MSEC, ts * 1000.0)
+                ret, frame_bgr = cap.read()
+                if not ret:
+                    continue
+                b64 = _b64_from_bgr(frame_bgr)
+                batch.append((ts, b64, vp))
+                total_extracted += 1
+                if verbose and total_extracted % 10 == 0:
+                    remaining_frames = len(scene_ts) - scene_counter - 1
+                    print(f"Sampled ts={ts:.2f}s (extracted={total_extracted}/{remaining_frames}, validated={total_validated}, passing={passing_count})", file=sys.stderr)
+                if len(batch) >= batch_size:
+                    _flush_batch()
+                    if collect_target and passing_count >= collect_target:
                         break
-                    cap.set(cv2.CAP_PROP_POS_MSEC, ts * 1000.0)
-                    ret, frame_bgr = cap.read()
-                    if not ret:
-                        continue
+                scene_counter += 1
+        else:
+            # --- Blind uniform sampling mode ---
+            fps = cap.get(cv2.CAP_PROP_FPS)
+            if fps is None or fps <= 0:
+                fps = 30.0
+            stride = max(1, int(fps * sample_rate))
+            total_sampled = int((total_frames + stride - 1) / stride) if total_frames is not None else 0
+
+            frame_index = 0
+            while True:
+                ret, frame_bgr = cap.read()
+                if not ret:
+                    break
+
+                if frame_index % stride == 0:
                     b64 = _b64_from_bgr(frame_bgr)
+                    ts = frame_index / fps
                     batch.append((ts, b64, vp))
                     total_extracted += 1
+
                     if verbose and total_extracted % 10 == 0:
-                        remaining_frames = len(scene_ts) - scene_counter - 1
-                        print(f"Sampled ts={ts:.2f}s (extracted={total_extracted}/{remaining_frames}, validated={total_validated}, passing={len(final_results)})", file=sys.stderr)
+                        # Show progress as extracted/total_sampled so at end it reads extracted=720/720
+                        print(f"Sampled ts={ts:.2f}s (extracted={total_extracted}/{total_sampled}, validated={total_validated}, passing={passing_count})", file=sys.stderr)
+
                     if len(batch) >= batch_size:
                         _flush_batch()
-                        if collect_target and len(final_results) >= collect_target:
+                        if collect_target and passing_count >= collect_target:
                             break
-                    scene_counter += 1
-            else:
-                # --- Blind uniform sampling mode ---
-                fps = cap.get(cv2.CAP_PROP_FPS)
-                if fps is None or fps <= 0:
-                    fps = 30.0
-                stride = max(1, int(fps * sample_rate))
-                total_sampled = int((total_frames + stride - 1) / stride) if total_frames is not None else 0
-
-                frame_index = 0
-                while True:
-                    ret, frame_bgr = cap.read()
-                    if not ret:
-                        break
-
-                    if frame_index % stride == 0:
-                        b64 = _b64_from_bgr(frame_bgr)
-                        ts = frame_index / fps
-                        batch.append((ts, b64, vp))
-                        total_extracted += 1
-
-                        if verbose and total_extracted % 10 == 0:
-                            # Show progress as extracted/total_sampled so at end it reads extracted=720/720
-                            print(f"Sampled ts={ts:.2f}s (extracted={total_extracted}/{total_sampled}, validated={total_validated}, passing={len(final_results)})", file=sys.stderr)
-
-                        if len(batch) >= batch_size:
-                            _flush_batch()
-                            if collect_target and len(final_results) >= collect_target:
-                                break
 
                     frame_index += 1
 
-            cap.release()
-            if collect_target and len(final_results) >= collect_target:
-                break
+        cap.release()
 
-    # Validate remaining batch
-    if batch:
-        out = _validate_batch(batch)
-        final_results.extend(out)
-        total_validated += len(batch)
+        # Flush remaining batch for this video
+        _flush_batch()
 
-    # Select top-k by score, then order output chronologically by video timestamp
+        # Save cache for this video (sample mode only)
+        if save_cache_dir and not scene_change:
+            video_results = [r for r in all_results if r.get("source_video_path") == vp]
+            if video_results:
+                _save_cache(
+                    save_cache_dir, vp,
+                    sample_rate, frame_scale,
+                    state_template, instructions_template, model_for_cache,
+                    video_results, {}, verbose=verbose,
+                )
+
+    # Filter by floor, then select top-k, then order chronologically
+    final_results = [r for r in all_results if r["score"] >= decision_model_floor]
     final_results.sort(key=lambda x: x["score"], reverse=True)
     if global_k is not None and global_k > 0:
         final_results = final_results[:global_k]
@@ -673,13 +688,9 @@ def cmd_search(args):
         final_results = final_results[:top_k]
     final_results.sort(key=lambda x: (x.get("source_video_path", ""), x["timestamp_seconds"]))
 
-    # Save cache
-    if save_cache_dir and final_results:
-        _save_cache(save_cache_dir, video_paths[0] if video_paths else "", query, cache_params, final_results, cache_metadata if cache_metadata else {}, verbose=verbose)
-
     # Save matched frames
     if save_frames and final_results:
-        saved_count, _paths = _save_matched_frames(final_results, video_path or video_paths[0], save_frames, verbose)
+        saved_count, _paths = _save_matched_frames(final_results, video_paths[0], save_frames, verbose)
         if verbose:
             print(f"Saved {saved_count} frame(s) to {save_frames}", file=sys.stderr)
 
@@ -705,7 +716,7 @@ def cmd_search(args):
                 "ollama_workers": _safe(ollama_workers),
                 "top_k": _safe(top_k),
                 "global_k": _safe(global_k),
-                "video": _safe(video_path),
+                "video": _safe(video_paths[0]),
             },
         }
         print(json.dumps(payload))
@@ -730,9 +741,8 @@ def main():
     sub = parser.add_subparsers(dest="command", required=True)
 
     p_search = sub.add_parser("search", help="Search videos using the decision model")
-    p_search.add_argument("--video", "-vid", default=None, help="Path to video file, directory, or glob pattern")
-    
-    
+    p_search.add_argument("video_paths", nargs="+", help="One or more video files, directories, or glob patterns (e.g., video1.mp4 video2/*.mp4)")
+
     p_search.add_argument("--top-k", "-k", type=int, default=None, help="Maximum number of top results to return (default: all passing)")
     p_search.add_argument("--global-k", "-gk", type=int, default=None, help="Global top-K across all videos, overriding --top-k")
     p_search.add_argument("--json", action="store_true", default=None, help="Output results in strict JSON format")
@@ -746,8 +756,8 @@ def main():
     p_search.add_argument("--ollama-frame-scale", "-ofs", type=float, default=None, help="Scale factor for frames sent to Ollama (0.0-1.0, default: 0.2). Lower = faster")
     p_search.add_argument("--ollama-model", "-dm", default=None, help="Ollama model name(s), comma-separated fallback list tried in order")
     p_search.add_argument("--recursive", "-R", action="store_true", default=False, help="Recursively scan directories for video files")
-    p_search.add_argument("--cache", "-c", type=str, default=None, help="Path to cache directory to look up existing cache files. Only used when this flag is given")
-    p_search.add_argument("--save-cache", "-sc", type=str, default=None, nargs="?", const=".", help="Path to cache directory for saving search results. Defaults to current directory (.) if used without a path")
+    p_search.add_argument("--cache", "-c", type=str, default=None, help="Path to cache directory to look up existing cache files. Overrides config 'cache_dir'. Only used when this flag is given")
+    p_search.add_argument("--save-cache", "-sc", type=str, default=None, nargs="?", const=".", help="Path to cache directory for saving search results. Overrides config 'save_cache_dir'. Defaults to current directory (.) if used without a path")
     p_search.add_argument("--ollama-state", "-s", type=str, default=None, help="State context string for Ollama (default: empty)")
     p_search.add_argument("--ollama-instructions", "-oi", type=str, default=None, help="Instructions string for Ollama (default: empty)")
     p_search.set_defaults(func=cmd_search)

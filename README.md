@@ -13,25 +13,25 @@ A lightweight command-line interface that searches local video files using an Ol
 2. Search a video with a text prompt:
 
    ```
-   vsearch search --video myvideo.mp4 --ollama-state "A user is searching for: a person running" --ollama-instructions "Does the image match the query: a person running?" -k 5
+   vsearch search myvideo.mp4 --ollama-state "A user is searching for: a person running" --ollama-instructions "Does the image match the query: a person running?" -k 5
    ```
 
 3. Limit the number of results:
 
    ```
-   vsearch search --video myvideo.mp4 --ollama-state "A user is searching for: a person running" --ollama-instructions "Does the image match the query: a person running?" -k 5
+   vsearch search myvideo.mp4 --ollama-state "A user is searching for: a person running" --ollama-instructions "Does the image match the query: a person running?" -k 5
    ```
 
 4. Save matched frames as JPEG images:
 
    ```
-   vsearch search --video myvideo.mp4 --ollama-state "A user is searching for: a person running" --ollama-instructions "Does the image match the query: a person running?" -sf /tmp/frames
+   vsearch search myvideo.mp4 --ollama-state "A user is searching for: a person running" --ollama-instructions "Does the image match the query: a person running?" -sf /tmp/frames
    ```
 
 5. Output JSON:
 
    ```
-   vsearch search --video myvideo.mp4 --ollama-state "A user is searching for: a person running" --ollama-instructions "Does the image match the query: a person running?" --json
+   vsearch search myvideo.mp4 --ollama-state "A user is searching for: a person running" --ollama-instructions "Does the image match the query: a person running?" --json
    ```
 
 ## Decision-Model-Only Mode
@@ -58,16 +58,17 @@ CLIP is not involved in scoring at all.
 
 | Flag | Short | Description |
 |------|-------|-------------|
-| `--video` | `-vid` | Path to a video file, directory, or glob pattern (required) |
 | `--ollama-state` | `-s` | State context string sent to Ollama (default: empty) |
 | `--ollama-instructions` | `-oi` | Instructions string sent to Ollama (default: empty) |
-| `--top-k` | `-k` | Maximum number of results to return (default: all passing) |
+| `--top-k` | `-k` | Maximum number of top results to return (default: all passing) |
 | `--global-k` | `-gk` | Global top-K across all videos, overriding `--top-k` |
 | `--json` | | Output results as strict JSON |
-| `--save-frames` | `-sf` | Directory to save matched frame JPEGs |
+| `--save-frames` | `-sf` | Directory to save matched frame images as {video_name}_{HHMMSS}_{score}.jpg |
 | `--decision-model-floor` | `-dmt` | Ollama score threshold (default: 0.5) |
 | `--decision-model-sample-rate` | `-dmsr` | Frame sampling interval in seconds (default: 1) |
 | `--ollama-workers` | `-ow` | Concurrent Ollama validation threads (default: 1) |
+
+## Quick Start
 | `--ollama-host` | `-oh` | Ollama server address (default: `192.168.1.190`). Falls back to `localhost` if unreachable |
 | `--ollama-frame-scale` | `-ofs` | Scale factor for frames sent to Ollama (0.0–1.0, default: 0.2). Lower = faster |
 | `--ollama-model` | `-dm` | Ollama model name(s), comma-separated fallback list |
@@ -84,7 +85,6 @@ The config file contains a single `[search]` section:
 top_k = 5
 json_output = false
 save_frames = ""
-video = ""
 decision_model_floor = 0.8
 decision_model_sample_rate = 3
 ollama_host = "192.168.1.190"
@@ -138,14 +138,37 @@ Search results can be cached to JSON files to avoid re-running expensive Ollama 
 Cache files are named as:
 
 ```
-<video_name>_<video_hash>_<query_hash>_<params_hash>.json
+<content_hash><params_hash>.json
 ```
 
 Where:
-- `video_name` — filename without extension
-- `video_hash` — SHA256 of video path + size + modification time
-- `query_hash` — MD5 of the state/instructions query
-- `params_hash` — MD5 of `(decision_model_floor, decision_model_sample_rate, ollama_frame_scale, scene_change, scene_threshold, ollama_state, ollama_instructions)`
+- `content_hash` — BLAKE2b of the first and last 8 MB of the video file (16 hex chars)
+- `params_hash` — BLAKE2b of `sample_rate | frame_scale | state | instructions | model` (16 hex chars)
+
+The two hashes are mixed into a single 16-char hex filename.
+
+### Cache Scope
+
+Cache is **sample-mode only** — it is skipped entirely when `--scene-change` is set.
+
+### Cache Reusability
+
+The cache stores **all validated frames** (not just those passing the floor), so you can reuse it with different `decision_model_floor` thresholds without re-running Ollama:
+
+```bash
+# First run: save full cache
+vsearch search myvideo.mp4 --ollama-state "..." --ollama-instructions "..." \
+  --decision-model-floor 0.8 --decision-model-sample-rate 3 \
+  --save-cache /tmp/cache
+
+# Later: reuse with lower floor (no Ollama calls!)
+vsearch search myvideo.mp4 --ollama-state "..." --ollama-instructions "..." \
+  --decision-model-floor 0.4 --decision-model-sample-rate 3 \
+  --cache /tmp/cache
+```
+
+**Reusable across**: `decision_model_floor`, `top_k`, `global_k`
+**Not reusable across**: `decision_model_sample_rate`, `ollama_frame_scale`, `ollama_state`, `ollama_instructions`, `ollama_model`, `scene_change`
 
 ### Lookup Cache (`--cache`)
 
@@ -153,10 +176,10 @@ Use `--cache /path/to/cache` to look up existing cached results. If a matching c
 
 ```bash
 # First run: no cache, performs full search
-vsearch search --video myvideo.mp4 --ollama-state "A user is searching for: a person" --ollama-instructions "Does the image match the query: a person?" --save-cache /tmp/cache
+vsearch search myvideo.mp4 --ollama-state "A user is searching for: a person" --ollama-instructions "Does the image match the query: a person?" --save-cache /tmp/cache
 
 # Second run: cache hit, returns instantly without Ollama
-vsearch search --video myvideo.mp4 --ollama-state "A user is searching for: a person" --ollama-instructions "Does the image match the query: a person?" --cache /tmp/cache
+vsearch search myvideo.mp4 --ollama-state "A user is searching for: a person" --ollama-instructions "Does the image match the query: a person?" --cache /tmp/cache
 ```
 
 ### Save Cache (`--save-cache`)
@@ -165,21 +188,40 @@ Use `--save-cache /path/to/cache` (or just `--save-cache` to default to the curr
 
 ```bash
 # Save to explicit directory
-vsearch search --video myvideo.mp4 --ollama-state "A user is searching for: a person" --ollama-instructions "Does the image match the query: a person?" --save-cache /tmp/cache
+vsearch search myvideo.mp4 --ollama-state "A user is searching for: a person" --ollama-instructions "Does the image match the query: a person?" --save-cache /tmp/cache
 
 # Save to current directory (.)
-vsearch search --video myvideo.mp4 --ollama-state "A user is searching for: a person" --ollama-instructions "Does the image match the query: a person?" --save-cache
+vsearch search myvideo.mp4 --ollama-state "A user is searching for: a person" --ollama-instructions "Does the image match the query: a person?" --save-cache
 
 # Combined: look up cache first, save new results if not found
-vsearch search --video myvideo.mp4 --ollama-state "A user is searching for: a person" --ollama-instructions "Does the image match the query: a person?" --cache /tmp/cache --save-cache /tmp/cache
+vsearch search myvideo.mp4 --ollama-state "A user is searching for: a person" --ollama-instructions "Does the image match the query: a person?" --cache /tmp/cache --save-cache /tmp/cache
 ```
 
 ### Cache Hit Behavior
 
-- **Cache hit**: No Ollama calls, no frame extraction — results loaded from disk
+- **Cache hit**: No Ollama calls, no frame extraction — results loaded from disk, filtered by current `decision_model_floor`
 - **Cache miss**: Full search runs, results saved to cache directory (if `--save-cache` provided)
-- **Parameter mismatch**: If parameters differ (e.g., different threshold), cache is treated as miss
-- **Video change**: If video file size or modification time changes, cache is invalidated
+- **Parameter mismatch**: If sample rate, frame scale, state, instructions, or model differ, cache is treated as miss
+- **Video change**: If video content changes (first/last 8 MB differ), cache is invalidated
+
+### Multi-Video Search
+
+Cache works **per video file**, not per search session:
+
+- Each video in a multi-video search (multiple paths, directory, or glob pattern) gets its own cache entry
+- If a video has a cache hit, it is skipped (no Ollama calls)
+- If a video has a cache miss, it is searched normally
+- Results from all videos are combined and sorted chronologically
+
+```bash
+# Search 2 videos: video1 has cache, video2 does not
+vsearch search video1.mp4 video2.mp4 --ollama-state "..." --ollama-instructions "..." --cache /tmp/cache
+# → video1: cache hit (instant), video2: full search
+
+# Search directory with 5 videos, all cached
+vsearch search /path/to/videos/ --ollama-state "..." --ollama-instructions "..." --cache /tmp/cache
+# → all 5: cache hits (instant)
+```
 
 ### Cache File Format
 
@@ -188,19 +230,31 @@ vsearch search --video myvideo.mp4 --ollama-state "A user is searching for: a pe
   "video_path": "/mnt/hdd/myvideo.mp4",
   "query": "A user is searching for: a person running",
   "parameters": {
-    "decision_model_floor": 0.8,
     "decision_model_sample_rate": 3,
     "ollama_frame_scale": 0.2,
     "scene_change": false,
-    "scene_threshold": 0.4,
+    "scene_threshold": null,
     "ollama_state_template": "A user is searching for: {query}",
-    "ollama_instructions_template": "Does the image match the query: {query}?"
+    "ollama_instructions_template": "Does the image match the query: {query}?",
+    "ollama_model": "clef-flash:9b"
   },
-  "results": [
+  "all_results": [
     {
       "timestamp_seconds": 125.3,
       "timestamp_formatted": "00:02:05",
-      "score": 0.6412,
+      "score": 0.92,
+      "source_video_path": "/mnt/hdd/myvideo.mp4"
+    },
+    {
+      "timestamp_seconds": 130.1,
+      "timestamp_formatted": "00:02:10",
+      "score": 0.67,
+      "source_video_path": "/mnt/hdd/myvideo.mp4"
+    },
+    {
+      "timestamp_seconds": 145.8,
+      "timestamp_formatted": "00:02:25",
+      "score": 0.31,
       "source_video_path": "/mnt/hdd/myvideo.mp4"
     }
   ],
@@ -214,12 +268,14 @@ vsearch search --video myvideo.mp4 --ollama-state "A user is searching for: a pe
 }
 ```
 
+`all_results` contains every validated frame with its score, regardless of `decision_model_floor`. The floor is applied at load time.
+
 ## Scene Change Detection
 
 The `--scene-change` and `--scene-threshold` flags enable automatic scene change detection. Instead of blindly sampling every `decision_model_sample_rate` seconds, the app uses FFmpeg’s scene filter to detect scenes and only validates the key frames at those transitions:
 
 ```bash
-vsearch search --scene-change --scene-threshold 0.5 --video video.mp4 --ollama-state "A user is searching for: a person" --ollama-instructions "Does the image match the query: a person?"
+vsearch search video.mp4 --scene-change --scene-threshold 0.5 --ollama-state "A user is searching for: a person" --ollama-instructions "Does the image match the query: a person?"
 ```
 
 **How it works:**
