@@ -60,7 +60,7 @@ def _try_load_cache(cache_dir, video_path, sample_rate, frame_scale, state, inst
     Filters all_results by decision_model_floor at load time so cache is
     reusable across different floor thresholds.
     Checks cache completeness: only returns results if the cache was fully
-    processed (total_validated == total_frames). Incomplete caches (e.g. from
+    processed (total_validated == total_sampled). Incomplete caches (e.g. from
     a cancelled run) are treated as misses so the search can resume.
     """
     if not cache_dir:
@@ -77,11 +77,15 @@ def _try_load_cache(cache_dir, video_path, sample_rate, frame_scale, state, inst
         all_results = data.get("all_results")
         if all_results is None:
             all_results = data.get("results", [])
-        total_frames = data.get("total_frames")
+        # total_sampled is the number of frames actually sampled (not raw video frames)
+        total_sampled = data.get("total_sampled")
+        if total_sampled is None:
+            # Backward compat: old caches stored raw total_frames
+            total_sampled = data.get("total_frames")
         total_validated = data.get("total_validated")
-        if total_frames is not None and total_validated is not None:
-            if total_validated < total_frames:
-                print(f"Cache incomplete: {cache_file} (validated={total_validated}/{total_frames}), ignoring", file=sys.stderr)
+        if total_sampled is not None and total_validated is not None:
+            if total_validated < total_sampled:
+                print(f"Cache incomplete: {cache_file} (validated={total_validated}/{total_sampled}), ignoring", file=sys.stderr)
                 return None, None
         results = [r for r in all_results if r.get("score", 0) >= decision_model_floor]
         print(f"Cache hit: {cache_file} ({len(results)} results after floor filter, {len(all_results)} total)", file=sys.stderr)
@@ -91,7 +95,7 @@ def _try_load_cache(cache_dir, video_path, sample_rate, frame_scale, state, inst
         return None, None
 
 
-def _save_cache(cache_dir, video_path, sample_rate, frame_scale, state, instructions, model, all_results, metadata, total_frames=None, total_validated=None):
+def _save_cache(cache_dir, video_path, sample_rate, frame_scale, state, instructions, model, all_results, metadata, total_sampled=None, total_validated=None):
     """Save all validated results to a cache JSON file."""
     if not cache_dir:
         return
@@ -112,7 +116,7 @@ def _save_cache(cache_dir, video_path, sample_rate, frame_scale, state, instruct
             },
             "all_results": all_results,
             "metadata": metadata,
-            "total_frames": total_frames,
+            "total_sampled": total_sampled,
             "total_validated": total_validated,
         }
         with open(cache_file, "w", encoding="utf-8") as f:
@@ -551,7 +555,7 @@ def cmd_search(args):
                     sample_rate, frame_scale,
                     state_template, instructions_template, model_for_cache,
                     video_results, {},
-                    total_frames=total_frames,
+                    total_sampled=total_sampled,
                     total_validated=total_validated,
                 )
         # Save state periodically for resume support
@@ -581,6 +585,7 @@ def cmd_search(args):
             break
 
         frame_index = 0  # default if no state
+        _state = None
 
         # Check cache (sample mode only)
         if cache_dir:
@@ -621,6 +626,10 @@ def cmd_search(args):
         stride = max(1, int(fps * sample_rate))
         total_sampled = int((total_frames + stride - 1) / stride) if total_frames is not None else 0
 
+        # Seek to resume position if available
+        if _state is not None:
+            cap.set(cv2.CAP_PROP_POS_FRAMES, frame_index)
+
         while True:
             ret, frame_bgr = cap.read()
             if not ret:
@@ -634,7 +643,7 @@ def cmd_search(args):
 
                 if total_extracted % 10 == 0:
                     # Show progress as extracted/total_sampled so at end it reads extracted=720/720
-                    print(f"{vp} Sampled ts={ts:.2f}s (extracted={total_extracted}/{total_sampled}, validated={total_validated}, passing={passing_count})", file=sys.stderr)
+                    print(f"Video: {vp} (extracted={total_extracted}/{total_sampled}, validated={total_validated}, passing={passing_count})", file=sys.stderr)
 
                 if len(batch) >= batch_size:
                     _flush_batch()
@@ -669,7 +678,7 @@ def cmd_search(args):
                     sample_rate, frame_scale,
                     state_template, instructions_template, model_for_cache,
                     video_results, {},
-                    total_frames=total_frames,
+                    total_sampled=total_sampled,
                     total_validated=total_validated,
                 )
 
