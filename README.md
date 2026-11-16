@@ -142,7 +142,7 @@ The two hashes are mixed into a single 16-char hex filename.
 
 ### Cache Scope
 
-Cache is **sample-mode only** — it is skipped entirely when `--scene-change` is set.
+Cache is **sample-mode only**.
 
 ### Cache Reusability
 
@@ -161,7 +161,7 @@ vsearch search myvideo.mp4 --ollama-state "..." --ollama-instructions "..." \
 ```
 
 **Reusable across**: `decision_model_floor`, `top_k`, `global_k`
-**Not reusable across**: `decision_model_sample_rate`, `ollama_frame_scale`, `ollama_state`, `ollama_instructions`, `ollama_model`, `scene_change`
+**Not reusable across**: `decision_model_sample_rate`, `ollama_frame_scale`, `ollama_state`, `ollama_instructions`, `ollama_model`
 
 ### Lookup Cache (`--cache`)
 
@@ -225,8 +225,6 @@ vsearch search /path/to/videos/ --ollama-state "..." --ollama-instructions "..."
   "parameters": {
     "decision_model_sample_rate": 3,
     "ollama_frame_scale": 0.2,
-    "scene_change": false,
-    "scene_threshold": null,
     "ollama_state_template": "A user is searching for: {query}",
     "ollama_instructions_template": "Does the image match the query: {query}?",
     "ollama_model": "clef-flash:9b"
@@ -263,40 +261,11 @@ vsearch search /path/to/videos/ --ollama-state "..." --ollama-instructions "..."
 
 `all_results` contains every validated frame with its score, regardless of `decision_model_floor`. The floor is applied at load time.
 
-## Scene Change Detection
-
-The `--scene-change` and `--scene-threshold` flags enable automatic scene change detection. Instead of blindly sampling every `decision_model_sample_rate` seconds, the app uses FFmpeg’s scene filter to detect scenes and only validates the key frames at those transitions:
-
-```bash
-vsearch search video.mp4 --scene-change --scene-threshold 0.5 --ollama-state "A user is searching for: a person" --ollama-instructions "Does the image match the query: a person?"
-```
-
-**How it works:**
-
-1. `ffmpeg` runs `-vf "select='gt(scene,THRESHOLD)',metadata=print"` on the video and parses the scene-change timestamps (`pts_time`) from stderr.
-2. For each timestamp, the app extracts that frame (using OpenCV seek) and passes it to Ollama.
-3. Only scene boundaries are validated, which can drastically reduce processing time and focus validation on moments that likely contain content changes.
-
-**Performance benefits:**
-- Many scenes can be detected with fewer frames than uniform sampling.
-- Scene thresholds (`0.0‑1.0`) control sensitivity: `0.4` (default) captures moderate changes; `0.7` requires strong changes.
-- If no scene changes are detected (e.g., static videos), the app falls back to keyframe detection.
-- Scene detection is performed once and then frames are processed using the same validation pipeline as normal sampling.
-
-**Configuration:**
-- `scene_change = false` – disable scene detection (uniform sampling).
-- `scene_threshold = 0.4` – scene-change sensitivity threshold.
-
 - **No indexing step** — videos are read directly with OpenCV.
 - **No `.npz` cache** — frames are extracted and validated on the fly.
 - **Ollama-only scoring** — `final_score = Ollama_score`; CLIP is never invoked.
 - **Endpoint fallback** — if the configured Ollama host is unreachable, `localhost:11434` is used automatically.
 - **Parallel validation** — frames are validated concurrently via `ThreadPoolExecutor`.
-
-**Configuration:**
-
-- `scene_change = false` – disable scene detection (uniform sampling).
-- `scene_threshold = 0.4` – scene-change sensitivity threshold.
 
 - No indexing step — videos are read directly with OpenCV.
 - No `.npz` cache — frames are extracted and validated on the fly.
