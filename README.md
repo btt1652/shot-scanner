@@ -71,7 +71,7 @@ CLIP is not involved in scoring at all.
 ## Quick Start
 | `--ollama-host` | `-oh` | Ollama server address (default: `192.168.1.190`). Falls back to `localhost` if unreachable |
 | `--ollama-frame-scale` | `-ofs` | Scale factor for frames sent to Ollama (0.0–1.0, default: 0.2). Lower = faster |
-| `--ollama-model` | `-dm` | Ollama model name(s), comma-separated fallback list |
+| `--ollama-model` | `-dm` | Ollama model name (single model, no fallback) |
 | `--recursive` | `-R` | Recursively scan directories for video files |
 | `--scene-change` | | Use scene-change detection instead of blind sampling |
 | `--scene-threshold` | | Scene detection sensitivity, 0.0–1.0 (default: 0.4) |
@@ -89,7 +89,7 @@ decision_model_floor = 0.8
 decision_model_sample_rate = 3
 ollama_host = "192.168.1.190"
 ollama_frame_scale = 0.2
-ollama_decision_model = ["clef-flash:9b", "d3:4b"]
+ollama_decision_model = "clef-flash:9b"
 ollama_workers = 4
 scene_change = false
 scene_threshold = 0.4
@@ -105,7 +105,7 @@ ollama_instructions_template = ""
 - `decision_model_sample_rate` — sampling interval in seconds (default: `3`)
 - `ollama_host` — Ollama endpoint (falls back to `localhost` if unreachable)
 - `ollama_frame_scale` — image scale factor sent to Ollama (default: `0.2`)
-- `ollama_decision_model` — model name or fallback list (default: `["clef-flash:9b", "d3:4b"]`)
+- `ollama_decision_model` — model name (default: `"clef-flash:9b"`)
 - `ollama_workers` — concurrent validation threads (default: `4`)
 - `scene_change` — use scene-change detection instead of blind sampling (default: `false`)
 - `scene_threshold` — scene detection sensitivity (default: `0.4`)

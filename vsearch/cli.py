@@ -207,9 +207,6 @@ def _ollama_endpoint_reachable(endpoint, timeout=5.0):
         return False
 
 _ollama_resolved_endpoint = None
-_ollama_failed_models = set()
-_ollama_resolved_model = None
-_ollama_lock = threading.Lock()
 
 def resolve_ollama_endpoint(primary_endpoint, verbose=False):
     """Resolve the Ollama endpoint with automatic fallback to localhost."""
@@ -329,60 +326,38 @@ def _extract_scene_timestamps(video_path, scene_threshold=0.4, verbose=False, ti
     return timestamps
 
 
-def _validate_frame_with_ollama(frame_b64, model_ids, endpoint, verbose=False, state_template=None, instructions_template=None):
+def _validate_frame_with_ollama(frame_b64, model, endpoint, verbose=False, state_template=None, instructions_template=None):
     """Validate a single frame against Ollama decision model. Returns (score, model_used) or (None, None)."""
-    global _ollama_failed_models, _ollama_resolved_model
-    
     if not frame_b64:
         return None, None
     
-    current_models = model_ids
-    if _ollama_resolved_model is not None and _ollama_resolved_model in model_ids:
-        current_models = [_ollama_resolved_model]
-    
-    last_err = None
-    models_tried = []
-    
-    for model in current_models:
-        if model in _ollama_failed_models:
-            continue
-        models_tried.append(model)
-        state = state_template or ""
-        instructions = instructions_template or ""
-        payload = {
-            "model": model,
-            "state": state,
-            "images": [frame_b64],
-            "questions": {
-                "is_valid": {
-                    "type": "noul",
-                    "instructions": instructions
-                }
+    state = state_template or ""
+    instructions = instructions_template or ""
+    payload = {
+        "model": model,
+        "state": state,
+        "images": [frame_b64],
+        "questions": {
+            "is_valid": {
+                "type": "noul",
+                "instructions": instructions
             }
         }
-        try:
-            req = urllib.request.Request(
-                endpoint,
-                data=json.dumps(payload).encode("utf-8"),
-                headers={"Content-Type": "application/json"}
-            )
-            with urllib.request.urlopen(req, timeout=60) as response:
-                res_json = json.loads(response.read().decode("utf-8"))
-            valid_score = res_json["answers"]["is_valid"]["noul"]
-            if len(models_tried) > 1 and verbose:
-                print(f"Falling back from {models_tried[0]} to '{model}'", file=sys.stderr, flush=True)
-            with _ollama_lock:
-                if model not in _ollama_failed_models:
-                    _ollama_resolved_model = model
-            return valid_score, model
-        except Exception as e:
-            last_err = e
-            if "timed out" not in str(e).lower():
-                _ollama_failed_models.add(model)
-            if verbose:
-                print(f"Model '{model}' failed: {e}", file=sys.stderr)
-    
-    return None, None
+    }
+    try:
+        req = urllib.request.Request(
+            endpoint,
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json"}
+        )
+        with urllib.request.urlopen(req, timeout=60) as response:
+            res_json = json.loads(response.read().decode("utf-8"))
+        valid_score = res_json["answers"]["is_valid"]["noul"]
+        return valid_score, model
+    except Exception as e:
+        if verbose:
+            print(f"Model '{model}' failed: {e}", file=sys.stderr)
+        return None, None
 
 def _save_matched_frames(results, video_path, output_dir, verbose=False):
     """Extract and save matched frames as JPEG images."""
@@ -473,9 +448,10 @@ def cmd_search(args):
     collect_target = max(cap_target or 0, (ollama_workers or 1) * 2, 8) if cap_target else 0
 
     batch_size = max(1, (ollama_workers or 1) if (ollama_workers or 1) > 0 else 1) * 2
-    model_ids = _as_list(ollama_model)
-    if not model_ids:
-        model_ids = ["clef-flash"]
+    model = _as_list(ollama_model)
+    if not model:
+        model = ["clef-flash"]
+    model = model[0]  # Use first model only (no fallback)
 
     batch = []
     all_results = []
@@ -486,7 +462,6 @@ def cmd_search(args):
 
     def _validate_batch(frames_batch):
         """Validate a batch of (ts, b64, vp) frames. Returns (all_results, passing_count)."""
-        global _ollama_failed_models
         results = []
         passing = 0
         if ollama_workers and ollama_workers > 1 and len(frames_batch) > 1:
@@ -495,7 +470,7 @@ def cmd_search(args):
                     executor.submit(
                         _validate_frame_with_ollama,
                         b64,
-                        model_ids,
+                        model,  # single model, not list
                         ollama_endpoint,
                         verbose,
                         state_template,
@@ -530,7 +505,7 @@ def cmd_search(args):
                         print(f"ts={ts_formatted} ollama={score:.4f} discard", file=sys.stderr)
         else:
             for ts, b64, vp in frames_batch:
-                score, _model = _validate_frame_with_ollama(b64, model_ids, ollama_endpoint, verbose, state_template, instructions_template)
+                score, _model = _validate_frame_with_ollama(b64, model, ollama_endpoint, verbose, state_template, instructions_template)
                 if score is None:
                     if verbose:
                         print(f"Error validating frame at {ts:.1f}s. Discarded.", file=sys.stderr)
@@ -577,7 +552,7 @@ def cmd_search(args):
     # Save-cache directory (--save-cache). Defaults to None (no save) if flag not used.
     save_cache_dir = getattr(args, "save_cache", None) or save_cache_dir
 
-    model_for_cache = _ollama_resolved_model or (model_ids[0] if model_ids else None)
+    model_for_cache = model
 
     # Process each video: check cache first, then search if miss
     for vp in video_paths:
@@ -711,7 +686,7 @@ def cmd_search(args):
                 "decision_model_floor": _safe(decision_model_floor),
                 "decision_model_sample_rate": _safe(sample_rate),
                 "ollama_host": _safe(ollama_endpoint),
-                "ollama_model": _safe(model_ids),
+                "ollama_model": _safe(model),
                 "ollama_frame_scale": _safe(frame_scale),
                 "ollama_workers": _safe(ollama_workers),
                 "top_k": _safe(top_k),

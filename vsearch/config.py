@@ -31,7 +31,7 @@ def default_config() -> dict:
             "decision_model_sample_rate": 1,
             "ollama_host": "192.168.1.190",
             "ollama_frame_scale": 0.2,
-            "ollama_decision_model": ["d3:9b", "d3:4b"],
+            "ollama_decision_model": "clef-flash:9b",
             "ollama_workers": 1,
             "ollama_state_template": "",
             "ollama_instructions_template": "",
