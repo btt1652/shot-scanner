@@ -63,7 +63,7 @@ CLIP is not involved in scoring at all.
 | `--top-k` | `-k` | Maximum number of top results to return (default: all passing) |
 | `--global-k` | `-gk` | Global top-K across all videos, overriding `--top-k` |
 | `--json` | | Output results as strict JSON |
-| `--save-frames` | `-sf` | Directory to save matched frame images as {video_name}_{HHMMSS}_{score}.jpg |
+| `--save-frames` | `-sf` | Directory to save matched frame images as {video_name}_{HHMMSS}_{score}_{norm_score}.jpg |
 | `--decision-model-floor` | `-dmt` | Ollama score threshold (default: 0.5) |
 | `--decision-model-sample-rate` | `-dmsr` | Frame sampling interval in seconds (default: 1) |
 | `--ollama-workers` | `-ow` | Concurrent Ollama validation threads (default: 1) |
@@ -73,8 +73,6 @@ CLIP is not involved in scoring at all.
 | `--ollama-frame-scale` | `-ofs` | Scale factor for frames sent to Ollama (0.0–1.0, default: 0.2). Lower = faster |
 | `--ollama-model` | `-dm` | Ollama model name (single model, no fallback) |
 | `--recursive` | `-R` | Recursively scan directories for video files |
-| `--scene-change` | | Use scene-change detection instead of blind sampling |
-| `--scene-threshold` | | Scene detection sensitivity, 0.0–1.0 (default: 0.4) |
 
 ## Configuration (`config.toml`)
 
@@ -91,8 +89,6 @@ ollama_host = "192.168.1.190"
 ollama_frame_scale = 0.2
 ollama_decision_model = "clef-flash:9b"
 ollama_workers = 4
-scene_change = false
-scene_threshold = 0.4
 ollama_state_template = ""
 ollama_instructions_template = ""
 
@@ -107,8 +103,6 @@ ollama_instructions_template = ""
 - `ollama_frame_scale` — image scale factor sent to Ollama (default: `0.2`)
 - `ollama_decision_model` — model name (default: `"clef-flash:9b"`)
 - `ollama_workers` — concurrent validation threads (default: `4`)
-- `scene_change` — use scene-change detection instead of blind sampling (default: `false`)
-- `scene_threshold` — scene detection sensitivity (default: `0.4`)
 - `ollama_state_template` — state context string sent to Ollama (default: empty)
 - `ollama_instructions_template` — instructions string sent to Ollama (default: empty)
 
@@ -118,7 +112,6 @@ ollama_instructions_template = ""
 - **Parallel validation** with `--ollama-workers 4` (or higher) — each thread handles one frame.
 - **Coarser sampling** with `--decision-model-sample-rate 5` — one frame every 5 seconds.
 - **Lower the threshold** with `--decision-model-floor 0.4` to keep more passing frames.
-- **Scene-change detection** with `--scene-change` — automatically extracts frames at scene boundaries instead of uniform sampling, often much more efficient.
 
 ## Architecture
 

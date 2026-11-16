@@ -33,10 +33,9 @@ def default_config() -> dict:
             "ollama_frame_scale": 0.2,
             "ollama_decision_model": "clef-flash:9b",
             "ollama_workers": 1,
+            "ollama_timeout": 60,
             "ollama_state_template": "",
             "ollama_instructions_template": "",
-            "scene_change": False,
-            "scene_threshold": 0.4,
             "cache_dir": "/tmp",
             "save_cache_dir": "/tmp",
         }
