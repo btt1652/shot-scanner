@@ -410,63 +410,8 @@ def _save_matched_frames(results, video_path, output_dir, verbose=False):
     return saved, frame_paths
 
 
-def _merge_to_ranges(results, merge_gap, extend=0.0):
-    """Merge contiguous passing samples into time-range chunks.
-
-    Args:
-        results: list of result dicts (each with timestamp_seconds, score, etc.)
-        merge_gap: max seconds between adjacent samples to merge
-        extend: seconds to add to each range's end (covers un-sampled tail)
-
-    Returns:
-        list of range dicts: {start, end, score_max, score_avg, score_min, sample_count, samples}
-    """
-    if not results:
-        return []
-    # Flatten raw samples from cached ranges (for cache-hit scenarios)
-    if all("start_seconds" in r for r in results):
-        flat = []
-        for r in results:
-            flat.extend(r.get("samples", []))
-        results = flat
-    ordered = sorted(results, key=lambda r: r["timestamp_seconds"])
-    ranges = []
-    cur = {"start": ordered[0]["timestamp_seconds"], "end": ordered[0]["timestamp_seconds"], "scores": [ordered[0]["score"]], "samples": [ordered[0]]}
-    for r in ordered[1:]:
-        if r["timestamp_seconds"] - cur["end"] <= merge_gap:
-            cur["end"] = r["timestamp_seconds"]
-            cur["scores"].append(r["score"])
-            cur["samples"].append(r)
-        else:
-            ranges.append(finalize(cur, extend))
-            cur = {"start": r["timestamp_seconds"], "end": r["timestamp_seconds"], "scores": [r["score"]], "samples": [r]}
-    if cur:
-        ranges.append(finalize(cur, extend))
-    return ranges
-
-
-def finalize(cur, extend):
-    def fmt(ts):
-        return f"{int(ts)//3600:02d}:{int(ts)%3600//60:02d}:{int(ts)%60:02d}"
-    s, e = cur["start"], cur["end"]
-    if extend:
-        e = e + extend
-    scores = cur["scores"]
-    return {
-        "start_seconds": s,
-        "end_seconds": e,
-        "start_formatted": fmt(s),
-        "end_formatted": fmt(e),
-        "duration_seconds": e - s,
-        "score_max": max(scores),
-        "score_avg": sum(scores) / len(scores),
-        "score_min": min(scores),
-        "sample_count": len(scores),
-        "samples": cur["samples"],
-    }
-
-
 def cmd_search(args):
+    verbose = bool(getattr(args, "verbose", False))
     cfg = load_config()
 
     def cfg_val(key, cli_arg):
@@ -487,41 +432,38 @@ def cmd_search(args):
     recursive = cfg_val("recursive", "recursive")
     scene_change = cfg_val("scene_change", "scene_change")
     scene_threshold = cfg_val("scene_threshold", "scene_threshold")
-    sample_merge = cfg_val("sample_merge", "sample_merge")
-    merge_gap = cfg_val("merge_gap", "merge_gap")
     state_template = cfg_val("ollama_state_template", "ollama_state")
     instructions_template = cfg_val("ollama_instructions_template", "ollama_instructions")
-
+    
     # Apply defaults if config/CLI left templates empty
     if not state_template:
         state_template = ""
     if not instructions_template:
         instructions_template = ""
-
+    
     # State/instructions are the query — use state for cache identity
     query = state_template or instructions_template or ""
-
-
+    
     # Resolve video input
     video_input = args.video
     if not video_input:
         print("Error: --video is required", file=sys.stderr)
         sys.exit(1)
-
+    
     video_paths, missing = _resolve_video_paths([video_input], recursive=recursive)
     if not video_paths:
         print(f"Error: no video files found from input '{video_input}'", file=sys.stderr)
         sys.exit(1)
     for m in missing:
         print(f"Warning: no video matched input '{m}'", file=sys.stderr)
-
+    
     # Resolve Ollama endpoint once
     ollama_endpoint = resolve_ollama_endpoint(ollama_endpoint, verbose=verbose)
-
+    
     if verbose:
         _models = _as_list(ollama_model)
         print(f"Config: top_k={top_k}, global_k={global_k}, json_output={json_output}", file=sys.stderr)
-        print(f"        save_frames={save_frames}, video={video_path}, decision_model_floor={decision_model_floor}, decision_model_sample_rate={decision_model_sample_rate}, scene_change={scene_change}, scene_threshold={scene_threshold}, sample_merge={sample_merge}, merge_gap={merge_gap}, ollama_workers={ollama_workers}, ollama_host={ollama_endpoint}, ollama_model={_models}, ollama_frame_scale={frame_scale:.2f}, ollama_state={state_template!r}, ollama_instructions={instructions_template!r}", file=sys.stderr)
+        print(f"        save_frames={save_frames}, video={video_path}, decision_model_floor={decision_model_floor}, decision_model_sample_rate={decision_model_sample_rate}, scene_change={scene_change}, scene_threshold={scene_threshold}, ollama_workers={ollama_workers}, ollama_host={ollama_endpoint}, ollama_model={_models}, ollama_frame_scale={frame_scale:.2f}, ollama_state={state_template!r}, ollama_instructions={instructions_template!r}", file=sys.stderr)
 
     sample_rate = decision_model_sample_rate if decision_model_sample_rate else 1
     cap_target = global_k if (global_k is not None and global_k > 0) else (top_k if top_k and top_k > 0 else 0)
@@ -723,20 +665,15 @@ def cmd_search(args):
         final_results.extend(out)
         total_validated += len(batch)
 
-    # Merge adjacent passing samples into ranges (blind sampling mode only)
-    if sample_merge and final_results and not scene_change:
-        gap = merge_gap if merge_gap is not None else sample_rate
-        final_results = _merge_to_ranges(final_results, gap)
-        final_results.sort(key=lambda x: x["score_max"], reverse=True)
-    else:
-        # Sort by score descending, apply caps
-        final_results.sort(key=lambda x: x["score"], reverse=True)
+    # Select top-k by score, then order output chronologically by video timestamp
+    final_results.sort(key=lambda x: x["score"], reverse=True)
     if global_k is not None and global_k > 0:
         final_results = final_results[:global_k]
     elif top_k is not None and top_k > 0:
         final_results = final_results[:top_k]
+    final_results.sort(key=lambda x: (x.get("source_video_path", ""), x["timestamp_seconds"]))
 
-    # Save cache after merge (so cache contains merged ranges when sample_merge enabled)
+    # Save cache
     if save_cache_dir and final_results:
         _save_cache(save_cache_dir, video_paths[0] if video_paths else "", query, cache_params, final_results, cache_metadata if cache_metadata else {}, verbose=verbose)
 
@@ -811,8 +748,6 @@ def main():
     p_search.add_argument("--recursive", "-R", action="store_true", default=False, help="Recursively scan directories for video files")
     p_search.add_argument("--cache", "-c", type=str, default=None, help="Path to cache directory to look up existing cache files. Only used when this flag is given")
     p_search.add_argument("--save-cache", "-sc", type=str, default=None, nargs="?", const=".", help="Path to cache directory for saving search results. Defaults to current directory (.) if used without a path")
-    p_search.add_argument("--sample-merge", "-sm", action="store_true", default=None, help="Merge adjacent passing samples into contiguous time ranges (blind sampling mode only)")
-    p_search.add_argument("--merge-gap", "-mg", type=float, default=None, help="Max seconds between adjacent samples to merge into one range (default: same as --decision-model-sample-rate)")
     p_search.add_argument("--ollama-state", "-s", type=str, default=None, help="State context string for Ollama (default: empty)")
     p_search.add_argument("--ollama-instructions", "-oi", type=str, default=None, help="Instructions string for Ollama (default: empty)")
     p_search.set_defaults(func=cmd_search)

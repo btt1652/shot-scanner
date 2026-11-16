@@ -2,7 +2,7 @@
 # Decision-model-only search mode: uses an Ollama decision model as the sole judge
 
 [search]
-top_k = 5
+top_k = -1
 json_output = false
 save_frames = ""
 video = ""
@@ -14,7 +14,5 @@ ollama_decision_model = ["clef-flash:9b", "d3:4b"]
 ollama_workers = 4
 scene_change = false
 scene_threshold = 0.4
-sample_merge = false
-merge_gap = 60
 ollama_state_template = ""
 ollama_instructions_template = ""

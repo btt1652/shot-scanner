@@ -38,8 +38,6 @@ def default_config() -> dict:
             "ollama_instructions_template": "",
             "scene_change": False,
             "scene_threshold": 0.4,
-            "sample_merge": False,
-            "merge_gap": None,
         }
     }
 

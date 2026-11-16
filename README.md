@@ -74,8 +74,6 @@ CLIP is not involved in scoring at all.
 | `--recursive` | `-R` | Recursively scan directories for video files |
 | `--scene-change` | | Use scene-change detection instead of blind sampling |
 | `--scene-threshold` | | Scene detection sensitivity, 0.0–1.0 (default: 0.4) |
-| `--sample-merge` | `-sm` | Merge adjacent passing samples into ranges (blind sampling only) |
-| `--merge-gap` | `-mg` | Max seconds between samples to merge (default: same as `--decision-model-sample-rate`) |
 
 ## Configuration (`config.toml`)
 
@@ -95,8 +93,6 @@ ollama_decision_model = ["clef-flash:9b", "d3:4b"]
 ollama_workers = 4
 scene_change = false
 scene_threshold = 0.4
-sample_merge = false
-merge_gap = 60
 ollama_state_template = ""
 ollama_instructions_template = ""
 
@@ -113,8 +109,6 @@ ollama_instructions_template = ""
 - `ollama_workers` — concurrent validation threads (default: `4`)
 - `scene_change` — use scene-change detection instead of blind sampling (default: `false`)
 - `scene_threshold` — scene detection sensitivity (default: `0.4`)
-- `sample_merge` — merge adjacent passing samples into time ranges (default: `false`)
-- `merge_gap` — max seconds between samples to merge (default: `60`)
 - `ollama_state_template` — state context string sent to Ollama (default: empty)
 - `ollama_instructions_template` — instructions string sent to Ollama (default: empty)
 
@@ -249,66 +243,15 @@ vsearch search --scene-change --scene-threshold 0.5 --video video.mp4 --ollama-s
 - **Ollama-only scoring** — `final_score = Ollama_score`; CLIP is never invoked.
 - **Endpoint fallback** — if the configured Ollama host is unreachable, `localhost:11434` is used automatically.
 - **Parallel validation** — frames are validated concurrently via `ThreadPoolExecutor`.
-## Sample Merge (Advanced)
 
-If you want to merge adjacent passing samples into contiguous time ranges (useful for finding continuous action segments), use the following flags:
+**Configuration:**
 
-| Flag | Description |
-|---|---|
-| `--sample-merge` / `-sm` | Enable merging of adjacent passing samples into ranges (blind sampling mode only) |
-| `--merge-gap SECONDS` / `-mg SECONDS` | Max seconds between adjacent samples to merge (default: same as `--decision-model-sample-rate`) |
+- `scene_change = false` – disable scene detection (uniform sampling).
+- `scene_threshold = 0.4` – scene-change sensitivity threshold.
 
-### Example
-
-```bash
-# Merge samples within 60 seconds into ranges
-vsearch search --video movie.mp4 --ollama-state "A user is searching for: a person running" --ollama-instructions "Does the image match the query: a person running?" \
-  --sample-merge --merge-gap 60 --top-k 5
-```
-
-### Output Format
-
-When `--sample-merge` is enabled, the text output shows ranges instead of individual timestamps:
-
-```
-ts=00:01:23-00:02:45  score=0.72  (max=0.72, avg=0.61, n=6)
-```
-
-Where:
-- `START-END`: The earliest and latest sample in the range
-- `score=MAX`: Maximum score among samples in the range
-- `max=MAX`: Same as score (for compatibility)
-- `avg=AVG`: Average score
-- `n=NUM`: Number of samples in the range
-
-### JSON Output
-
-The JSON output includes the full range details:
-```json
-{
-  "start_seconds": 83.0,
-  "end_seconds": 165.0,
-  "start_formatted": "00:01:23",
-  "end_formatted": "00:02:45",
-  "duration_seconds": 82.0,
-  "score_max": 0.72,
-  "score_avg": 0.61,
-  "score_min": 0.55,
-  "sample_count": 6,
-  "samples": [
-    {"timestamp_seconds": 83.0, "timestamp_formatted": "00:01:23", "score": 0.72},
-    {"timestamp_seconds": 105.0, "timestamp_formatted": "00:01:45", "score": 0.61}
-  ]
-}
-```
-
-### Cache Interaction
-
-The cache stores raw samples (not merged ranges). Merging happens at output time, so you can:
-- Re-run with different `--merge-gap` values without re-running Ollama
-- Cache hit + `--sample-merge` → instantly load and re-merge
-
-### Blind Sampling Mode Only
-
-Sample merge only works in blind sampling mode (default). Scene-change mode is not merged since scene timestamps are not uniformly spaced.
+- No indexing step — videos are read directly with OpenCV.
+- No `.npz` cache — frames are extracted and validated on the fly.
+- Ollama-only scoring — `final_score = Ollama_score`; CLIP is never invoked.
+- Endpoint fallback — if the configured Ollama host is unreachable, `localhost:11434` is used automatically.
+- Parallel validation — frames are validated concurrently via `ThreadPoolExecutor`.
 
