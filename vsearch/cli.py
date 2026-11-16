@@ -436,8 +436,6 @@ def cmd_search(args):
     print(f"        save_frames={save_frames}, video={video_paths[0]}, decision_model_floor={decision_model_floor}, decision_model_sample_rate={decision_model_sample_rate}, ollama_workers={ollama_workers}, ollama_host={ollama_endpoint}, ollama_model={ollama_model}, ollama_frame_scale={frame_scale:.2f}, ollama_state={state_template!r}, ollama_instructions={instructions_template!r}, ollama_timeout={ollama_timeout}", file=sys.stderr)
 
     sample_rate = decision_model_sample_rate if decision_model_sample_rate else 1
-    cap_target = global_k if (global_k is not None and global_k > 0) else (top_k if top_k and top_k > 0 else 0)
-    collect_target = max(cap_target or 0, (ollama_workers or 1) * 2, 8) if cap_target else 0
 
     batch_size = max(1, (ollama_workers or 1) if (ollama_workers or 1) > 0 else 1) * 2
     model = ollama_model if ollama_model else "clef-flash"  # Single model only (no fallback)
@@ -448,6 +446,10 @@ def cmd_search(args):
     passing_count = 0
     total_extracted = 0
     total_validated = 0
+    instantiate_save = bool(save_frames) and not (
+        global_k is not None and global_k > 0 and
+        top_k is not None and top_k > 0
+    )
 
     def _validate_batch(frames_batch):
         """Validate a batch of (ts, b64, vp) frames. Returns (all_results, passing_count)."""
@@ -488,7 +490,7 @@ def cmd_search(args):
                         passing += 1
                         print(f"ts={ts_formatted} score={score:.4f} pass", file=sys.stderr)
                         # Save frame immediately when it passes the floor
-                        if save_frames:
+                        if instantiate_save:
                             _save_matched_frames([{
                                 "timestamp_seconds": ts,
                                 "timestamp_formatted": ts_formatted,
@@ -514,7 +516,7 @@ def cmd_search(args):
                     passing += 1
                     print(f"ts={ts_formatted} score={score:.4f} pass", file=sys.stderr)
                     # Save frame immediately when it passes the floor
-                    if save_frames:
+                    if instantiate_save:
                         _save_matched_frames([{
                             "timestamp_seconds": ts,
                             "timestamp_formatted": ts_formatted,
@@ -581,9 +583,6 @@ def cmd_search(args):
 
     # Process each video: check cache first, then search if miss
     for vp in video_paths:
-        if collect_target and passing_count >= collect_target:
-            break
-
         frame_index = 0  # default if no state
         _state = None
 
@@ -647,8 +646,6 @@ def cmd_search(args):
 
                 if len(batch) >= batch_size:
                     _flush_batch()
-                    if collect_target and passing_count >= collect_target:
-                        break
 
             frame_index += 1
 
