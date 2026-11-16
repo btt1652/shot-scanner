@@ -79,9 +79,6 @@ def _try_load_cache(cache_dir, video_path, sample_rate, frame_scale, state, inst
             all_results = data.get("results", [])
         # total_sampled is the number of frames actually sampled (not raw video frames)
         total_sampled = data.get("total_sampled")
-        if total_sampled is None:
-            # Backward compat: old caches stored raw total_frames
-            total_sampled = data.get("total_frames")
         total_validated = data.get("total_validated")
         if total_sampled is not None and total_validated is not None:
             if total_validated < total_sampled:
