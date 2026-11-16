@@ -538,6 +538,19 @@ def cmd_search(args):
                     total_frames=total_frames,
                     total_validated=total_validated,
                 )
+        # Save state periodically for resume support
+        if cache_dir:
+            _save_state(
+                cache_dir, vp,
+                sample_rate, frame_scale,
+                state_template, instructions_template, model_for_cache,
+                {
+                    "frame_index": frame_index,
+                    "passing_count": passing_count,
+                    "total_extracted": total_extracted,
+                    "total_validated": total_validated
+                }
+            )
 
     # Cache lookup when --cache flag provided (CLI overrides config)
     cache_dir = getattr(args, "cache", None) or cache_dir
@@ -550,6 +563,8 @@ def cmd_search(args):
     for vp in video_paths:
         if collect_target and passing_count >= collect_target:
             break
+
+        frame_index = 0  # default if no state
 
         # Check cache (sample mode only)
         if cache_dir:
@@ -564,6 +579,14 @@ def cmd_search(args):
                 passing_count += len(cache_results)
                 print(f"Loaded {len(cache_results)} result(s) from cache for {vp}", file=sys.stderr)
                 continue
+            # Cache incomplete - check for state to resume
+            _state = _load_state(cache_dir, vp, sample_rate, frame_scale, state_template, instructions_template, model_for_cache)
+            if _state is not None:
+                frame_index = int(_state.get("frame_index", 0))
+                passing_count = int(_state.get("passing_count", 0))
+                total_extracted = int(_state.get("total_extracted", 0))
+                total_validated = int(_state.get("total_validated", 0))
+                print(f"Resuming from state: frame_index={frame_index}, validated={total_validated}", file=sys.stderr)
 
         cap = cv2.VideoCapture(vp)
         if not cap.isOpened():
@@ -575,8 +598,6 @@ def cmd_search(args):
         # Get total frame count (if available)
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) if cap.get(cv2.CAP_PROP_FRAME_COUNT) is not None else None
 
-        frame_index = 0
-
         # --- Blind uniform sampling mode ---
         fps = cap.get(cv2.CAP_PROP_FPS)
         if fps is None or fps <= 0:
@@ -584,13 +605,6 @@ def cmd_search(args):
         stride = max(1, int(fps * sample_rate))
         total_sampled = int((total_frames + stride - 1) / stride) if total_frames is not None else 0
 
-        frame_index = 0
-        _state = _load_state(cache_dir, vp, sample_rate, frame_scale, state_template, instructions_template, model_for_cache)
-        if _state is not None:
-            frame_index = int(_state.get("frame_index", 0))
-            passing_count = int(_state.get("passing_count", 0))
-            total_extracted = int(_state.get("total_extracted", 0))
-            total_validated = int(_state.get("total_validated", 0))
         while True:
             ret, frame_bgr = cap.read()
             if not ret:
