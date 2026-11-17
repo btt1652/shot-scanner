@@ -53,13 +53,15 @@ def _cache_filename(video_path, sample_rate, frame_scale, state, instructions, m
 
 
 def _try_load_cache(cache_dir, video_path, sample_rate, frame_scale, state, instructions, model, decision_model_floor):
-    """Try to load cached results. Returns (results, metadata) or (None, None).
+    """Try to load cached results.
+
+    Returns (results, data) where:
+      - Complete cache (total_extracted >= total_sampled): results = floor-filtered all_results, data = full cache dict.
+      - Incomplete cache (cancelled run): results = None, data = full cache dict (caller resumes from frame_index).
+      - Cache miss/unreadable: results = None, data = None.
 
     Filters all_results by decision_model_floor at load time so cache is
     reusable across different floor thresholds.
-    Checks cache completeness: only returns results if the cache was fully
-    processed (total_validated == total_sampled). Incomplete caches (e.g. from
-    a cancelled run) are treated as misses so the search can resume.
     """
     if not cache_dir:
         return None, None
@@ -77,26 +79,25 @@ def _try_load_cache(cache_dir, video_path, sample_rate, frame_scale, state, inst
             all_results = data.get("results", [])
         # total_sampled is the number of frames actually sampled (not raw video frames)
         total_sampled = data.get("total_sampled")
-        total_validated = data.get("total_validated")
-        if total_sampled is not None and total_validated is not None:
-            if total_validated < total_sampled:
-                print(f"Cache incomplete: {cache_file} (validated={total_validated}/{total_sampled})", file=sys.stderr)
-                return None, None
+        total_extracted = data.get("total_extracted")
+        if total_sampled is not None and total_extracted is not None:
+            if total_extracted < total_sampled:
+                print(f"Cache incomplete: {cache_file} (extracted={total_extracted}/{total_sampled}) — resuming", file=sys.stderr)
+                return None, data
         results = [r for r in all_results if r.get("score", 0) >= decision_model_floor]
         print(f"Cache hit: {cache_file} ({len(results)} results after floor filter, {len(all_results)} total)", file=sys.stderr)
-        return results, data.get("metadata", {})
+        return results, data
     except (json.JSONDecodeError, OSError) as e:
         print(f"Warning: Failed to read cache file {cache_file}: {e}", file=sys.stderr)
         return None, None
 
 
-def _save_cache(cache_dir, video_path, sample_rate, frame_scale, state, instructions, model, all_results, metadata, total_sampled=None, total_validated=None):
-    """Save all validated results to a cache JSON file."""
+def _save_cache(cache_dir, video_path, sample_rate, frame_scale, state, instructions, model, all_results, metadata, total_sampled=None, total_validated=None, total_extracted=None, frame_index=None, passing_count=None):
+    """Save all results (including resume state) to a cache JSON file."""
     if not cache_dir:
         return
     fname = _cache_filename(video_path, sample_rate, frame_scale, state, instructions, model)
     cache_file = os.path.join(cache_dir, fname)
-    # print(f"Cache saving: {cache_file}", file=sys.stderr)
     try:
         os.makedirs(cache_dir, exist_ok=True)
         data = {
@@ -113,53 +114,15 @@ def _save_cache(cache_dir, video_path, sample_rate, frame_scale, state, instruct
             "metadata": metadata,
             "total_sampled": total_sampled,
             "total_validated": total_validated,
+            "total_extracted": total_extracted,
+            "frame_index": frame_index,
+            "passing_count": passing_count,
         }
         with open(cache_file, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2)
         print(f"cache saved {cache_file})", file=sys.stderr)
     except OSError as e:
         print(f"Warning: Failed to save cache file {cache_file}: {e}", file=sys.stderr)
-
-
-def _state_filename(cache_dir, video_path, sample_rate, frame_scale, state, instructions, model):
-    """Build state filename: same hash as cache, but .state.json extension."""
-    content_bytes = _hash_video_content(video_path)
-    params_bytes = _hash_params(sample_rate, frame_scale, state, instructions, model)
-    h = hashlib.blake2b()
-    h.update(content_bytes)
-    h.update(params_bytes)
-    return f"{h.hexdigest()[:16]}.state.json"
-
-
-def _load_state(cache_dir, video_path, sample_rate, frame_scale, state, instructions, model):
-    """Load resume state for a video. Returns dict with progress counters or None."""
-    if not cache_dir:
-        return None
-    fname = _state_filename(cache_dir, video_path, sample_rate, frame_scale, state, instructions, model)
-    state_file = os.path.join(cache_dir, fname)
-    if not os.path.exists(state_file):
-        return None
-    try:
-        with open(state_file, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        return data
-    except (json.JSONDecodeError, OSError) as e:
-        print(f"Warning: Failed to read state file {state_file}: {e}", file=sys.stderr)
-        return None
-
-
-def _save_state(cache_dir, video_path, sample_rate, frame_scale, state, instructions, model, state_data):
-    """Save resume state for a video."""
-    if not cache_dir:
-        return
-    fname = _state_filename(cache_dir, video_path, sample_rate, frame_scale, state, instructions, model)
-    state_file = os.path.join(cache_dir, fname)
-    try:
-        os.makedirs(cache_dir, exist_ok=True)
-        with open(state_file, "w", encoding="utf-8") as f:
-            json.dump(state_data, f, indent=2)
-    except OSError as e:
-        print(f"Warning: Failed to save state file {state_file}: {e}", file=sys.stderr)
 
 
 def _resolve_video_paths(inputs, recursive=False, extensions=None):
@@ -497,7 +460,7 @@ def cmd_search(args):
         return results, passing
 
     def _flush_batch():
-        nonlocal batch, total_validated, passing_count
+        nonlocal batch, total_validated, passing_count, video_prev_score
         if not batch:
             return
         out, passing = _validate_batch_single(batch)
@@ -505,10 +468,13 @@ def cmd_search(args):
         passing_count += passing
         total_validated += len(batch)
         batch = []
+        video_prev_score = out[0]["score"] if out else video_prev_score
         # Persist validated results immediately so a cancelled run can resume
         if save_cache_dir:
             video_results = [r for r in all_results if r.get("source_video_path") == vp]
             if video_results:
+                # Sort results by timestamp to ensure correct ordering in cache
+                video_results.sort(key=lambda x: x["timestamp_seconds"])
                 _save_cache(
                     save_cache_dir, vp,
                     sample_rate, frame_scale,
@@ -516,20 +482,10 @@ def cmd_search(args):
                     video_results, {},
                     total_sampled=total_sampled,
                     total_validated=total_validated,
+                    total_extracted=total_extracted,
+                    frame_index=frame_index,
+                    passing_count=passing_count,
                 )
-        # Save state periodically for resume support
-        if cache_dir:
-            _save_state(
-                cache_dir, vp,
-                sample_rate, frame_scale,
-                state_template, instructions_template, model_for_cache,
-                {
-                    "frame_index": frame_index,
-                    "passing_count": passing_count,
-                    "total_extracted": total_extracted,
-                    "total_validated": total_validated
-                }
-            )
 
     # Cache lookup when --cache flag provided (CLI overrides config)
     cache_dir = getattr(args, "cache", None) or cache_dir
@@ -541,11 +497,12 @@ def cmd_search(args):
     # Process each video: check cache first, then search if miss
     for vp in video_paths:
         frame_index = 0  # default if no state
-        _state = None
 
-        # Check cache (sample mode only)
+        video_prev_score = 0.0  # score of most recently validated frame for this video
+
+        # Check cache (sample mode only). Cache stores both results and resume state.
         if cache_dir:
-            cache_results, _cache_meta = _try_load_cache(
+            cache_results, cache_data = _try_load_cache(
                 cache_dir, vp,
                 sample_rate, frame_scale,
                 state_template, instructions_template, model_for_cache,
@@ -556,14 +513,13 @@ def cmd_search(args):
                 passing_count += len(cache_results)
                 print(f"Loaded {len(cache_results)} result(s) from cache for {vp}", file=sys.stderr)
                 continue
-            # Cache incomplete - check for state to resume
-            _state = _load_state(cache_dir, vp, sample_rate, frame_scale, state_template, instructions_template, model_for_cache)
-            if _state is not None:
-                frame_index = int(_state.get("frame_index", 0))
-                passing_count = int(_state.get("passing_count", 0))
-                total_extracted = int(_state.get("total_extracted", 0))
-                total_validated = int(_state.get("total_validated", 0))
-                print(f"Resuming from state: frame_index={frame_index}, validated={total_validated}", file=sys.stderr)
+            # Cache incomplete - resume from stored frame index if available
+            if cache_data is not None:
+                frame_index = int(cache_data.get("frame_index", 0))
+                passing_count = int(cache_data.get("passing_count", 0))
+                total_extracted = int(cache_data.get("total_extracted", 0))
+                total_validated = int(cache_data.get("total_validated", 0))
+                print(f"Resuming from cache: frame_index={frame_index}, validated={total_validated}", file=sys.stderr)
 
         cap = cv2.VideoCapture(vp)
         if not cap.isOpened():
@@ -574,7 +530,6 @@ def cmd_search(args):
 
         prev_small_gray = None
         prev_ts = None
-        skipped_entries = []  # (ts, ts_formatted, vp) for still frames to inherit previous score
 
         # Get total frame count (if available)
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) if cap.get(cv2.CAP_PROP_FRAME_COUNT) is not None else None
@@ -586,8 +541,8 @@ def cmd_search(args):
         stride = max(1, int(fps * sample_rate))
         total_sampled = int((total_frames + stride - 1) / stride) if total_frames is not None else 0
 
-        # Seek to resume position if available
-        if _state is not None:
+        # Seek to resume position if cache provided one
+        if frame_index > 0:
             cap.set(cv2.CAP_PROP_POS_FRAMES, frame_index)
 
         while True:
@@ -615,7 +570,16 @@ def cmd_search(args):
                     if similarity >= still_frame_threshold:
                         skip_frame = True
                         print(f"sim check {ts_cur_formatted} <-> {ts_prev_formatted} sim={similarity:.2f} (still frame, skipped)", file=sys.stderr)
-                        skipped_entries.append((ts, ts_cur_formatted, vp))
+                        # Crash-safe: immediately append skipped frame with inherited score so it is persisted to cache
+                        all_results.append({
+                            "timestamp_seconds": ts,
+                            "timestamp_formatted": ts_cur_formatted,
+                            "score": video_prev_score,
+                            "source_video_path": vp,
+                        })
+                        total_extracted += 1
+                        if video_prev_score >= decision_model_floor:
+                            passing_count += 1
                     elif similarity >= same_scene_threshold and len(batch) < max_scene_batch_size:
                         print(f"sim check {ts_cur_formatted} <-> {ts_prev_formatted} sim={similarity:.2f} (same scene)", file=sys.stderr)
                         batch.append((ts, b64, vp))
@@ -653,38 +617,12 @@ def cmd_search(args):
         # Flush remaining batch for this video
         _flush_batch()
 
-        # Inherit previous validated score for skipped still frames
-        if skipped_entries:
-            vp_results = [r for r in all_results if r.get("source_video_path") == vp]
-            vp_results.sort(key=lambda x: x["timestamp_seconds"], reverse=True)
-            prev_score = vp_results[0]["score"] if vp_results else 0.0
-            for ts, ts_formatted, v in skipped_entries:
-                all_results.append({
-                    "timestamp_seconds": ts,
-                    "timestamp_formatted": ts_formatted,
-                    "score": prev_score,
-                    "source_video_path": v,
-                })
-                if prev_score >= decision_model_floor:
-                    passing_count += 1
-            skipped_entries = []
-
-        # Save state for this video (resume support)
-        _save_state(
-            cache_dir, vp,
-            sample_rate, frame_scale,
-            state_template, instructions_template, model_for_cache,
-            {
-                "frame_index": frame_index,
-                "passing_count": passing_count,
-                "total_extracted": total_extracted,
-                "total_validated": total_validated
-            })
-
-        # Save cache for this video (sample mode only)
+        # Save cache for this video (includes resume state)
         if save_cache_dir:
             video_results = [r for r in all_results if r.get("source_video_path") == vp]
             if video_results:
+                # Sort results by timestamp to ensure correct ordering in cache
+                video_results.sort(key=lambda x: x["timestamp_seconds"])
                 _save_cache(
                     save_cache_dir, vp,
                     sample_rate, frame_scale,
@@ -692,6 +630,9 @@ def cmd_search(args):
                     video_results, {},
                     total_sampled=total_sampled,
                     total_validated=total_validated,
+                    total_extracted=total_extracted,
+                    frame_index=frame_index,
+                    passing_count=passing_count,
                 )
 
     # Filter by floor, then select top-k, then order chronologically
