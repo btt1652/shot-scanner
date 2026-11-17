@@ -327,7 +327,8 @@ def cmd_search(args):
     max_scene_batch_size = min(max_scene_batch_size, 4)
     merge_range = cfg_val("merge_range", "merge_range") or False
     stitch = cfg_val("stitch", "stitch")
-    stitch_duration = cfg_val("stitch_duration", "stitch_duration") or 2.0
+    # Use sample_rate as default for stitch-duration (e.g., if sample_rate=3, each timestamp gets 3s clip)
+    stitch_duration = cfg_val("stitch_duration", "stitch_duration") if cfg_val("stitch_duration", "stitch_duration") is not None else (decision_model_sample_rate if decision_model_sample_rate else 1)
 
     # Apply defaults if config/CLI left templates empty
     if not state_template:
@@ -804,7 +805,7 @@ def main():
     p_search.add_argument("--max-scene-batch-size", type=int, default=None, help="Maximum number of consecutive same-scene frames per Ollama request (default: 4, capped by Ollama limit)")
     p_search.add_argument("--merge-range", action="store_true", default=False, help="Merge same-scene batches into timestamp ranges in output")
     p_search.add_argument("--stitch", type=str, default=None, help="Stitch matched ranges/timestamps into a single output video. Pass a file path or a directory (a filename will be auto-generated)")
-    p_search.add_argument("--stitch-duration", type=float, default=None, help="Clip duration (seconds) to extract for each unmerged timestamp when stitching (default: 2.0)")
+    p_search.add_argument("--stitch-duration", type=float, default=None, help="Clip duration (seconds) to extract for each unmerged timestamp when stitching (default: equals --decision-model-sample-rate)")
     p_search.add_argument("--recursive", "-R", action="store_true", default=False, help="Recursively scan directories for video files")
     p_search.add_argument("--cache", "-c", type=str, default=None, help="Path to cache directory to look up existing cache files. Overrides config 'cache_dir'. Only used when this flag is given")
     p_search.add_argument("--save-cache", "-sc", type=str, default=None, nargs="?", const=".", help="Path to cache directory for saving search results. Overrides config 'save_cache_dir'. Defaults to current directory (.) if used without a path")
