@@ -741,8 +741,10 @@ def cmd_search(args):
             try:
                 subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                 segments.append((seg_path, src, start, duration))
+                print(f"Stitch: extracted segment [{start:.2f}s, +{duration:.2f}s] from {src}", file=sys.stderr)
             except subprocess.CalledProcessError:
                 print(f"Warning: Failed to extract stitch segment at {start:.2f}s from {src}", file=sys.stderr)
+        print(f"Stitch: prepared {len(segments)} segments, concatenating...", file=sys.stderr)
         if segments:
             concat_list = os.path.join(stitch_dir, "concat.txt")
             with open(concat_list, "w") as f:
