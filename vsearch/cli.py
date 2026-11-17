@@ -441,7 +441,7 @@ def cmd_search(args):
             return results, passing
 
         ts_list = ", ".join(f"{int(ts)//3600:02d}:{int(ts)%3600//60:02d}:{int(ts)%60:02d}" for ts, _, _ in frames_batch)
-        print(f"Sending batch to Ollama ({len(frames_batch)} frame(s)): [{ts_list}]", file=sys.stderr)
+        print(f"send request [{ts_list}]", file=sys.stderr)
 
         images = [b64 for _, b64, _ in frames_batch]
         payload = {
@@ -473,8 +473,6 @@ def cmd_search(args):
             print(f"Batch request error: {e}. Discarding batch.", file=sys.stderr)
             return results, passing
 
-        print(f"Ollama batch score: {batch_score:.4f}", file=sys.stderr)
-
         for ts, b64, vp in frames_batch:
             ts_formatted = f"{int(ts)//3600:02d}:{int(ts)%3600//60:02d}:{int(ts)%60:02d}"
             results.append({
@@ -485,7 +483,6 @@ def cmd_search(args):
             })
             if batch_score >= decision_model_floor:
                 passing += 1
-                print(f"Ollama request: ts={ts_formatted} -> score={batch_score:.4f}", file=sys.stderr)
                 if instantiate_save:
                     _save_matched_frames([{
                         "timestamp_seconds": ts,
@@ -493,8 +490,9 @@ def cmd_search(args):
                         "score": batch_score,
                         "source_video_path": vp,
                     }], vp, save_frames)
-            else:
-                print(f"Ollama discard: ts={ts_formatted} -> score={batch_score:.4f}", file=sys.stderr)
+
+        pass_fail = "pass" if batch_score >= decision_model_floor else "fail"
+        print(f"result [{ts_list}] score={batch_score:.2f} {pass_fail}", file=sys.stderr)
 
         return results, passing
 
@@ -503,15 +501,6 @@ def cmd_search(args):
         if not batch:
             return
         out, passing = _validate_batch_single(batch)
-        # Same batch score: assign max score of this batch to every frame in it
-        if out:
-            batch_score = max(r["score"] for r in out)
-            for r in out:
-                r["score"] = batch_score
-            passing = sum(1 for r in out if r["score"] >= decision_model_floor)
-            # Log batch-level summary
-            ts_list = ", ".join(r["timestamp_formatted"] for r in out)
-            print(f"Batch result: [{ts_list}] -> max_score={batch_score:.4f} (pass={passing}/{len(out)})", file=sys.stderr)
         all_results.extend(out)
         passing_count += passing
         total_validated += len(batch)
@@ -584,6 +573,7 @@ def cmd_search(args):
         print(f"Processing video: {vp}", file=sys.stderr)
 
         prev_small_gray = None
+        prev_ts = None
 
         # Get total frame count (if available)
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) if cap.get(cv2.CAP_PROP_FRAME_COUNT) is not None else None
@@ -617,42 +607,38 @@ def cmd_search(args):
                     diff = cv2.absdiff(prev_small_gray, small_gray)
                     mean_diff = float(np.mean(diff))
                     similarity = 1.0 - (mean_diff / 255.0)
-                    ts_formatted = f"{int(ts)//3600:02d}:{int(ts)%3600//60:02d}:{int(ts)%60:02d}"
+
+                    ts_prev_formatted = f"{int(prev_ts)//3600:02d}:{int(prev_ts)%3600//60:02d}:{int(prev_ts)%60:02d}"
+                    ts_cur_formatted = f"{int(ts)//3600:02d}:{int(ts)%3600//60:02d}:{int(ts)%60:02d}"
 
                     if similarity >= still_frame_threshold:
                         skip_frame = True
-                        print(f"ts={ts_formatted} SKIP still-frame (similarity={similarity:.2f} >= {still_frame_threshold:.2f}, mean_diff={mean_diff:.2f})", file=sys.stderr)
+                        print(f"similarity check {ts_prev_formatted} < {ts_cur_formatted} sim={similarity:.2f}  (still frame, skipped)", file=sys.stderr)
                     elif similarity >= same_scene_threshold and len(batch) < max_scene_batch_size:
+                        print(f"similarity check {ts_prev_formatted} < {ts_cur_formatted} sim={similarity:.2f}  (same scene)", file=sys.stderr)
                         batch.append((ts, b64, vp))
                         total_extracted += 1
                         batch_ts = ", ".join(f"{int(t)//3600:02d}:{int(t)%3600//60:02d}:{int(t)%60:02d}" for t, _, _ in batch)
-                        print(f"ts={ts_formatted} ADD same-scene to batch (similarity={similarity:.2f} >= {same_scene_threshold:.2f}, mean_diff={mean_diff:.2f}) -> batch_size={len(batch)}/{max_scene_batch_size} frames=[{batch_ts}]", file=sys.stderr)
+                        print(f"add {ts_cur_formatted} to batch [{batch_ts}]", file=sys.stderr)
                         if len(batch) >= max_scene_batch_size:
-                            print(f"ts={ts_formatted} BATCH FULL ({len(batch)}/{max_scene_batch_size}), flushing to Ollama", file=sys.stderr)
                             _flush_batch()
                         skip_frame = False
                     else:
-                        reason = (
-                            f"similarity={similarity:.2f} < same_scene_threshold={same_scene_threshold:.2f}"
-                            if similarity < same_scene_threshold
-                            else f"batch already at max_scene_batch_size={max_scene_batch_size}"
-                        )
-                        prev_batch_ts = ", ".join(f"{int(t)//3600:02d}:{int(t)%3600//60:02d}:{int(t)%60:02d}" for t, _, _ in batch) if batch else "[]"
-                        if batch:
-                            _flush_batch()
+                        print(f"similarity check {ts_prev_formatted} < {ts_cur_formatted} sim={similarity:.2f}  (new scene)", file=sys.stderr)
+                        _flush_batch()
                         batch = [(ts, b64, vp)]
                         total_extracted += 1
                         skip_frame = False
-                        print(f"ts={ts_formatted} NEW SCENE ({reason}; mean_diff={mean_diff:.2f}; flushed previous batch frames=[{prev_batch_ts}], starting new batch)", file=sys.stderr)
                 else:
                     batch = [(ts, b64, vp)]
                     total_extracted += 1
                     skip_frame = False
                     ts_formatted = f"{int(ts)//3600:02d}:{int(ts)%3600//60:02d}:{int(ts)%60:02d}"
-                    print(f"ts={ts_formatted} FIRST FRAME (starting new batch, batch_size=1)", file=sys.stderr)
+                    print(f"add {ts_formatted} to batch [{ts_formatted}]", file=sys.stderr)
 
                 if not skip_frame:
                     prev_small_gray = small_gray
+                    prev_ts = ts
 
                 if total_extracted % 10 == 0:
                     # Show progress as extracted/total_sampled so at end it reads extracted=720/720
