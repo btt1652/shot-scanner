@@ -460,7 +460,7 @@ def cmd_search(args):
         return results, passing
 
     def _flush_batch():
-        nonlocal batch, total_validated, passing_count, video_prev_score
+        nonlocal batch, total_validated, passing_count
         if not batch:
             return
         out, passing = _validate_batch_single(batch)
@@ -468,7 +468,6 @@ def cmd_search(args):
         passing_count += passing
         total_validated += len(batch)
         batch = []
-        video_prev_score = out[0]["score"] if out else video_prev_score
         # Persist validated results immediately so a cancelled run can resume
         if save_cache_dir:
             video_results = [r for r in all_results if r.get("source_video_path") == vp]
@@ -497,8 +496,6 @@ def cmd_search(args):
     # Process each video: check cache first, then search if miss
     for vp in video_paths:
         frame_index = 0  # default if no state
-
-        video_prev_score = 0.0  # score of most recently validated frame for this video
 
         # Check cache (sample mode only). Cache stores both results and resume state.
         if cache_dir:
@@ -570,16 +567,14 @@ def cmd_search(args):
                     if similarity >= still_frame_threshold:
                         skip_frame = True
                         print(f"sim check {ts_cur_formatted} <-> {ts_prev_formatted} sim={similarity:.2f} (still frame, skipped)", file=sys.stderr)
-                        # Crash-safe: immediately append skipped frame with inherited score so it is persisted to cache
+                        # Crash-safe: immediately append skipped frame with zero score so it is persisted to cache
                         all_results.append({
                             "timestamp_seconds": ts,
                             "timestamp_formatted": ts_cur_formatted,
-                            "score": video_prev_score,
+                            "score": 0.0,
                             "source_video_path": vp,
                         })
                         total_extracted += 1
-                        if video_prev_score >= decision_model_floor:
-                            passing_count += 1
                     elif similarity >= same_scene_threshold and len(batch) < max_scene_batch_size:
                         print(f"sim check {ts_cur_formatted} <-> {ts_prev_formatted} sim={similarity:.2f} (same scene)", file=sys.stderr)
                         batch.append((ts, b64, vp))
