@@ -659,7 +659,8 @@ def cmd_search(args):
                 prev_end = merged[-1]["end_seconds"]
                 # Merge if same batch_id OR if gap <= sample_rate (adjacent samples)
                 same_batch = bid is not None and merged[-1].get("batch_id") == bid
-                close_enough = (ts - prev_end) <= sample_rate + 0.5  # small tolerance
+                # Ensure ts is at or after prev_end (results are sorted by score, not timestamp)
+                close_enough = (ts >= prev_end) and (ts - prev_end) <= sample_rate + 0.5  # small tolerance
                 if same_batch or close_enough:
                     # Extend current range
                     merged[-1]["end_seconds"] = ts
