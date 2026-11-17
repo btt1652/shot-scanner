@@ -450,7 +450,7 @@ def cmd_search(args):
         pass_fail = "pass" if batch_score >= decision_model_floor else "fail"
         print(f"response [{ts_list}] score={batch_score:.2f} {pass_fail}", file=sys.stderr)
 
-        if instantiate_save:
+        if instantiate_save and batch_score >= decision_model_floor:
             for ts, b64, vp in frames_batch:
                 ts_formatted = f"{int(ts)//3600:02d}:{int(ts)%3600//60:02d}:{int(ts)%60:02d}"
                 _save_matched_frames([{
