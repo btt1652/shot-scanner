@@ -574,6 +574,7 @@ def cmd_search(args):
 
         prev_small_gray = None
         prev_ts = None
+        skipped_entries = []  # (ts, ts_formatted, vp) for still frames to inherit previous score
 
         # Get total frame count (if available)
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) if cap.get(cv2.CAP_PROP_FRAME_COUNT) is not None else None
@@ -614,6 +615,7 @@ def cmd_search(args):
                     if similarity >= still_frame_threshold:
                         skip_frame = True
                         print(f"sim check {ts_cur_formatted} <-> {ts_prev_formatted} sim={similarity:.2f} (still frame, skipped)", file=sys.stderr)
+                        skipped_entries.append((ts, ts_cur_formatted, vp))
                     elif similarity >= same_scene_threshold and len(batch) < max_scene_batch_size:
                         print(f"sim check {ts_cur_formatted} <-> {ts_prev_formatted} sim={similarity:.2f} (same scene)", file=sys.stderr)
                         batch.append((ts, b64, vp))
@@ -650,6 +652,22 @@ def cmd_search(args):
 
         # Flush remaining batch for this video
         _flush_batch()
+
+        # Inherit previous validated score for skipped still frames
+        if skipped_entries:
+            vp_results = [r for r in all_results if r.get("source_video_path") == vp]
+            vp_results.sort(key=lambda x: x["timestamp_seconds"], reverse=True)
+            prev_score = vp_results[0]["score"] if vp_results else 0.0
+            for ts, ts_formatted, v in skipped_entries:
+                all_results.append({
+                    "timestamp_seconds": ts,
+                    "timestamp_formatted": ts_formatted,
+                    "score": prev_score,
+                    "source_video_path": v,
+                })
+                if prev_score >= decision_model_floor:
+                    passing_count += 1
+            skipped_entries = []
 
         # Save state for this video (resume support)
         _save_state(
