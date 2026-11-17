@@ -456,6 +456,10 @@ def cmd_search(args):
         """Validate a batch of (ts, b64, vp) frames. Returns (all_results, passing_count)."""
         results = []
         passing = 0
+        # Log which timestamps are being sent to Ollama in this batch
+        ts_list = ", ".join(f"{int(ts)//3600:02d}:{int(ts)%3600//60:02d}:{int(ts)%60:02d}" for ts, _, _ in frames_batch)
+        model_log = model
+        print(f"Sending batch to Ollama ({len(frames_batch)} frame(s)): [{ts_list}]", file=sys.stderr)
         if ollama_workers and ollama_workers > 1 and len(frames_batch) > 1:
             with ThreadPoolExecutor(max_workers=ollama_workers) as executor:
                 future_to_frame = {
@@ -561,6 +565,9 @@ def cmd_search(args):
             for r in out:
                 r["score"] = batch_score
             passing = sum(1 for r in out if r["score"] >= decision_model_floor)
+            # Log batch-level summary
+            ts_list = ", ".join(r["timestamp_formatted"] for r in out)
+            print(f"Batch result: [{ts_list}] -> max_score={batch_score:.4f} (pass={passing}/{len(out)})", file=sys.stderr)
         all_results.extend(out)
         passing_count += passing
         total_validated += len(batch)
