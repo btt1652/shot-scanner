@@ -394,6 +394,9 @@ def cmd_search(args):
     instructions_template = cfg_val("ollama_instructions_template", "ollama_instructions")
     cache_dir = cfg_val("cache_dir", "cache")
     save_cache_dir = cfg_val("save_cache_dir", "save_cache")
+    still_frame_threshold = cfg_val("still_frame_threshold", "still_frame_threshold")
+    same_scene_threshold = cfg_val("same_scene_threshold", "same_scene_threshold")
+    max_scene_batch_size = cfg_val("max_scene_batch_size", "max_scene_batch_size")
 
     # Apply defaults if config/CLI left templates empty
     if not state_template:
@@ -524,6 +527,14 @@ def cmd_search(args):
                     print(f"ts={ts_formatted} score={score:.4f} discard", file=sys.stderr)
         return results, passing
 
+    def _scaled_bgr(frame_bgr):
+        """Return BGR numpy resized to frame_scale (same as _b64_from_bgr scales)."""
+        scale = frame_scale if frame_scale else 0.2
+        h, w = frame_bgr.shape[:2]
+        new_w = max(1, int(w * scale))
+        new_h = max(1, int(h * scale))
+        return cv2.resize(frame_bgr, (new_w, new_h), interpolation=cv2.INTER_AREA)
+
     def _b64_from_bgr(frame_bgr):
         """Encode a BGR numpy frame to scaled JPEG base64."""
         rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
@@ -541,6 +552,12 @@ def cmd_search(args):
         if not batch:
             return
         out, passing = _validate_batch(batch)
+        # Same batch score: assign max score of this batch to every frame in it
+        if out:
+            batch_score = max(r["score"] for r in out)
+            for r in out:
+                r["score"] = batch_score
+            passing = sum(1 for r in out if r["score"] >= decision_model_floor)
         all_results.extend(out)
         passing_count += passing
         total_validated += len(batch)
@@ -612,6 +629,8 @@ def cmd_search(args):
 
         print(f"Processing video: {vp}", file=sys.stderr)
 
+        prev_small_gray = None
+
         # Get total frame count (if available)
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) if cap.get(cv2.CAP_PROP_FRAME_COUNT) is not None else None
 
@@ -632,17 +651,44 @@ def cmd_search(args):
                 break
 
             if frame_index % stride == 0:
+                small_bgr = _scaled_bgr(frame_bgr)
+                small_gray = cv2.cvtColor(small_bgr, cv2.COLOR_BGR2GRAY)
+
                 b64 = _b64_from_bgr(frame_bgr)
                 ts = frame_index / fps
-                batch.append((ts, b64, vp))
-                total_extracted += 1
+
+                skip_frame = True
+
+                if prev_small_gray is not None:
+                    diff = cv2.absdiff(prev_small_gray, small_gray)
+                    mean_diff = float(np.mean(diff))
+
+                    if mean_diff <= still_frame_threshold:
+                        skip_frame = True
+                    else:
+                        similarity = 1.0 - (mean_diff / 255.0)
+
+                        if similarity >= same_scene_threshold and len(batch) < max_scene_batch_size:
+                            batch.append((ts, b64, vp))
+                            total_extracted += 1
+                            if len(batch) >= max_scene_batch_size:
+                                _flush_batch()
+                        else:
+                            if batch:
+                                _flush_batch()
+                            batch = [(ts, b64, vp)]
+                            total_extracted += 1
+                else:
+                    batch = [(ts, b64, vp)]
+                    total_extracted += 1
+                    prev_small_gray = small_gray
+
+                if not skip_frame:
+                    prev_small_gray = small_gray
 
                 if total_extracted % 10 == 0:
                     # Show progress as extracted/total_sampled so at end it reads extracted=720/720
                     print(f"{vp} (extracted={total_extracted}/{total_sampled}, validated={total_validated}, passing={passing_count})", file=sys.stderr)
-
-                if len(batch) >= batch_size:
-                    _flush_batch()
 
             frame_index += 1
 
@@ -750,6 +796,9 @@ def main():
     p_search.add_argument("--ollama-frame-scale", "-ofs", type=float, default=None, help="Scale factor for frames sent to Ollama (0.0-1.0, default: 0.2). Lower = faster")
     p_search.add_argument("--ollama-model", "-dm", default=None, help="Ollama model name(s), comma-separated fallback list tried in order")
     p_search.add_argument("--ollama-timeout", "-ot", type=int, default=None, help="Ollama request timeout in seconds (default: 60)")
+    p_search.add_argument("--still-frame-threshold", type=float, default=None, help="Mean pixel diff below which a frame is considered still (default: 20000)")
+    p_search.add_argument("--same-scene-threshold", type=float, default=None, help="Normalized similarity (0-1) above which frames are considered same scene (default: 0.85)")
+    p_search.add_argument("--max-scene-batch-size", type=int, default=None, help="Maximum number of consecutive same-scene frames per Ollama request (default: 4, capped by Ollama limit)")
     p_search.add_argument("--recursive", "-R", action="store_true", default=False, help="Recursively scan directories for video files")
     p_search.add_argument("--cache", "-c", type=str, default=None, help="Path to cache directory to look up existing cache files. Overrides config 'cache_dir'. Only used when this flag is given")
     p_search.add_argument("--save-cache", "-sc", type=str, default=None, nargs="?", const=".", help="Path to cache directory for saving search results. Overrides config 'save_cache_dir'. Defaults to current directory (.) if used without a path")
