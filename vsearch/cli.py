@@ -644,19 +644,14 @@ def cmd_search(args):
                     passing_count=passing_count,
                 )
 
-    # Filter by floor, then select top-k, then order chronologically
-    final_results = [r for r in all_results if r["score"] >= decision_model_floor]
-    final_results.sort(key=lambda x: x["score"], reverse=True)
-    if global_k is not None and global_k > 0:
-        final_results = final_results[:global_k]
-    elif top_k is not None and top_k > 0:
-        final_results = final_results[:top_k]
-    final_results.sort(key=lambda x: (x.get("source_video_path", ""), x["timestamp_seconds"]))
+    # Filter by floor, then merge into ranges (if --merge-range), then order chronologically
+    all_results_filtered = [r for r in all_results if r["score"] >= decision_model_floor]
+    all_results_filtered.sort(key=lambda x: x["score"], reverse=True)
 
     # Merge same-scene batches and adjacent timestamps (within sample_rate) into ranges if --merge-range enabled
     if merge_range:
         merged = []
-        for r in final_results:
+        for r in all_results_filtered:
             vid = r.get("source_video_path", "")
             bid = r.get("batch_id")
             ts = r["timestamp_seconds"]
@@ -699,6 +694,15 @@ def cmd_search(args):
             m["start_formatted"] = f"{int(m['start_seconds'])//3600:02d}:{int(m['start_seconds'])%3600//60:02d}:{int(m['start_seconds'])%60:02d}"
             m["end_formatted"] = f"{int(m['end_seconds'])//3600:02d}:{int(m['end_seconds'])%3600//60:02d}:{int(m['end_seconds'])%60:02d}"
         final_results = merged
+    else:
+        final_results = all_results_filtered
+
+    # Select top-k / global-k AFTER merge_range so we count merged ranges
+    if global_k is not None and global_k > 0:
+        final_results = final_results[:global_k]
+    elif top_k is not None and top_k > 0:
+        final_results = final_results[:top_k]
+    final_results.sort(key=lambda x: (x.get("source_video_path", ""), x["start_seconds"] if "start_seconds" in x else x["timestamp_seconds"]))
 
     # Save matched frames
     if save_frames and final_results:
