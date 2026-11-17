@@ -323,6 +323,7 @@ def cmd_search(args):
     same_scene_threshold = cfg_val("same_scene_threshold", "same_scene_threshold") or 0.80
     max_scene_batch_size = cfg_val("max_scene_batch_size", "max_scene_batch_size") or 4
     max_scene_batch_size = min(max_scene_batch_size, 4)
+    merge_range = cfg_val("merge_range", "merge_range") or False
 
     # Apply defaults if config/CLI left templates empty
     if not state_template:
@@ -371,6 +372,7 @@ def cmd_search(args):
     passing_count = 0
     total_extracted = 0
     total_validated = 0
+    batch_id_counter = 0
     instantiate_save = bool(save_frames) and not (
         global_k is not None and global_k > 0 and
         top_k is not None and top_k > 0
@@ -397,11 +399,14 @@ def cmd_search(args):
         return base64.b64encode(buffered.getvalue()).decode("utf-8")
 
     def _validate_batch_single(frames_batch):
+        nonlocal batch_id_counter
         """Send all frames in a batch in one multi-image Ollama request; returns results with shared batch score."""
         results = []
         passing = 0
         if not frames_batch:
             return results, passing
+        batch_id_counter += 1
+        batch_id = batch_id_counter
 
         ts_list = ", ".join(f"{int(ts)//3600:02d}:{int(ts)%3600//60:02d}:{int(ts)%60:02d}" for ts, _, _ in frames_batch)
         print(f"send request [{ts_list}]", file=sys.stderr)
@@ -443,6 +448,7 @@ def cmd_search(args):
                 "timestamp_formatted": ts_formatted,
                 "score": batch_score,
                 "source_video_path": vp,
+                "batch_id": batch_id,
             })
             if batch_score >= decision_model_floor:
                 passing += 1
@@ -642,6 +648,37 @@ def cmd_search(args):
         final_results = final_results[:top_k]
     final_results.sort(key=lambda x: (x.get("source_video_path", ""), x["timestamp_seconds"]))
 
+    # Merge same-scene batches into timestamp ranges if --merge-range enabled
+    if merge_range:
+        merged = []
+        for r in final_results:
+            vid = r.get("source_video_path", "")
+            bid = r.get("batch_id")
+            # Only merge consecutive frames that share a real batch_id (skip legacy cache entries with None)
+            if merged and bid is not None and merged[-1].get("video_path") == vid and merged[-1].get("batch_id") == bid:
+                # Extend current range
+                merged[-1]["end_seconds"] = r["timestamp_seconds"]
+                merged[-1]["sample_count"] += 1
+                # Update avg score
+                old_avg = merged[-1]["score_avg"]
+                old_n = merged[-1]["sample_count"] - 1
+                merged[-1]["score_avg"] = (old_avg * old_n + r["score"]) / merged[-1]["sample_count"]
+            else:
+                merged.append({
+                    "video_path": vid,
+                    "batch_id": bid,
+                    "start_seconds": r["timestamp_seconds"],
+                    "end_seconds": r["timestamp_seconds"],
+                    "score_max": r["score"],
+                    "score_avg": r["score"],
+                    "sample_count": 1,
+                })
+        # Add formatted timestamps for merged results
+        for m in merged:
+            m["start_formatted"] = f"{int(m['start_seconds'])//3600:02d}:{int(m['start_seconds'])%3600//60:02d}:{int(m['start_seconds'])%60:02d}"
+            m["end_formatted"] = f"{int(m['end_seconds'])//3600:02d}:{int(m['end_seconds'])%3600//60:02d}:{int(m['end_seconds'])%60:02d}"
+        final_results = merged
+
     # Save matched frames
     if save_frames and final_results:
         saved_count, _paths = _save_matched_frames(final_results, video_paths[0], save_frames)
@@ -668,6 +705,7 @@ def cmd_search(args):
                 "ollama_frame_scale": _safe(frame_scale),
                 "top_k": _safe(top_k),
                 "global_k": _safe(global_k),
+                "merge_range": _safe(merge_range),
                 "video": _safe(video_paths[0]),
             },
         }
@@ -708,6 +746,7 @@ def main():
     p_search.add_argument("--still-frame-threshold", type=float, default=None, help="Similarity (0-1) above which a frame is considered still (default: 0.95)")
     p_search.add_argument("--same-scene-threshold", type=float, default=None, help="Similarity (0-1) above which frames are considered same scene (default: 0.80)")
     p_search.add_argument("--max-scene-batch-size", type=int, default=None, help="Maximum number of consecutive same-scene frames per Ollama request (default: 4, capped by Ollama limit)")
+    p_search.add_argument("--merge-range", action="store_true", default=False, help="Merge same-scene batches into timestamp ranges in output")
     p_search.add_argument("--recursive", "-R", action="store_true", default=False, help="Recursively scan directories for video files")
     p_search.add_argument("--cache", "-c", type=str, default=None, help="Path to cache directory to look up existing cache files. Overrides config 'cache_dir'. Only used when this flag is given")
     p_search.add_argument("--save-cache", "-sc", type=str, default=None, nargs="?", const=".", help="Path to cache directory for saving search results. Overrides config 'save_cache_dir'. Defaults to current directory (.) if used without a path")
