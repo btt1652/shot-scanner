@@ -120,7 +120,7 @@ def _save_cache(cache_dir, video_path, sample_rate, frame_scale, state, instruct
         }
         with open(cache_file, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2)
-        print(f"cache saved {cache_file})", file=sys.stderr)
+        print(f"cache saved {cache_file}", file=sys.stderr)
     except OSError as e:
         print(f"Warning: Failed to save cache file {cache_file}: {e}", file=sys.stderr)
 
