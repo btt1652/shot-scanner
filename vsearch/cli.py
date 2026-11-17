@@ -394,8 +394,8 @@ def cmd_search(args):
     instructions_template = cfg_val("ollama_instructions_template", "ollama_instructions")
     cache_dir = cfg_val("cache_dir", "cache")
     save_cache_dir = cfg_val("save_cache_dir", "save_cache")
-    still_frame_threshold = cfg_val("still_frame_threshold", "still_frame_threshold") or 20000
-    same_scene_threshold = cfg_val("same_scene_threshold", "same_scene_threshold") or 0.85
+    still_frame_threshold = cfg_val("still_frame_threshold", "still_frame_threshold") or 0.95
+    same_scene_threshold = cfg_val("same_scene_threshold", "same_scene_threshold") or 0.80
     max_scene_batch_size = cfg_val("max_scene_batch_size", "max_scene_batch_size") or 4
     max_scene_batch_size = min(max_scene_batch_size, 4)
 
@@ -663,24 +663,22 @@ def cmd_search(args):
                 if prev_small_gray is not None:
                     diff = cv2.absdiff(prev_small_gray, small_gray)
                     mean_diff = float(np.mean(diff))
+                    similarity = 1.0 - (mean_diff / 255.0)
 
-                    if mean_diff <= still_frame_threshold:
+                    if similarity >= still_frame_threshold:
                         pass
+                    elif similarity >= same_scene_threshold and len(batch) < max_scene_batch_size:
+                        batch.append((ts, b64, vp))
+                        total_extracted += 1
+                        if len(batch) >= max_scene_batch_size:
+                            _flush_batch()
+                        skip_frame = False
                     else:
-                        similarity = 1.0 - (mean_diff / 255.0)
-
-                        if similarity >= same_scene_threshold and len(batch) < max_scene_batch_size:
-                            batch.append((ts, b64, vp))
-                            total_extracted += 1
-                            if len(batch) >= max_scene_batch_size:
-                                _flush_batch()
-                            skip_frame = False
-                        else:
-                            if batch:
-                                _flush_batch()
-                            batch = [(ts, b64, vp)]
-                            total_extracted += 1
-                            skip_frame = False
+                        if batch:
+                            _flush_batch()
+                        batch = [(ts, b64, vp)]
+                        total_extracted += 1
+                        skip_frame = False
                 else:
                     batch = [(ts, b64, vp)]
                     total_extracted += 1
@@ -799,8 +797,8 @@ def main():
     p_search.add_argument("--ollama-frame-scale", "-ofs", type=float, default=None, help="Scale factor for frames sent to Ollama (0.0-1.0, default: 0.2). Lower = faster")
     p_search.add_argument("--ollama-model", "-dm", default=None, help="Ollama model name(s), comma-separated fallback list tried in order")
     p_search.add_argument("--ollama-timeout", "-ot", type=int, default=None, help="Ollama request timeout in seconds (default: 60)")
-    p_search.add_argument("--still-frame-threshold", type=float, default=None, help="Mean pixel diff below which a frame is considered still (default: 20000)")
-    p_search.add_argument("--same-scene-threshold", type=float, default=None, help="Normalized similarity (0-1) above which frames are considered same scene (default: 0.85)")
+    p_search.add_argument("--still-frame-threshold", type=float, default=None, help="Similarity (0-1) above which a frame is considered still (default: 0.95)")
+    p_search.add_argument("--same-scene-threshold", type=float, default=None, help="Similarity (0-1) above which frames are considered same scene (default: 0.80)")
     p_search.add_argument("--max-scene-batch-size", type=int, default=None, help="Maximum number of consecutive same-scene frames per Ollama request (default: 4, capped by Ollama limit)")
     p_search.add_argument("--recursive", "-R", action="store_true", default=False, help="Recursively scan directories for video files")
     p_search.add_argument("--cache", "-c", type=str, default=None, help="Path to cache directory to look up existing cache files. Overrides config 'cache_dir'. Only used when this flag is given")
