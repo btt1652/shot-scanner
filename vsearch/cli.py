@@ -14,8 +14,6 @@ import sys
 import threading
 import time
 import urllib.request
-from concurrent.futures import ThreadPoolExecutor, as_completed
-
 import cv2
 import numpy as np
 from PIL import Image
@@ -311,41 +309,6 @@ def _extract_frame_at(video_path, timestamp, out_path):
     except Exception:
         return False
 
-def _validate_frame_with_ollama(frame_b64, model, endpoint, state_template=None, instructions_template=None, timeout=60):
-    """Validate a single frame against Ollama decision model. Returns (score, model_used) or (None, None)."""
-    if not frame_b64:
-        return None, None
-
-    state = state_template or ""
-    instructions = instructions_template or ""
-    payload = {
-        "model": model,
-        "state": state,
-        "images": [frame_b64],
-        "questions": {
-            "is_valid": {
-                "type": "noul",
-                "instructions": instructions
-            }
-        }
-    }
-    try:
-        req = urllib.request.Request(
-            endpoint,
-            data=json.dumps(payload).encode("utf-8"),
-            headers={"Content-Type": "application/json"}
-        )
-        with urllib.request.urlopen(req, timeout=timeout) as response:
-            res_json = json.loads(response.read().decode("utf-8"))
-        valid_score = res_json["answers"]["is_valid"]["noul"]
-        return valid_score, model
-    except urllib.error.URLError as e:
-        print(f"Model '{model}' failed: timeout ({e})", file=sys.stderr)
-        return None, None
-    except Exception as e:
-        print(f"Model '{model}' failed: {e}", file=sys.stderr)
-        return None, None
-
 def _save_matched_frames(results, video_path, output_dir):
     """Extract and save matched frames as JPEG images."""
     os.makedirs(output_dir, exist_ok=True)
@@ -385,7 +348,6 @@ def cmd_search(args):
     save_frames = cfg_val("save_frames", "save_frames")
     decision_model_floor = cfg_val("decision_model_floor", "decision_model_floor")
     decision_model_sample_rate = cfg_val("decision_model_sample_rate", "decision_model_sample_rate")
-    ollama_workers = cfg_val("ollama_workers", "ollama_workers")
     ollama_endpoint = cfg_val("ollama_host", "ollama_host")
     ollama_model = cfg_val("ollama_decision_model", "ollama_model")
     frame_scale = cfg_val("ollama_frame_scale", "ollama_frame_scale")
@@ -434,11 +396,10 @@ def cmd_search(args):
     ollama_timeout = cfg_val("ollama_timeout", "ollama_timeout")
 
     print(f"Config: top_k={top_k}, global_k={global_k}, json_output={json_output}", file=sys.stderr)
-    print(f"        save_frames={save_frames}, video={video_paths[0]}, decision_model_floor={decision_model_floor}, decision_model_sample_rate={decision_model_sample_rate}, ollama_workers={ollama_workers}, ollama_host={ollama_endpoint}, ollama_model={ollama_model}, ollama_frame_scale={frame_scale:.2f}, ollama_state={state_template!r}, ollama_instructions={instructions_template!r}, ollama_timeout={ollama_timeout}", file=sys.stderr)
+    print(f"        save_frames={save_frames}, video={video_paths[0]}, decision_model_floor={decision_model_floor}, decision_model_sample_rate={decision_model_sample_rate}, ollama_host={ollama_endpoint}, ollama_model={ollama_model}, ollama_frame_scale={frame_scale:.2f}, ollama_state={state_template!r}, ollama_instructions={instructions_template!r}, ollama_timeout={ollama_timeout}", file=sys.stderr)
 
     sample_rate = decision_model_sample_rate if decision_model_sample_rate else 1
 
-    batch_size = max(1, (ollama_workers or 1) if (ollama_workers or 1) > 0 else 1) * 2
     model = ollama_model if ollama_model else "clef-flash"  # Single model only (no fallback)
 
     batch = []
@@ -451,88 +412,6 @@ def cmd_search(args):
         global_k is not None and global_k > 0 and
         top_k is not None and top_k > 0
     )
-
-    def _validate_batch(frames_batch):
-        """Validate a batch of (ts, b64, vp) frames. Returns (all_results, passing_count)."""
-        results = []
-        passing = 0
-        # Log which timestamps are being sent to Ollama in this batch
-        ts_list = ", ".join(f"{int(ts)//3600:02d}:{int(ts)%3600//60:02d}:{int(ts)%60:02d}" for ts, _, _ in frames_batch)
-        model_log = model
-        print(f"Sending batch to Ollama ({len(frames_batch)} frame(s)): [{ts_list}]", file=sys.stderr)
-        if ollama_workers and ollama_workers > 1 and len(frames_batch) > 1:
-            with ThreadPoolExecutor(max_workers=ollama_workers) as executor:
-                future_to_frame = {
-                    executor.submit(
-                        _validate_frame_with_ollama,
-                        b64,
-                        model,  # single model, not list
-                        ollama_endpoint,
-                        state_template,
-                        instructions_template,
-                        timeout=ollama_timeout,
-                    ): (ts, b64, vp)
-                    for ts, b64, vp in frames_batch
-                }
-                for future in as_completed(future_to_frame):
-                    ts, b64, vp = future_to_frame[future]
-                    try:
-                        score, _model = future.result()
-                    except Exception as e:
-                        print(f"Error validating frame at {ts:.1f}s: {e}. Discarded.", file=sys.stderr)
-                        continue
-                    if score is None:
-                        print(f"Error validating frame at {ts:.1f}s. Discarded.", file=sys.stderr)
-                        continue
-                    ts_formatted = f"{int(ts)//3600:02d}:{int(ts)%3600//60:02d}:{int(ts)%60:02d}"
-                    results.append({
-                        "timestamp_seconds": ts,
-                        "timestamp_formatted": ts_formatted,
-                        "score": score,
-                        "source_video_path": vp,
-                    })
-                    # Log the Ollama request
-                    if score >= decision_model_floor:
-                        passing += 1
-                        print(f"Ollama request: ts={ts_formatted} -> score={score:.4f}", file=sys.stderr)
-                        # Save frame immediately when it passes the floor
-                        if instantiate_save:
-                            _save_matched_frames([{
-                                "timestamp_seconds": ts,
-                                "timestamp_formatted": ts_formatted,
-                                "score": score,
-                                "source_video_path": vp,
-                            }], vp, save_frames)
-                    else:
-                        print(f"Ollama discard: ts={ts_formatted} -> score={score:.4f}", file=sys.stderr)
-        else:
-            for ts, b64, vp in frames_batch:
-                score, _model = _validate_frame_with_ollama(b64, model, ollama_endpoint, state_template, instructions_template, timeout=ollama_timeout)
-                if score is None:
-                    print(f"Error validating frame at {ts:.1f}s. Discarded.", file=sys.stderr)
-                    continue
-                ts_formatted = f"{int(ts)//3600:02d}:{int(ts)%3600//60:02d}:{int(ts)%60:02d}"
-                results.append({
-                    "timestamp_seconds": ts,
-                    "timestamp_formatted": ts_formatted,
-                    "score": score,
-                    "source_video_path": vp,
-                })
-                # Log the Ollama request
-                if score >= decision_model_floor:
-                    passing += 1
-                    print(f"Ollama request: ts={ts_formatted} -> score={score:.4f}", file=sys.stderr)
-                    # Save frame immediately when it passes the floor
-                    if instantiate_save:
-                        _save_matched_frames([{
-                            "timestamp_seconds": ts,
-                            "timestamp_formatted": ts_formatted,
-                            "score": score,
-                            "source_video_path": vp,
-                        }], vp, save_frames)
-                else:
-                    print(f"Ollama discard: ts={ts_formatted} -> score={score:.4f}", file=sys.stderr)
-        return results, passing
 
     def _scaled_bgr(frame_bgr):
         """Return BGR numpy resized to frame_scale (same as _b64_from_bgr scales)."""
@@ -836,7 +715,6 @@ def cmd_search(args):
                 "ollama_host": _safe(ollama_endpoint),
                 "ollama_model": _safe(model),
                 "ollama_frame_scale": _safe(frame_scale),
-                "ollama_workers": _safe(ollama_workers),
                 "top_k": _safe(top_k),
                 "global_k": _safe(global_k),
                 "video": _safe(video_paths[0]),
@@ -872,7 +750,6 @@ def main():
     p_search.add_argument("--save-frames", "-sf", default=None, help="Directory to save matched frame images as {video_name}_{HHMMSS}_{score}.jpg")
     p_search.add_argument("--decision-model-floor", "-dmt", type=float, default=None, help="Threshold for Ollama score (default: 0.5). Results below are discarded.")
     p_search.add_argument("--decision-model-sample-rate", "-dmsr", type=int, default=None, help="Frame sampling interval in seconds (default: 1)")
-    p_search.add_argument("--ollama-workers", "-ow", type=int, default=None, help="Number of frames validated concurrently against Ollama (default: 1)")
     p_search.add_argument("--ollama-host", "-oh", default=None, help="Ollama server address (default: 192.168.1.190). Falls back to localhost if unreachable")
     p_search.add_argument("--ollama-frame-scale", "-ofs", type=float, default=None, help="Scale factor for frames sent to Ollama (0.0-1.0, default: 0.2). Lower = faster")
     p_search.add_argument("--ollama-model", "-dm", default=None, help="Ollama model name(s), comma-separated fallback list tried in order")
