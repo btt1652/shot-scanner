@@ -554,11 +554,76 @@ def cmd_search(args):
         pil_img.save(buffered, format="JPEG", quality=80)
         return base64.b64encode(buffered.getvalue()).decode("utf-8")
 
+    def _validate_batch_single(frames_batch):
+        """Send all frames in a batch in one multi-image Ollama request; returns results with shared batch score."""
+        results = []
+        passing = 0
+        if not frames_batch:
+            return results, passing
+
+        ts_list = ", ".join(f"{int(ts)//3600:02d}:{int(ts)%3600//60:02d}:{int(ts)%60:02d}" for ts, _, _ in frames_batch)
+        print(f"Sending batch to Ollama ({len(frames_batch)} frame(s)): [{ts_list}]", file=sys.stderr)
+
+        images = [b64 for _, b64, _ in frames_batch]
+        payload = {
+            "model": model,
+            "state": state_template or "",
+            "images": images,
+            "questions": {
+                "is_valid": {
+                    "type": "noul",
+                    "instructions": instructions_template or ""
+                }
+            }
+        }
+        try:
+            req = urllib.request.Request(
+                ollama_endpoint,
+                data=json.dumps(payload).encode("utf-8"),
+                headers={"Content-Type": "application/json"}
+            )
+            with urllib.request.urlopen(req, timeout=ollama_timeout) as response:
+                res_json = json.loads(response.read().decode("utf-8"))
+            batch_score = res_json["answers"]["is_valid"]["noul"]
+            if isinstance(batch_score, list):
+                batch_score = max(batch_score) if batch_score else 0.0
+        except urllib.error.URLError as e:
+            print(f"Batch request failed: {e}. Discarding batch.", file=sys.stderr)
+            return results, passing
+        except Exception as e:
+            print(f"Batch request error: {e}. Discarding batch.", file=sys.stderr)
+            return results, passing
+
+        print(f"Ollama batch score: {batch_score:.4f}", file=sys.stderr)
+
+        for ts, b64, vp in frames_batch:
+            ts_formatted = f"{int(ts)//3600:02d}:{int(ts)%3600//60:02d}:{int(ts)%60:02d}"
+            results.append({
+                "timestamp_seconds": ts,
+                "timestamp_formatted": ts_formatted,
+                "score": batch_score,
+                "source_video_path": vp,
+            })
+            if batch_score >= decision_model_floor:
+                passing += 1
+                print(f"Ollama request: ts={ts_formatted} -> score={batch_score:.4f}", file=sys.stderr)
+                if instantiate_save:
+                    _save_matched_frames([{
+                        "timestamp_seconds": ts,
+                        "timestamp_formatted": ts_formatted,
+                        "score": batch_score,
+                        "source_video_path": vp,
+                    }], vp, save_frames)
+            else:
+                print(f"Ollama discard: ts={ts_formatted} -> score={batch_score:.4f}", file=sys.stderr)
+
+        return results, passing
+
     def _flush_batch():
         nonlocal batch, total_validated, passing_count
         if not batch:
             return
-        out, passing = _validate_batch(batch)
+        out, passing = _validate_batch_single(batch)
         # Same batch score: assign max score of this batch to every frame in it
         if out:
             batch_score = max(r["score"] for r in out)
