@@ -666,19 +666,25 @@ def cmd_search(args):
                     similarity = 1.0 - (mean_diff / 255.0)
 
                     if similarity >= still_frame_threshold:
-                        pass
+                        skip_frame = True
+                        ts_formatted = f"{int(ts)//3600:02d}:{int(ts)%3600//60:02d}:{int(ts)%60:02d}"
+                        print(f"ts={ts_formatted} skip (still frame, similarity={similarity:.2f})", file=sys.stderr)
                     elif similarity >= same_scene_threshold and len(batch) < max_scene_batch_size:
                         batch.append((ts, b64, vp))
                         total_extracted += 1
                         if len(batch) >= max_scene_batch_size:
                             _flush_batch()
                         skip_frame = False
+                        ts_formatted = f"{int(ts)//3600:02d}:{int(ts)%3600//60:02d}:{int(ts)%60:02d}"
+                        print(f"ts={ts_formatted} added to batch (similarity={similarity:.2f}, batch_size={len(batch)})", file=sys.stderr)
                     else:
                         if batch:
                             _flush_batch()
                         batch = [(ts, b64, vp)]
                         total_extracted += 1
                         skip_frame = False
+                        ts_formatted = f"{int(ts)//3600:02d}:{int(ts)%3600//60:02d}:{int(ts)%60:02d}"
+                        print(f"ts={ts_formatted} new scene (similarity={similarity:.2f}, flushed batch, starting new batch)", file=sys.stderr)
                 else:
                     batch = [(ts, b64, vp)]
                     total_extracted += 1
