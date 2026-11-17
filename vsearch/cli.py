@@ -487,9 +487,10 @@ def cmd_search(args):
                         "score": score,
                         "source_video_path": vp,
                     })
+                    # Log the Ollama request
                     if score >= decision_model_floor:
                         passing += 1
-                        print(f"ts={ts_formatted} score={score:.4f} pass", file=sys.stderr)
+                        print(f"Ollama request: ts={ts_formatted} -> score={score:.4f}", file=sys.stderr)
                         # Save frame immediately when it passes the floor
                         if instantiate_save:
                             _save_matched_frames([{
@@ -499,7 +500,7 @@ def cmd_search(args):
                                 "source_video_path": vp,
                             }], vp, save_frames)
                     else:
-                        print(f"ts={ts_formatted} score={score:.4f} discard", file=sys.stderr)
+                        print(f"Ollama discard: ts={ts_formatted} -> score={score:.4f}", file=sys.stderr)
         else:
             for ts, b64, vp in frames_batch:
                 score, _model = _validate_frame_with_ollama(b64, model, ollama_endpoint, state_template, instructions_template, timeout=ollama_timeout)
@@ -513,9 +514,10 @@ def cmd_search(args):
                     "score": score,
                     "source_video_path": vp,
                 })
+                # Log the Ollama request
                 if score >= decision_model_floor:
                     passing += 1
-                    print(f"ts={ts_formatted} score={score:.4f} pass", file=sys.stderr)
+                    print(f"Ollama request: ts={ts_formatted} -> score={score:.4f}", file=sys.stderr)
                     # Save frame immediately when it passes the floor
                     if instantiate_save:
                         _save_matched_frames([{
@@ -525,7 +527,7 @@ def cmd_search(args):
                             "source_video_path": vp,
                         }], vp, save_frames)
                 else:
-                    print(f"ts={ts_formatted} score={score:.4f} discard", file=sys.stderr)
+                    print(f"Ollama discard: ts={ts_formatted} -> score={score:.4f}", file=sys.stderr)
         return results, passing
 
     def _scaled_bgr(frame_bgr):
