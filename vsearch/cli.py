@@ -116,7 +116,7 @@ def _save_cache(cache_dir, video_path, sample_rate, frame_scale, state, instruct
         }
         with open(cache_file, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2)
-        print(f"Cache saved: {cache_file} ({len(all_results)} results)", file=sys.stderr)
+        print(f"cache saved {cache_file})", file=sys.stderr)
     except OSError as e:
         print(f"Warning: Failed to save cache file {cache_file}: {e}", file=sys.stderr)
 
@@ -492,7 +492,7 @@ def cmd_search(args):
                     }], vp, save_frames)
 
         pass_fail = "pass" if batch_score >= decision_model_floor else "fail"
-        print(f"result [{ts_list}] score={batch_score:.2f} {pass_fail}", file=sys.stderr)
+        print(f"response [{ts_list}] score={batch_score:.2f} {pass_fail}", file=sys.stderr)
 
         return results, passing
 
@@ -613,18 +613,18 @@ def cmd_search(args):
 
                     if similarity >= still_frame_threshold:
                         skip_frame = True
-                        print(f"similarity check {ts_prev_formatted} < {ts_cur_formatted} sim={similarity:.2f}  (still frame, skipped)", file=sys.stderr)
+                        print(f"sim check {ts_cur_formatted} <-> {ts_prev_formatted} sim={similarity:.2f} (still frame, skipped)", file=sys.stderr)
                     elif similarity >= same_scene_threshold and len(batch) < max_scene_batch_size:
-                        print(f"similarity check {ts_prev_formatted} < {ts_cur_formatted} sim={similarity:.2f}  (same scene)", file=sys.stderr)
+                        print(f"sim check {ts_cur_formatted} <-> {ts_prev_formatted} sim={similarity:.2f} (same scene)", file=sys.stderr)
                         batch.append((ts, b64, vp))
                         total_extracted += 1
                         batch_ts = ", ".join(f"{int(t)//3600:02d}:{int(t)%3600//60:02d}:{int(t)%60:02d}" for t, _, _ in batch)
-                        print(f"add {ts_cur_formatted} to batch [{batch_ts}]", file=sys.stderr)
+                        print(f"add {ts_cur_formatted} to request [{batch_ts}]", file=sys.stderr)
                         if len(batch) >= max_scene_batch_size:
                             _flush_batch()
                         skip_frame = False
                     else:
-                        print(f"similarity check {ts_prev_formatted} < {ts_cur_formatted} sim={similarity:.2f}  (new scene)", file=sys.stderr)
+                        print(f"sim check {ts_cur_formatted} <-> {ts_prev_formatted} sim={similarity:.2f} (new scene)", file=sys.stderr)
                         _flush_batch()
                         batch = [(ts, b64, vp)]
                         total_extracted += 1
@@ -634,7 +634,7 @@ def cmd_search(args):
                     total_extracted += 1
                     skip_frame = False
                     ts_formatted = f"{int(ts)//3600:02d}:{int(ts)%3600//60:02d}:{int(ts)%60:02d}"
-                    print(f"add {ts_formatted} to batch [{ts_formatted}]", file=sys.stderr)
+                    print(f"add {ts_formatted} to request [{ts_formatted}]", file=sys.stderr)
 
                 if not skip_frame:
                     prev_small_gray = small_gray
