@@ -617,31 +617,39 @@ def cmd_search(args):
                     diff = cv2.absdiff(prev_small_gray, small_gray)
                     mean_diff = float(np.mean(diff))
                     similarity = 1.0 - (mean_diff / 255.0)
+                    ts_formatted = f"{int(ts)//3600:02d}:{int(ts)%3600//60:02d}:{int(ts)%60:02d}"
 
                     if similarity >= still_frame_threshold:
                         skip_frame = True
-                        ts_formatted = f"{int(ts)//3600:02d}:{int(ts)%3600//60:02d}:{int(ts)%60:02d}"
-                        print(f"ts={ts_formatted} skip (still frame, similarity={similarity:.2f})", file=sys.stderr)
+                        print(f"ts={ts_formatted} SKIP still-frame (similarity={similarity:.2f} >= {still_frame_threshold:.2f}, mean_diff={mean_diff:.2f})", file=sys.stderr)
                     elif similarity >= same_scene_threshold and len(batch) < max_scene_batch_size:
                         batch.append((ts, b64, vp))
                         total_extracted += 1
+                        batch_ts = ", ".join(f"{int(t)//3600:02d}:{int(t)%3600//60:02d}:{int(t)%60:02d}" for t, _, _ in batch)
+                        print(f"ts={ts_formatted} ADD same-scene to batch (similarity={similarity:.2f} >= {same_scene_threshold:.2f}, mean_diff={mean_diff:.2f}) -> batch_size={len(batch)}/{max_scene_batch_size} frames=[{batch_ts}]", file=sys.stderr)
                         if len(batch) >= max_scene_batch_size:
+                            print(f"ts={ts_formatted} BATCH FULL ({len(batch)}/{max_scene_batch_size}), flushing to Ollama", file=sys.stderr)
                             _flush_batch()
                         skip_frame = False
-                        ts_formatted = f"{int(ts)//3600:02d}:{int(ts)%3600//60:02d}:{int(ts)%60:02d}"
-                        print(f"ts={ts_formatted} added to batch (similarity={similarity:.2f}, batch_size={len(batch)})", file=sys.stderr)
                     else:
+                        reason = (
+                            f"similarity={similarity:.2f} < same_scene_threshold={same_scene_threshold:.2f}"
+                            if similarity < same_scene_threshold
+                            else f"batch already at max_scene_batch_size={max_scene_batch_size}"
+                        )
+                        prev_batch_ts = ", ".join(f"{int(t)//3600:02d}:{int(t)%3600//60:02d}:{int(t)%60:02d}" for t, _, _ in batch) if batch else "[]"
                         if batch:
                             _flush_batch()
                         batch = [(ts, b64, vp)]
                         total_extracted += 1
                         skip_frame = False
-                        ts_formatted = f"{int(ts)//3600:02d}:{int(ts)%3600//60:02d}:{int(ts)%60:02d}"
-                        print(f"ts={ts_formatted} new scene (similarity={similarity:.2f}, flushed batch, starting new batch)", file=sys.stderr)
+                        print(f"ts={ts_formatted} NEW SCENE ({reason}; mean_diff={mean_diff:.2f}; flushed previous batch frames=[{prev_batch_ts}], starting new batch)", file=sys.stderr)
                 else:
                     batch = [(ts, b64, vp)]
                     total_extracted += 1
                     skip_frame = False
+                    ts_formatted = f"{int(ts)//3600:02d}:{int(ts)%3600//60:02d}:{int(ts)%60:02d}"
+                    print(f"ts={ts_formatted} FIRST FRAME (starting new batch, batch_size=1)", file=sys.stderr)
 
                 if not skip_frame:
                     prev_small_gray = small_gray
