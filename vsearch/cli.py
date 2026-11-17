@@ -394,9 +394,10 @@ def cmd_search(args):
     instructions_template = cfg_val("ollama_instructions_template", "ollama_instructions")
     cache_dir = cfg_val("cache_dir", "cache")
     save_cache_dir = cfg_val("save_cache_dir", "save_cache")
-    still_frame_threshold = cfg_val("still_frame_threshold", "still_frame_threshold")
-    same_scene_threshold = cfg_val("same_scene_threshold", "same_scene_threshold")
-    max_scene_batch_size = cfg_val("max_scene_batch_size", "max_scene_batch_size")
+    still_frame_threshold = cfg_val("still_frame_threshold", "still_frame_threshold") or 20000
+    same_scene_threshold = cfg_val("same_scene_threshold", "same_scene_threshold") or 0.85
+    max_scene_batch_size = cfg_val("max_scene_batch_size", "max_scene_batch_size") or 4
+    max_scene_batch_size = min(max_scene_batch_size, 4)
 
     # Apply defaults if config/CLI left templates empty
     if not state_template:
@@ -664,7 +665,7 @@ def cmd_search(args):
                     mean_diff = float(np.mean(diff))
 
                     if mean_diff <= still_frame_threshold:
-                        skip_frame = True
+                        pass
                     else:
                         similarity = 1.0 - (mean_diff / 255.0)
 
@@ -673,15 +674,17 @@ def cmd_search(args):
                             total_extracted += 1
                             if len(batch) >= max_scene_batch_size:
                                 _flush_batch()
+                            skip_frame = False
                         else:
                             if batch:
                                 _flush_batch()
                             batch = [(ts, b64, vp)]
                             total_extracted += 1
+                            skip_frame = False
                 else:
                     batch = [(ts, b64, vp)]
                     total_extracted += 1
-                    prev_small_gray = small_gray
+                    skip_frame = False
 
                 if not skip_frame:
                     prev_small_gray = small_gray
