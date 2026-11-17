@@ -13,6 +13,8 @@ import subprocess
 import sys
 import threading
 import time
+import tempfile
+import shutil
 import urllib.request
 import cv2
 import numpy as np
@@ -324,6 +326,8 @@ def cmd_search(args):
     max_scene_batch_size = cfg_val("max_scene_batch_size", "max_scene_batch_size") or 4
     max_scene_batch_size = min(max_scene_batch_size, 4)
     merge_range = cfg_val("merge_range", "merge_range") or False
+    stitch = cfg_val("stitch", "stitch")
+    stitch_duration = cfg_val("stitch_duration", "stitch_duration") or 2.0
 
     # Apply defaults if config/CLI left templates empty
     if not state_template:
@@ -684,6 +688,56 @@ def cmd_search(args):
         saved_count, _paths = _save_matched_frames(final_results, video_paths[0], save_frames)
         print(f"Saved {saved_count} frame(s) to {save_frames}", file=sys.stderr)
 
+    # Stitch matched ranges/timestamps into a single output video if --stitch given
+    if stitch and final_results:
+        output_path = stitch
+        if os.path.isdir(output_path):
+            first_video_name = os.path.splitext(os.path.basename(video_paths[0]))[0]
+            output_path = os.path.join(output_path, f"{first_video_name}_stitched.mp4")
+        if not os.path.splitext(output_path)[1]:
+            output_path = output_path + ".mp4"
+        stitch_dir = tempfile.mkdtemp(prefix="vsearch_stitch_")
+        segments = []
+        for r in final_results:
+            if "start_seconds" in r and "end_seconds" in r:
+                start = r["start_seconds"]
+                duration = max(0.0, r["end_seconds"] - r["start_seconds"])
+                src = r.get("video_path", video_paths[0])
+            else:
+                start = r.get("timestamp_seconds", 0)
+                duration = stitch_duration
+                src = r.get("source_video_path", video_paths[0])
+            seg_path = os.path.join(stitch_dir, f"seg_{len(segments):06d}.mp4")
+            cmd = [
+                "ffmpeg", "-y", "-v", "error",
+                "-ss", str(start), "-i", src,
+                "-t", str(duration),
+                "-c", "copy", seg_path,
+            ]
+            try:
+                subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                segments.append((seg_path, src, start, duration))
+            except subprocess.CalledProcessError:
+                print(f"Warning: Failed to extract stitch segment at {start:.2f}s from {src}", file=sys.stderr)
+        if segments:
+            concat_list = os.path.join(stitch_dir, "concat.txt")
+            with open(concat_list, "w") as f:
+                for seg, src, start, dur in segments:
+                    f.write(f"file '{seg}'\n")
+            cmd = [
+                "ffmpeg", "-y", "-v", "error",
+                "-f", "concat", "-safe", "0",
+                "-i", concat_list,
+                "-c", "copy",
+                output_path,
+            ]
+            try:
+                subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                print(f"Stitched video saved to {output_path}", file=sys.stderr)
+            except subprocess.CalledProcessError as e:
+                print(f"Warning: Failed to stitch video: {e}", file=sys.stderr)
+        shutil.rmtree(stitch_dir, ignore_errors=True)
+
     # Output
     if json_output:
         def _safe(v):
@@ -706,6 +760,8 @@ def cmd_search(args):
                 "top_k": _safe(top_k),
                 "global_k": _safe(global_k),
                 "merge_range": _safe(merge_range),
+                "stitch": _safe(stitch),
+                "stitch_duration": _safe(stitch_duration),
                 "video": _safe(video_paths[0]),
             },
         }
@@ -718,7 +774,7 @@ def cmd_search(args):
                     print(f"ts={r['timestamp_formatted']}  score={r['score']:.4f}")
                 else:
                     # Merged range
-                    print(f"ts={r['start_formatted']}-{r['end_formatted']}  score={r['score_max']:.4f}  (max={r["score_max"]:.4f}, avg={r["score_avg"]:.4f}, n={r["sample_count"]})")
+                    print(f"ts={r['start_formatted']}-{r['end_formatted']}  score={r['score_max']:.4f}  (max={r['score_max']:.4f}, avg={r['score_avg']:.4f}, n={r['sample_count']})")
         else:
             print("No matches found.")
 
@@ -747,6 +803,8 @@ def main():
     p_search.add_argument("--same-scene-threshold", type=float, default=None, help="Similarity (0-1) above which frames are considered same scene (default: 0.80)")
     p_search.add_argument("--max-scene-batch-size", type=int, default=None, help="Maximum number of consecutive same-scene frames per Ollama request (default: 4, capped by Ollama limit)")
     p_search.add_argument("--merge-range", action="store_true", default=False, help="Merge same-scene batches into timestamp ranges in output")
+    p_search.add_argument("--stitch", type=str, default=None, help="Stitch matched ranges/timestamps into a single output video. Pass a file path or a directory (a filename will be auto-generated)")
+    p_search.add_argument("--stitch-duration", type=float, default=None, help="Clip duration (seconds) to extract for each unmerged timestamp when stitching (default: 2.0)")
     p_search.add_argument("--recursive", "-R", action="store_true", default=False, help="Recursively scan directories for video files")
     p_search.add_argument("--cache", "-c", type=str, default=None, help="Path to cache directory to look up existing cache files. Overrides config 'cache_dir'. Only used when this flag is given")
     p_search.add_argument("--save-cache", "-sc", type=str, default=None, nargs="?", const=".", help="Path to cache directory for saving search results. Overrides config 'save_cache_dir'. Defaults to current directory (.) if used without a path")
