@@ -653,27 +653,43 @@ def cmd_search(args):
         final_results = final_results[:top_k]
     final_results.sort(key=lambda x: (x.get("source_video_path", ""), x["timestamp_seconds"]))
 
-    # Merge same-scene batches into timestamp ranges if --merge-range enabled
+    # Merge same-scene batches and adjacent timestamps (within sample_rate) into ranges if --merge-range enabled
     if merge_range:
         merged = []
         for r in final_results:
             vid = r.get("source_video_path", "")
             bid = r.get("batch_id")
-            # Only merge consecutive frames that share a real batch_id (skip legacy cache entries with None)
-            if merged and bid is not None and merged[-1].get("video_path") == vid and merged[-1].get("batch_id") == bid:
-                # Extend current range
-                merged[-1]["end_seconds"] = r["timestamp_seconds"]
-                merged[-1]["sample_count"] += 1
-                # Update avg score
-                old_avg = merged[-1]["score_avg"]
-                old_n = merged[-1]["sample_count"] - 1
-                merged[-1]["score_avg"] = (old_avg * old_n + r["score"]) / merged[-1]["sample_count"]
+            ts = r["timestamp_seconds"]
+            if merged and merged[-1].get("video_path") == vid:
+                prev_end = merged[-1]["end_seconds"]
+                # Merge if same batch_id OR if gap <= sample_rate (adjacent samples)
+                same_batch = bid is not None and merged[-1].get("batch_id") == bid
+                close_enough = (ts - prev_end) <= sample_rate + 0.5  # small tolerance
+                if same_batch or close_enough:
+                    # Extend current range
+                    merged[-1]["end_seconds"] = ts
+                    merged[-1]["sample_count"] += 1
+                    # Update avg score
+                    old_avg = merged[-1]["score_avg"]
+                    old_n = merged[-1]["sample_count"] - 1
+                    merged[-1]["score_avg"] = (old_avg * old_n + r["score"]) / merged[-1]["sample_count"]
+                    merged[-1]["score_max"] = max(merged[-1]["score_max"], r["score"])
+                else:
+                    merged.append({
+                        "video_path": vid,
+                        "batch_id": bid,
+                        "start_seconds": ts,
+                        "end_seconds": ts,
+                        "score_max": r["score"],
+                        "score_avg": r["score"],
+                        "sample_count": 1,
+                    })
             else:
                 merged.append({
                     "video_path": vid,
                     "batch_id": bid,
-                    "start_seconds": r["timestamp_seconds"],
-                    "end_seconds": r["timestamp_seconds"],
+                    "start_seconds": ts,
+                    "end_seconds": ts,
                     "score_max": r["score"],
                     "score_avg": r["score"],
                     "sample_count": 1,
@@ -709,11 +725,18 @@ def cmd_search(args):
                 duration = stitch_duration
                 src = r.get("source_video_path", video_paths[0])
             seg_path = os.path.join(stitch_dir, f"seg_{len(segments):06d}.mp4")
+            # Re-encode so cuts are frame-accurate. With re-encoding, -ss before -i
+            # is both fast (keyframe seek) and accurate (ffmpeg decodes forward to the
+            # exact start), avoiding the keyframe-snapping that made -c copy jumpy.
+            # All segments share the same codec params so the final concat uses -c copy.
             cmd = [
                 "ffmpeg", "-y", "-v", "error",
-                "-ss", str(start), "-i", src,
+                "-ss", str(start),
+                "-i", src,
                 "-t", str(duration),
-                "-c", "copy", seg_path,
+                "-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
+                "-c:a", "aac", "-avoid_negative_ts", "make_zero",
+                seg_path,
             ]
             try:
                 subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
