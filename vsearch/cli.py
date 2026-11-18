@@ -143,11 +143,19 @@ def _save_cache(cache_dir, video_path, sample_rate, frame_scale, state, instruct
             "batch_id_counter": batch_id_counter,
             "passing_count": passing_count,
         }
-        with open(cache_file, "w", encoding="utf-8") as f:
+        tmp_file = cache_file + ".tmp"
+        with open(tmp_file, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2)
+        os.replace(tmp_file, cache_file)
         print(f"cache saved {cache_file}", file=sys.stderr)
     except OSError as e:
         print(f"Warning: Failed to save cache file {cache_file}: {e}", file=sys.stderr)
+        # Clean up temp file on failure
+        try:
+            if os.path.exists(cache_file + ".tmp"):
+                os.remove(cache_file + ".tmp")
+        except OSError:
+            pass
 
 
 def _resolve_video_paths(inputs, recursive=False, extensions=None):
