@@ -126,147 +126,97 @@ ollama_instructions_template = ""
 
 ## Search Cache
 
-Search results can be cached to JSON files to avoid re-running expensive Ollama validation on the same video + query combination. Cache is **opt-in** — it's only used when you explicitly pass the `--cache-dir` flag.
+The cache is a **SQLite database** stored on disk, enabling fast lookups, concurrent reads (safe for AI agents), and custom SQL queries for advanced users.
 
-The unified `--cache-dir` flag handles both lookup and save:
-- **If a cache file exists** → results are loaded (lookup) and the run is skipped.
-- **If no cache file exists** → the run proceeds and after completion a cache file is saved to that directory.
+### Unified `--cache-dir` Flag
 
-The legacy `--cache` and `--save-cache` flags are deprecated but still honored for backward compatibility.
+The `--cache-dir` flag serves double duty:
 
-### Cache File Naming
-
-Cache files are named as:
-
-```
-<content_hash><params_hash>.json
-```
-
-Where:
-- `content_hash` — BLAKE2b of the first and last 8 MB of the video file (16 hex chars)
-- `params_hash` — BLAKE2b of `sample_rate | frame_scale | state | instructions | model` (16 hex chars)
-
-The two hashes are mixed into a single 16-char hex filename.
-
-### Cache Scope
-
-Cache is **sample-mode only**.
-
-### Cache Reusability
-
-The cache stores **all validated frames** (not just those passing the floor), so you can reuse it with different `decision_model_floor` thresholds without re-running Ollama:
+- **If a matching cache entry exists** (same video content + same Ollama params) -> results loaded instantly from disk (no Ollama calls).
+- **If no match** -> full search runs, results saved to the SQLite database after completion.
 
 ```bash
-# First run: save full cache
-vsearch search myvideo.mp4 --ollama-state "..." --ollama-instructions "..." \
-  --decision-model-floor 0.8 --decision-model-sample-rate 3 \
-  --cache-dir /tmp/cache
+# First run: full search, saves to cache DB
+vsearch search video.mp4 --ollama-state "A user is searching for: a person" --ollama-instructions "Does the image match the query: a person?" --cache-dir /tmp/cache
 
-# Later: reuse with lower floor (no Ollama calls!)
-vsearch search myvideo.mp4 --ollama-state "..." --ollama-instructions "..." \
-  --decision-model-floor 0.4 --decision-model-sample-rate 3 \
-  --cache-dir /tmp/cache
+# Second run: cache hit (instant, no Ollama)
+vsearch search video.mp4 --ollama-state "A user is searching for: a person" --ollama-instructions "Does the image match the query: a person?" --cache-dir /tmp/cache
 ```
 
-**Reusable across**: `decision_model_floor`, `top_k`, `global_k`
-**Not reusable across**: `decision_model_sample_rate`, `ollama_frame_scale`, `ollama_state`, `ollama_instructions`, `ollama_model`
+### Cache Key (content + params)
 
-### Unified Cache (`--cache-dir`)
+The cache matches on **both** video content and Ollama parameters:
 
-Use `--cache-dir /path/to/cache` to look up **and**, if no cache hit occurs, save results. If a matching cache file exists (same video, query, and parameters), the search is skipped and cached results are returned instantly. If not, the run proceeds and writes a new cache file to the same directory after completion.
+| Component | Description |
+|-----------|-------------|
+| `content_hash` | BLAKE2b of first/last 8 MB of video file |
+| `params_hash` | BLAKE2b of `sample_rate | frame_scale | state | instructions | model` |
+
+If either changes, it's a cache miss. This ensures correctness when you change sampling rate, frame scale, state, instructions, or model between runs.
+
+### Cache Management CLI
+
+New `vsearch cache` subcommand for managing the SQLite cache:
 
 ```bash
-# First run: no cache, performs full search, saves results
-vsearch search myvideo.mp4 --ollama-state "A user is searching for: a person" --ollama-instructions "Does the image match the query: a person?" --cache-dir /tmp/cache
+# List all cached videos
+vsearch cache list --cache-dir /tmp/cache
 
-# Second run: cache hit, returns instantly without Ollama
-vsearch search myvideo.mp4 --ollama-state "A user is searching for: a person" --ollama-instructions "Does the image match the query: a person?" --cache-dir /tmp/cache
+# Show cache statistics (videos count, frames count)
+vsearch cache stats --cache-dir /tmp/cache
+
+# Prune entries older than N days (default 30)
+vsearch cache prune 7 --cache-dir /tmp/cache  # keep only last 7 days
+
+# Execute custom SQL query
+vsearch cache sql "SELECT video_path, COUNT(*) AS frame_count FROM frames GROUP BY video_path" --cache-dir /tmp/cache
 ```
 
 ### Cache Hit Behavior
 
-- **Cache hit**: No Ollama calls, no frame extraction — results loaded from disk, filtered by current `decision_model_floor`
-- **Cache miss**: Full search runs, results saved to cache directory (if `--cache-dir` provided)
-- **Parameter mismatch**: If sample rate, frame scale, state, instructions, or model differ, cache is treated as miss
-- **Video change**: If video content changes (first/last 8 MB differ), cache is invalidated
+- **Exact cache hit**: SQLite lookup matches video content + params -> results loaded instantly, filtered by current `decision_model_floor` threshold
+- **Cache miss**: Video not in DB or params changed -> full Ollama inference runs, results saved to DB
+- **Params-aware**: The database stores `content_hash` and `params_hash` -- changing sample_rate, frame_scale, state, instructions, or model triggers a new run
 
 ### Multi-Video Search
 
-Cache works **per video file**, not per search session:
+Cache works **per video file**:
 
-- Each video in a multi-video search (multiple paths, directory, or glob pattern) gets its own cache entry
-- If a video has a cache hit, it is skipped (no Ollama calls)
-- If a video has a cache miss, it is searched normally
-- Results from all videos are combined and sorted chronologically
+- Each video in a multi-video search gets its own cache entry
+- Cache-hit videos are skipped (no Ollama calls)
+- Cache-miss videos are searched normally
+- Results combined and sorted chronologically
 
 ```bash
-# Search 2 videos: video1 has cache, video2 does not
+# Example: video1 cached, video2 not
 vsearch search video1.mp4 video2.mp4 --ollama-state "..." --ollama-instructions "..." --cache-dir /tmp/cache
-# → video1: cache hit (instant), video2: full search
+# -> video1: cache hit, video2: full search
 
-# Search directory with 5 videos, all cached
+# Example: 5 videos all cached
 vsearch search /path/to/videos/ --ollama-state "..." --ollama-instructions "..." --cache-dir /tmp/cache
-# → all 5: cache hits (instant)
+# -> all 5: cache hits
 ```
 
-### Cache File Format
+### AI Agent Usage
 
-```json
-{
-  "version": 1,
-  "video_path": "/mnt/hdd/myvideo.mp4",
-  "query": "A user is searching for: a person running",
-  "created_at": "2025-01-15T10:30:00+00:00",
-  "parameters": {
-    "decision_model_sample_rate": 3,
-    "ollama_frame_scale": 0.2,
-    "ollama_state_template": "A user is searching for: {query}",
-    "ollama_instructions_template": "Does the image match the query: {query}?",
-    "ollama_model": "clef-flash:9b"
-  },
-  "all_results": [
-    {
-      "timestamp_seconds": 125.3,
-      "timestamp_formatted": "00:02:05",
-      "score": 0.92,
-      "source_video_path": "/mnt/hdd/myvideo.mp4"
-    },
-    {
-      "timestamp_seconds": 130.1,
-      "timestamp_formatted": "00:02:10",
-      "score": 0.67,
-      "source_video_path": "/mnt/hdd/myvideo.mp4"
-    },
-    {
-      "timestamp_seconds": 145.8,
-      "timestamp_formatted": "00:02:25",
-      "score": 0.31,
-      "source_video_path": "/mnt/hdd/myvideo.mp4"
-    }
-  ],
-  "metadata": {
-    "total_extracted": 45,
-    "total_validated": 40,
-    "search_time_seconds": 12.5,
-    "cached": false
-  },
-  "frame_index": 45,
-  "batch_id_counter": 12,
-  "passing_count": 18
-}
+For AI agents using vsearch as a tool:
+
+```bash
+# Initialize/check cache DB
+vsearch cache stats --cache-dir /path/to/cache
+
+# Search with caching
+vsearch search video.mp4 --ollama-state "..." --ollama-instructions "..." --cache-dir /path/to/cache
+
+# Re-run with different floor (cache hit, no Ollama calls needed):
+vsearch search video.mp4 --ollama-state "..." --ollama-instructions "..." --cache-dir /path/to/cache --decision-model-floor 0.3
+
+# Inspect what's cached
+vsearch cache list --cache-dir /path/to/cache
+
+# Custom SQL query on cache
+vsearch cache sql "SELECT video_path, COUNT(*) AS frame_count FROM frames GROUP BY video_path" --cache-dir /path/to/cache
+
+# Prune old entries
+vsearch cache prune 30 --cache-dir /path/to/cache  # keep last 30 days only
 ```
-
-`all_results` contains every validated frame with its score, regardless of `decision_model_floor`. The floor is applied at load time.
-
-- **No indexing step** — videos are read directly with OpenCV.
-- **No `.npz` cache** — frames are extracted and validated on the fly.
-- **Ollama-only scoring** — `final_score = Ollama_score`; CLIP is never invoked.
-- **Endpoint fallback** — if the configured Ollama host is unreachable, `localhost:11434` is used automatically.
-- **Same-scene batching** — frames with high visual similarity within a short window are grouped and sent to Ollama as a single multi-image batch request (max 4 frames per batch, constrained by Ollama's multi-image limit).
-
-- No indexing step — videos are read directly with OpenCV.
-- No `.npz` cache — frames are extracted and validated on the fly.
-- Ollama-only scoring — `final_score = Ollama_score`; CLIP is never invoked.
-- Endpoint fallback — if the configured Ollama host is unreachable, `localhost:11434` is used automatically.
-- Same-scene batching — frames with high visual similarity within a short window are grouped and sent to Ollama as a single multi-image batch request (max 4 frames per batch, constrained by Ollama's multi-image limit).
-
