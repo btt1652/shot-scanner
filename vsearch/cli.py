@@ -947,6 +947,7 @@ def cmd_classify(args):
     max_scene_batch_size = min(max_scene_batch_size, 4)
     merge_range = cfg_val("merge_range", "merge_range")
     ollama_timeout = cfg_val("ollama_timeout", "ollama_timeout")
+    top_choice = cfg_val("ollama_top_choice", "top_choice")
 
     if not state_template:
         state_template = ""
@@ -1173,6 +1174,9 @@ def cmd_classify(args):
 
     # Build final results
     all_results_filtered = [r for r in all_results if r.get("score", 0) >= decision_model_floor]
+    if top_choice:
+        choices_set = {c.strip() for c in top_choice.split(",") if c.strip()}
+        all_results_filtered = [r for r in all_results_filtered if r.get("top_choice") in choices_set]
     all_results_filtered.sort(key=lambda x: x["score"], reverse=True)
 
     if merge_range:
@@ -1318,6 +1322,7 @@ def main():
     p_classify.add_argument("--ollama-classify-question", "-cq", type=str, default=None, help="Question name (e.g., 'team')")
     p_classify.add_argument("--ollama-classify-instructions", "-ci", type=str, default=None, help="Instructions for the choice question (e.g., 'Which team should handle this scene?')")
     p_classify.add_argument("--ollama-classify-criteria", "-cc", type=str, default=None, help="Criteria as JSON dict {\"key\": \"desc\"} or multiline 'key: description'")
+    p_classify.add_argument("--top-choice", "-tc", type=str, default=None, help="Only keep results where top_choice matches this value (comma-separated for multiple). E.g., 'technical' or 'billing,technical'")
     p_classify.set_defaults(func=cmd_classify)
 
 

@@ -60,6 +60,8 @@ CLIP is not involved in scoring at all.
 |------|-------|-------------|
 | `--top-k` | `-k` | Maximum number of top results to return (default: all passing) |
 | `--global-k` | `-gk` | Global top-K across all videos, overriding `--top-k` |
+| `--top-choice` | `-tc` | Only keep results where `top_choice` matches this value. Comma-separated for multiple choices (e.g., `technical` or `billing,technical`). Defaults to all choices. |
+| `--decision-model-floor` | `-dmt` | Ollama score threshold (default: 0.5) |
 | `--json` | | Output results as strict JSON |
 | `--save-frames` | `-sf` | Directory to save matched frame images as {video_name}_{HHMMSS}_{score}_{norm_score}.jpg |
 | `--decision-model-floor` | `-dmt` | Ollama score threshold (default: 0.5) |
@@ -103,6 +105,7 @@ ollama_instructions_template = ""
 - `ollama_instructions_template` — instructions string sent to Ollama (default: empty)
 - `ollama_search_question` — search question name (default: `is_valid`)
 - `ollama_search_question_type` — search question type (default: `noul`)
+- `ollama_top_choice` — comma-separated choice(s) to keep in classify results (default: empty = keep all)
 
 ## Performance Tips
 
