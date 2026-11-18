@@ -22,6 +22,7 @@ import numpy as np
 from PIL import Image
 
 from .config import load_config, get_config_value
+from .cache import CacheDB, _content_hash, _params_hash
 
 DEFAULT_VIDEO_EXTENSIONS = [".mp4", ".avi", ".mov", ".mkv", ".webm", ".flv", ".wmv"]
 
@@ -29,127 +30,114 @@ DEFAULT_VIDEO_EXTENSIONS = [".mp4", ".avi", ".mov", ".mkv", ".webm", ".flv", ".w
 MAX_SCENE_BATCH_SIZE = 4
 
 
-def _hash_video_content(video_path, chunk_mb=8):
-    """Hash first and last N MB of video file using BLAKE2b. Returns raw digest bytes."""
-    size = os.path.getsize(video_path)
-    chunk = chunk_mb * 1024 * 1024
-    h = hashlib.blake2b(digest_size=32)
-    with open(video_path, "rb") as f:
-        h.update(f.read(min(chunk, size)))
-        if size > 2 * chunk:
-            f.seek(-chunk, os.SEEK_END)
-            h.update(f.read(chunk))
-    return h.digest()
 
-
-def _hash_params(sample_rate, frame_scale, state, instructions, model, criteria_json=None, same_scene_threshold=None, still_frame_threshold=None):
-    """Hash search params.
-
-    Includes same_scene_threshold and still_frame_threshold so that changing scene
-    grouping behavior invalidates the cache. max_scene_batch_size is fixed at 4
-    (Ollama limit) and not part of the key.
-    """
-    s = f"{sample_rate}|{frame_scale}|{state}|{instructions}|{model}"
-    if criteria_json is not None:
-        s = f"{s}|{criteria_json}"
-    if same_scene_threshold is not None:
-        s = f"{s}|same_scene_threshold={same_scene_threshold}"
-    if still_frame_threshold is not None:
-        s = f"{s}|still_frame_threshold={still_frame_threshold}"
-    return hashlib.blake2b(s.encode("utf-8"), digest_size=32).digest()
-
-
-def _cache_filename(video_path, sample_rate, frame_scale, state, instructions, model, criteria_json=None, same_scene_threshold=None, still_frame_threshold=None):
-    """Build cache filename: <single_hash>.json from content + params."""
-    content_bytes = _hash_video_content(video_path)
-    params_bytes = _hash_params(sample_rate, frame_scale, state, instructions, model, criteria_json, same_scene_threshold, still_frame_threshold)
-    h = hashlib.blake2b()
-    h.update(content_bytes)
-    h.update(params_bytes)
-    return f"{h.hexdigest()[:16]}.json"
 
 
 def _try_load_cache(cache_dir, video_path, sample_rate, frame_scale, state, instructions, model, decision_model_floor, criteria_json=None, same_scene_threshold=None, still_frame_threshold=None):
-    """Try to load cached results.
+    """Try to load cached results from SQLite cache.
 
     Returns (results, data) where:
-      - Complete cache (total_extracted >= total_sampled): results = floor-filtered all_results, data = full cache dict.
-      - Incomplete cache (cancelled run): results = None, data = full cache dict (caller resumes from frame_index).
-      - Cache miss/unreadable: results = None, data = None.
-
-    Filters all_results by decision_model_floor at load time so cache is
-    reusable across different floor thresholds.
+      - Cache hit: results = floor-filtered frames, data = {'video_id': ..., 'video_path': ...}
+      - Cache miss/incomplete: results = None, data = None
     """
     if not cache_dir:
         return None, None
-    fname = _cache_filename(video_path, sample_rate, frame_scale, state, instructions, model, criteria_json, same_scene_threshold, still_frame_threshold)
-    cache_file = os.path.join(cache_dir, fname)
-    print(f"Cache lookup: {cache_file}", file=sys.stderr)
-    if not os.path.exists(cache_file):
-        print(f"Cache miss: {cache_file}", file=sys.stderr)
-        return None, None
     try:
-        with open(cache_file, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        all_results = data.get("all_results")
-        if all_results is None:
-            all_results = data.get("results", [])
-        # total_sampled is the number of frames actually sampled (not raw video frames)
-        total_sampled = data.get("total_sampled")
-        total_extracted = data.get("total_extracted")
-        if total_sampled is not None and total_extracted is not None:
-            if total_extracted < total_sampled:
-                print(f"Cache incomplete: {cache_file} (extracted={total_extracted}/{total_sampled}) — resuming", file=sys.stderr)
-                return None, data
-        results = [r for r in all_results if r.get("score", 0) >= decision_model_floor]
-        print(f"Cache hit: {cache_file} ({len(results)} results after floor filter, {len(all_results)} total)", file=sys.stderr)
-        return results, data
-    except (json.JSONDecodeError, OSError) as e:
-        print(f"Warning: Failed to read cache file {cache_file}: {e}", file=sys.stderr)
+        cache_db = CacheDB(cache_dir)
+        # Build params hash to match the query
+        params = {
+            "sample_rate": sample_rate,
+            "frame_scale": frame_scale,
+            "state": state,
+            "instructions": instructions,
+            "model": model,
+        }
+        if criteria_json:
+            params["criteria_json"] = criteria_json
+        if same_scene_threshold:
+            params["same_scene_threshold"] = same_scene_threshold
+        if still_frame_threshold:
+            params["still_frame_threshold"] = still_frame_threshold
+        params_hash = _params_hash(**params)
+        content_hash = _content_hash(video_path)
+        
+        video = cache_db.get_video(video_path)
+        if video is None:
+            print(f"Cache miss: video {video_path} not in cache", file=sys.stderr)
+            return None, None
+        
+        # Check if params match (content + params hash)
+        if video.get("content_hash") != content_hash or video.get("params_hash") != params_hash:
+            print(f"Cache miss: params or video content changed for {video_path}", file=sys.stderr)
+            return None, None
+        
+        # Get frames filtered by decision_model_floor
+        frames = cache_db.get_frames(video["id"], min_score=decision_model_floor)
+        if not frames:
+            print(f"Cache miss: no frames pass floor for {video_path}", file=sys.stderr)
+            return None, None
+        
+        print(f"Cache hit: {video_path} ({len(frames)} frames)", file=sys.stderr)
+        return frames, {"video_id": video["id"], "video_path": video_path}
+    except Exception as e:
+        print(f"Warning: Failed to read cache: {e}", file=sys.stderr)
         return None, None
 
 
 def _save_cache(cache_dir, video_path, sample_rate, frame_scale, state, instructions, model, all_results, metadata, total_sampled=None, total_validated=None, total_extracted=None, frame_index=None, passing_count=None, criteria_json=None, batch_id_counter=None, same_scene_threshold=None, still_frame_threshold=None):
-    """Save all results (including resume state) to a cache JSON file."""
+    """Save all results to SQLite cache."""
     if not cache_dir:
         return
-    fname = _cache_filename(video_path, sample_rate, frame_scale, state, instructions, model, criteria_json, same_scene_threshold, still_frame_threshold)
-    cache_file = os.path.join(cache_dir, fname)
     try:
-        os.makedirs(cache_dir, exist_ok=True)
-        data = {
-            "video_path": video_path,
-            "query": state or instructions or "",
-            "created_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-            "parameters": {
-                "decision_model_sample_rate": sample_rate,
-                "ollama_frame_scale": frame_scale,
-                "ollama_state_template": state,
-                "ollama_instructions_template": instructions,
-                "ollama_model": model,
-            },
-            "all_results": all_results,
-            "metadata": metadata,
-            "total_sampled": total_sampled,
-            "total_validated": total_validated,
-            "total_extracted": total_extracted,
-            "frame_index": frame_index,
-            "batch_id_counter": batch_id_counter,
-            "passing_count": passing_count,
+        cache_db = CacheDB(cache_dir)
+        
+        # Build params hash
+        params = {
+            "sample_rate": sample_rate,
+            "frame_scale": frame_scale,
+            "state": state,
+            "instructions": instructions,
+            "model": model,
         }
-        tmp_file = cache_file + ".tmp"
-        with open(tmp_file, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2)
-        os.replace(tmp_file, cache_file)
-        print(f"cache saved {cache_file}", file=sys.stderr)
-    except OSError as e:
-        print(f"Warning: Failed to save cache file {cache_file}: {e}", file=sys.stderr)
-        # Clean up temp file on failure
-        try:
-            if os.path.exists(cache_file + ".tmp"):
-                os.remove(cache_file + ".tmp")
-        except OSError:
-            pass
+        if criteria_json:
+            params["criteria_json"] = criteria_json
+        if same_scene_threshold:
+            params["same_scene_threshold"] = same_scene_threshold
+        if still_frame_threshold:
+            params["still_frame_threshold"] = still_frame_threshold
+        params_hash = _params_hash(**params)
+        content_hash = _content_hash(video_path)
+        
+        # Upsert video metadata
+        video_id = cache_db.upsert_video(
+            video_path=video_path,
+            content_hash=content_hash,
+            params_hash=params_hash,
+            fps=None,  # Could extract from video if needed
+            total_frames=total_sampled,
+            stride=sample_rate,
+        )
+        
+        # Prepare frames with frame_index
+        frames_to_save = []
+        for i, frame in enumerate(all_results):
+            frame_copy = dict(frame)
+            frame_copy["frame_index"] = frame_copy.get("frame_index", i)
+            frames_to_save.append(frame_copy)
+        
+        # Upsert frames
+        cache_db.upsert_frames(video_id, frames_to_save)
+        
+        # Mark video as complete
+        with cache_db.conn:
+            cache_db.conn.execute(
+                "UPDATE videos SET cache_status = 'complete' WHERE id = ?",
+                (video_id,),
+            )
+        
+        print(f"cache saved {video_path} ({len(frames_to_save)} frames)", file=sys.stderr)
+    except Exception as e:
+        print(f"Warning: Failed to save cache: {e}", file=sys.stderr)
 
 
 def _resolve_video_paths(inputs, recursive=False, extensions=None):
@@ -560,12 +548,34 @@ def cmd_search(args):
                 continue
             # Cache incomplete - resume from stored frame index if available
             if cache_data is not None:
-                frame_index = int(cache_data.get("frame_index", 0))
-                passing_count = int(cache_data.get("passing_count", 0))
-                total_extracted = int(cache_data.get("total_extracted", 0))
-                total_validated = int(cache_data.get("total_validated", 0))
-                batch_id_counter = int(cache_data.get("batch_id_counter", batch_id_counter))
-                print(f"Resuming from cache: frame_index={frame_index}, validated={total_validated}", file=sys.stderr)
+                video_id = cache_data.get("video_id")
+                if video_id is not None:
+                    cache_db = CacheDB(cache_dir)
+                    # Get last frame index for resume
+                    last_frame = cache_db.execute_sql(
+                        "SELECT MAX(frame_index) AS max_idx FROM frames WHERE video_id = ?",
+                        (video_id,),
+                    )
+                    if last_frame and last_frame[0]["max_idx"] is not None:
+                        frame_index = last_frame[0]["max_idx"]
+                    # Get passing count (frames with score >= floor)
+                    passing_rows = cache_db.execute_sql(
+                        "SELECT COUNT(*) AS n FROM frames WHERE video_id = ? AND score >= ?",
+                        (video_id, decision_model_floor),
+                    )
+                    if passing_rows:
+                        passing_count = passing_rows[0]["n"]
+                    # Get last batch_id
+                    batch_rows = cache_db.execute_sql(
+                        "SELECT MAX(batch_id) AS max_bid FROM frames WHERE video_id = ?",
+                        (video_id,),
+                    )
+                    if batch_rows and batch_rows[0]["max_bid"] is not None:
+                        batch_id_counter = batch_rows[0]["max_bid"]
+                    print(f"Resuming from cache: frame_index={frame_index}, validated={passing_count}", file=sys.stderr)
+                    cache_db.close()
+                else:
+                    print(f"Cache incomplete for {vp} - resuming from frame 0", file=sys.stderr)
 
         cap = cv2.VideoCapture(vp)
         if not cap.isOpened():
@@ -1094,12 +1104,35 @@ def cmd_classify(args):
                 print(f"Loaded {len(cache_results)} result(s) from cache for {vp}", file=sys.stderr)
                 continue
             if cache_data is not None:
-                frame_index = int(cache_data.get("frame_index", 0))
-                passing_count = int(cache_data.get("passing_count", 0))
-                total_extracted = int(cache_data.get("total_extracted", 0))
-                total_validated = int(cache_data.get("total_validated", 0))
-                batch_id_counter = int(cache_data.get("batch_id_counter", batch_id_counter))
-                print(f"Resuming from cache: frame_index={frame_index}, validated={total_validated}", file=sys.stderr)
+                video_id = cache_data.get("video_id")
+                if video_id is not None:
+                    cache_db = CacheDB(cache_dir)
+                    # Get last frame index for resume
+                    last_frame = cache_db.execute_sql(
+                        "SELECT MAX(frame_index) AS max_idx FROM frames WHERE video_id = ?",
+                        (video_id,),
+                    )
+                    if last_frame and last_frame[0]["max_idx"] is not None:
+                        frame_index = last_frame[0]["max_idx"]
+                    # Get passing count (frames with score >= floor)
+                    # Note: classify frames don't have a "score" column, they have "top_probability"
+                    passing_rows = cache_db.execute_sql(
+                        "SELECT COUNT(*) AS n FROM frames WHERE video_id = ?",
+                        (video_id,),
+                    )
+                    if passing_rows:
+                        passing_count = passing_rows[0]["n"]
+                    # Get last batch_id
+                    batch_rows = cache_db.execute_sql(
+                        "SELECT MAX(batch_id) AS max_bid FROM frames WHERE video_id = ?",
+                        (video_id,),
+                    )
+                    if batch_rows and batch_rows[0]["max_bid"] is not None:
+                        batch_id_counter = batch_rows[0]["max_bid"]
+                    print(f"Resuming from cache: frame_index={frame_index}, validated={passing_count}", file=sys.stderr)
+                    cache_db.close()
+                else:
+                    print(f"Cache incomplete for {vp} - resuming from frame 0", file=sys.stderr)
 
         cap = cv2.VideoCapture(vp)
         if not cap.isOpened():
@@ -1301,6 +1334,57 @@ def cmd_classify(args):
         else:
             print("No matches found.")
 
+def _print_table(rows):
+    """Print a list of dicts as an aligned text table."""
+    if not rows:
+        print("(no rows)")
+        return
+    cols = list(rows[0].keys())
+    widths = {c: max(len(str(c)), max(len(str(r.get(c, ""))) for r in rows)) for c in cols}
+    print("  ".join(str(c).ljust(widths[c]) for c in cols))
+    print("  ".join("-" * widths[c] for c in cols))
+    for r in rows:
+        print("  ".join(str(r.get(c, "")).ljust(widths[c]) for c in cols))
+
+
+def cmd_cache(args):
+    """Cache management subcommand.
+
+    Usage:
+        vsearch cache list [--cache-dir DIR]
+        vsearch cache stats [--cache-dir DIR]
+        vsearch cache prune [DAYS] [--cache-dir DIR]
+        vsearch cache sql \"SELECT ...\" [--cache-dir DIR]
+    """
+    cache_db = CacheDB(args.cache_dir or "/tmp/cache")
+    try:
+        if getattr(args, "list", False):
+            _print_table(cache_db.list_videos(limit=args.limit or 50))
+        elif getattr(args, "stats", False):
+            videos = cache_db.list_videos(limit=10000)
+            frame_count = cache_db.execute_sql("SELECT COUNT(*) AS n FROM frames")
+            total_frames = frame_count[0]["n"] if frame_count else 0
+            print(f"Cache directory: {args.cache_dir or '/tmp/cache'}")
+            print(f"Database:        {cache_db.db_path}")
+            print(f"Total videos:    {len(videos)}")
+            print(f"Total frames:    {total_frames}")
+        elif getattr(args, "prune", None) is not None:
+            days = args.prune or 30
+            cache_db.prune_old(max_age_days=days)
+            cache_db.set_stat("last_prune", str(days))
+            print(f"Pruned cache entries older than {days} days.")
+        elif getattr(args, "sql", None):
+            sql = args.sql
+            if sql.lstrip().upper().startswith(("SELECT", "PRAGMA", "WITH", "EXPLAIN")):
+                _print_table(cache_db.execute_sql(sql))
+            else:
+                rowcount = cache_db.execute_sql_command(sql)
+                print(f"OK ({rowcount} rows affected)")
+        else:
+            print("Usage: vsearch cache {list|stats|prune|sql} [--cache-dir DIR]")
+    finally:
+        cache_db.close()
+
 
 def main():
     parser = argparse.ArgumentParser(
@@ -1361,6 +1445,23 @@ def main():
     p_classify.add_argument("--ollama-classify-criteria", "-cc", type=str, default=None, help="Criteria as JSON dict {\"key\": \"desc\"} or multiline 'key: description'")
     p_classify.add_argument("--top-choice", "-tc", type=str, default=None, help="Only keep results where top_choice matches this value (comma-separated for multiple). E.g., 'technical' or 'billing,technical'")
     p_classify.set_defaults(func=cmd_classify)
+
+    # Cache management subcommand
+    p_cache = sub.add_parser("cache", help="Manage the search/classify result cache")
+    cache_parent = argparse.ArgumentParser(add_help=False)
+    cache_parent.add_argument("--cache-dir", type=str, default=None, help="Cache directory (default: /tmp/cache)")
+    cache_sub = p_cache.add_subparsers(dest="cache_action", required=True)
+    p_list = cache_sub.add_parser("list", parents=[cache_parent], help="List cached videos")
+    p_list.add_argument("--limit", type=int, default=50, help="Max number of videos to list (default: 50)")
+    p_list.set_defaults(func=cmd_cache, list=True, stats=False, prune=None, sql=None)
+    p_stats = cache_sub.add_parser("stats", parents=[cache_parent], help="Show cache statistics")
+    p_stats.set_defaults(func=cmd_cache, list=False, stats=True, prune=None, sql=None)
+    p_prune = cache_sub.add_parser("prune", parents=[cache_parent], help="Prune old cache entries")
+    p_prune.add_argument("prune", type=int, nargs="?", default=30, help="Delete entries older than N days (default: 30)")
+    p_prune.set_defaults(func=cmd_cache, list=False, stats=False, sql=None)
+    p_sql = cache_sub.add_parser("sql", parents=[cache_parent], help="Execute custom SQL query against cache database")
+    p_sql.add_argument("sql", type=str, help="SQL query to execute (SELECT for read-only, others for modification)")
+    p_sql.set_defaults(func=cmd_cache, list=False, stats=False, prune=None)
 
 
     args = parser.parse_args()
