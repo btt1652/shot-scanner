@@ -258,6 +258,9 @@ vsearch cache list --cache-dir /path/to/cache
 # Custom SQL query on cache
 vsearch cache sql "SELECT video_path, top_choice, COUNT(*) FROM frames GROUP BY video_path, top_choice" --cache-dir /path/to/cache
 
+# Query frames by secondary choice probability (even if not the top choice)
+vsearch cache sql "SELECT video_path, timestamp_seconds FROM frames WHERE json_extract(probabilities_json, '$.technical') > 0.5" --cache-dir /path/to/cache
+
 # Prune old entries
 vsearch cache prune 30 --cache-dir /path/to/cache  # keep last 30 days only
 ```
