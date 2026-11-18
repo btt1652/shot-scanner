@@ -1,8 +1,7 @@
 """Config handling for vsearch.
 
-The config file contains per-mode sections:
-  [search]   — decision-model-only search mode defaults
-  [classify] — classify (choice-question) mode defaults
+The config file contains a [classify] section for choice-question
+classification defaults.
 
 CLI flags always override config values when given.
 
@@ -25,22 +24,6 @@ def get_config_path() -> Path:
 
 def default_config() -> dict:
     return {
-        "search": {
-            "top_k": -1,
-            "json_output": False,
-            "save_frames": None,
-            "decision_model_floor": 0.5,
-            "decision_model_sample_rate": 1,
-            "ollama_host": "192.168.1.190",
-            "ollama_frame_scale": 0.2,
-            "ollama_decision_model": "clef-flash:9b",
-            "ollama_timeout": 60,
-            "ollama_state_template": "",
-            "ollama_instructions_template": "",
-            "ollama_search_question": "is_valid",
-            "ollama_search_question_type": "noul",
-            "cache_dir": "/tmp",
-        },
         "classify": {
             "top_k": -1,
             "json_output": False,

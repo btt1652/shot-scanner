@@ -72,7 +72,7 @@ def _try_load_cache(cache_dir, video_path, sample_rate, frame_scale, state, inst
             return None, None
         
         # Get frames filtered by decision_model_floor
-        frames = cache_db.get_frames(video["id"], min_score=decision_model_floor)
+        frames = cache_db.get_frames(video["id"], min_probability=decision_model_floor)
         if not frames:
             print(f"Cache miss: no frames pass floor for {video_path}", file=sys.stderr)
             return None, None
@@ -252,610 +252,6 @@ def resolve_ollama_endpoint(primary_endpoint):
     _ollama_resolved_endpoint = fallback
     return fallback
 
-def _extract_frame_at(video_path, timestamp, out_path):
-    """Extract a single frame at given timestamp and save to out_path as JPEG."""
-    cmd = [
-        'ffmpeg', '-y', '-v', 'error',
-        '-ss', str(timestamp),
-        '-i', video_path,
-        '-frames:v', '1',
-        out_path
-    ]
-    try:
-        subprocess.run(
-            cmd,
-            check=True,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL
-        )
-        return True
-    except subprocess.CalledProcessError:
-        cap = cv2.VideoCapture(video_path)
-        if not cap.isOpened():
-            return False
-        fps = cap.get(cv2.CAP_PROP_FPS)
-        if fps is None or fps <= 0:
-            fps = 30.0
-        frame_number = int(timestamp * fps)
-        cap.set(cv2.CAP_PROP_POS_FRAMES, frame_number)
-        ret, frame = cap.read()
-        cap.release()
-        if not ret:
-            return False
-        cv2.imwrite(out_path, frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
-        return True
-    except Exception:
-        return False
-
-def _save_matched_frames(results, video_path, output_dir):
-    """Extract and save matched frames as JPEG images."""
-    os.makedirs(output_dir, exist_ok=True)
-    saved = 0
-    frame_paths = []
-    for r in results:
-        ts = r.get("start_seconds", r.get("timestamp_seconds"))
-        score = r.get("score_max", r.get("score"))
-        if ts >= 3600:
-            ts_formatted = f"{int(ts)//3600:02d}:{int(ts)%3600//60:02d}:{int(ts)%60:02d}"
-        else:
-            ts_formatted = f"{int(ts)//60:02d}:{int(ts)%60:02d}"
-        vp = r.get("source_video_path") or video_path
-        if vp:
-            video_name = os.path.splitext(os.path.basename(vp))[0]
-        else:
-            video_name = "video"
-        out_path = os.path.join(output_dir, f"{video_name}_{ts_formatted}_{score:.4f}.jpg")
-        if _extract_frame_at(vp, ts, out_path):
-            saved += 1
-            frame_paths.append(out_path)
-            print(f"Saved frame at {ts:.1f}s -> {out_path}", file=sys.stderr)
-        else:
-            print(f"Failed to extract frame at {ts:.1f}s from {vp}", file=sys.stderr)
-    return saved, frame_paths
-
-
-def cmd_search(args):
-    cfg = load_config()
-
-    def cfg_val(key, cli_arg):
-        return get_config_value(cfg, "search", key, getattr(args, cli_arg, None))
-
-    top_k = cfg_val("top_k", "top_k")
-    global_k = cfg_val("global_k", "global_k")
-    json_output = cfg_val("json_output", "json")
-    save_frames = cfg_val("save_frames", "save_frames")
-    decision_model_floor = cfg_val("decision_model_floor", "decision_model_floor")
-    decision_model_sample_rate = cfg_val("decision_model_sample_rate", "decision_model_sample_rate")
-    ollama_endpoint = cfg_val("ollama_host", "ollama_host")
-    ollama_model = cfg_val("ollama_decision_model", "ollama_model")
-    frame_scale = cfg_val("ollama_frame_scale", "ollama_frame_scale")
-    recursive = cfg_val("recursive", "recursive")
-    state_template = cfg_val("ollama_state_template", "ollama_state")
-    instructions_template = cfg_val("ollama_instructions_template", "ollama_instructions")
-    search_question = cfg_val("ollama_search_question", "ollama_search_question") or "is_valid"
-    search_question_type = cfg_val("ollama_search_question_type", "ollama_search_question_type") or "noul"
-    cache_dir = cfg_val("cache_dir", "cache")
-    still_frame_threshold = cfg_val("still_frame_threshold", "still_frame_threshold") or 0.95
-    same_scene_threshold = cfg_val("same_scene_threshold", "same_scene_threshold") or 0.80
-    merge_range = cfg_val("merge_range", "merge_range")
-    stitch = cfg_val("stitch", "stitch")
-    # stitch_duration is always derived from decision_model_sample_rate (the run's sample rate)
-    stitch_duration = decision_model_sample_rate if decision_model_sample_rate else 1
-
-    # Apply defaults if config/CLI left templates empty
-    if not state_template:
-        state_template = ""
-    if not instructions_template:
-        instructions_template = ""
-
-    # Apply defaults if config/CLI left templates empty
-    if not state_template:
-        state_template = ""
-    if not instructions_template:
-        instructions_template = ""
-
-    # State/instructions are the query — use state for cache identity
-    query = state_template or instructions_template or ""
-
-    # Resolve video input from positional args
-    video_input = getattr(args, "video_paths", None)
-    if not video_input:
-        print("Error: video path(s) required", file=sys.stderr)
-        sys.exit(1)
-
-    video_paths, missing = _resolve_video_paths(video_input, recursive=recursive)
-    if not video_paths:
-        print(f"Error: no video files found from input '{video_input}'", file=sys.stderr)
-        sys.exit(1)
-    for m in missing:
-        print(f"Warning: no video matched input '{m}'", file=sys.stderr)
-
-    # Resolve Ollama endpoint once
-    ollama_endpoint = resolve_ollama_endpoint(ollama_endpoint)
-
-    # Ollama timeout (seconds) — configurable via config or CLI
-    ollama_timeout = cfg_val("ollama_timeout", "ollama_timeout")
-
-    print(f"Config: top_k={top_k}, global_k={global_k}, json_output={json_output}", file=sys.stderr)
-    print(f"        save_frames={save_frames}, video={video_paths[0]}, decision_model_floor={decision_model_floor}, decision_model_sample_rate={decision_model_sample_rate}, ollama_host={ollama_endpoint}, ollama_model={ollama_model}, ollama_frame_scale={frame_scale:.2f}, ollama_state={state_template!r}, ollama_instructions={instructions_template!r}, ollama_timeout={ollama_timeout}, ollama_search_question={search_question!r}, ollama_search_question_type={search_question_type!r}", file=sys.stderr)
-
-    sample_rate = decision_model_sample_rate if decision_model_sample_rate else 1
-
-    model = ollama_model if ollama_model else "clef-flash"  # Single model only (no fallback)
-
-    batch = []
-    all_results = []
-    final_results = []
-    passing_count = 0
-    total_extracted = 0
-    total_validated = 0
-    batch_id_counter = 0
-    instantiate_save = bool(save_frames) and not (
-        global_k is not None and global_k > 0 and
-        top_k is not None and top_k > 0
-    )
-
-    def _scaled_bgr(frame_bgr):
-        """Return BGR numpy resized to frame_scale (same as _b64_from_bgr scales)."""
-        scale = frame_scale if frame_scale else 0.2
-        h, w = frame_bgr.shape[:2]
-        new_w = max(1, int(w * scale))
-        new_h = max(1, int(h * scale))
-        return cv2.resize(frame_bgr, (new_w, new_h), interpolation=cv2.INTER_AREA)
-
-    def _b64_from_bgr(frame_bgr):
-        """Encode a BGR numpy frame to scaled JPEG base64."""
-        rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
-        pil_img = Image.fromarray(rgb)
-        scale = frame_scale if frame_scale else 0.2
-        new_w = max(1, int(pil_img.width * scale))
-        new_h = max(1, int(pil_img.height * scale))
-        pil_img = pil_img.resize((new_w, new_h), Image.LANCZOS)
-        buffered = io.BytesIO()
-        pil_img.save(buffered, format="JPEG", quality=80)
-        return base64.b64encode(buffered.getvalue()).decode("utf-8")
-
-    def _validate_batch_single(frames_batch):
-        nonlocal batch_id_counter
-        """Send all frames in a batch in one multi-image Ollama request; returns results with shared batch score."""
-        results = []
-        passing = 0
-        if not frames_batch:
-            return results, passing
-        batch_id_counter += 1
-        batch_id = batch_id_counter
-
-        ts_list = ", ".join(f"{int(ts)//3600:02d}:{int(ts)%3600//60:02d}:{int(ts)%60:02d}" for ts, _, _ in frames_batch)
-        print(f"send request [{ts_list}]", file=sys.stderr)
-
-        images = [b64 for _, b64, _ in frames_batch]
-        payload = {
-            "model": model,
-            "state": state_template or "",
-            "images": images,
-            "questions": {
-                search_question: {
-                    "type": search_question_type,
-                    "instructions": instructions_template or ""
-                }
-            }
-        }
-        try:
-            req = urllib.request.Request(
-                ollama_endpoint,
-                data=json.dumps(payload).encode("utf-8"),
-                headers={"Content-Type": "application/json"}
-            )
-            with urllib.request.urlopen(req, timeout=ollama_timeout) as response:
-                res_json = json.loads(response.read().decode("utf-8"))
-            batch_score = res_json["answers"][search_question][search_question_type]
-            if isinstance(batch_score, list):
-                batch_score = max(batch_score) if batch_score else 0.0
-        except urllib.error.URLError as e:
-            print(f"Batch request failed: {e}. Discarding batch.", file=sys.stderr)
-            return results, passing
-        except Exception as e:
-            print(f"Batch request error: {e}. Discarding batch.", file=sys.stderr)
-            return results, passing
-
-        for ts, b64, vp in frames_batch:
-            ts_formatted = f"{int(ts)//3600:02d}:{int(ts)%3600//60:02d}:{int(ts)%60:02d}"
-            results.append({
-                "timestamp_seconds": ts,
-                "timestamp_formatted": ts_formatted,
-                "score": batch_score,
-                "source_video_path": vp,
-                "batch_id": batch_id,
-            })
-            if batch_score >= decision_model_floor:
-                passing += 1
-
-        pass_fail = "pass" if batch_score >= decision_model_floor else "fail"
-        print(f"response [{ts_list}] score={batch_score:.2f} {pass_fail}", file=sys.stderr)
-
-        if instantiate_save and batch_score >= decision_model_floor:
-            for ts, b64, vp in frames_batch:
-                ts_formatted = f"{int(ts)//3600:02d}:{int(ts)%3600//60:02d}:{int(ts)%60:02d}"
-                _save_matched_frames([{
-                    "timestamp_seconds": ts,
-                    "timestamp_formatted": ts_formatted,
-                    "score": batch_score,
-                    "source_video_path": vp,
-                }], vp, save_frames)
-
-        return results, passing
-
-    def _flush_batch():
-        nonlocal batch, total_validated, passing_count
-        if not batch:
-            return
-        out, passing = _validate_batch_single(batch)
-        all_results.extend(out)
-        passing_count += passing
-        total_validated += len(batch)
-        batch = []
-        # Persist validated results immediately so a cancelled run can resume
-        if save_cache_dir:
-            video_results = [r for r in all_results if r.get("source_video_path") == vp]
-            if video_results:
-                # Sort results by timestamp to ensure correct ordering in cache
-                video_results.sort(key=lambda x: x["timestamp_seconds"])
-                _save_cache(
-                    save_cache_dir, vp,
-                    sample_rate, frame_scale,
-                    state_template, instructions_template, model_for_cache,
-                    video_results, {},
-                    total_sampled=total_sampled,
-                    total_validated=total_validated,
-                    total_extracted=total_extracted,
-                    frame_index=frame_index,
-                    passing_count=passing_count,
-                    same_scene_threshold=same_scene_threshold,
-                    still_frame_threshold=still_frame_threshold,
-                )
-
-    # Unified --cache-dir takes precedence over legacy --cache/--save-cache.
-    if getattr(args, "cache_dir", None):
-        cache_dir = args.cache_dir
-    else:
-        # Legacy behavior: --cache for lookup, --save-cache for saving.
-        cache_dir = getattr(args, "cache", None) or cache_dir
-        legacy_save = getattr(args, "save_cache", None)
-        if legacy_save:
-            cache_dir = legacy_save
-    save_cache_dir = cache_dir
-
-    model_for_cache = model
-
-    # Process each video: check cache first, then search if miss
-    for vp in video_paths:
-        frame_index = 0  # default if no state
-
-        # Check cache (sample mode only). Cache stores both results and resume state.
-        if cache_dir:
-            cache_results, cache_data = _try_load_cache(
-                cache_dir, vp,
-                sample_rate, frame_scale,
-                state_template, instructions_template, model_for_cache,
-                decision_model_floor,
-                same_scene_threshold=same_scene_threshold,
-                still_frame_threshold=still_frame_threshold,
-            )
-            if cache_results is not None:
-                all_results.extend(cache_results)
-                passing_count += len(cache_results)
-                print(f"Loaded {len(cache_results)} result(s) from cache for {vp}", file=sys.stderr)
-                continue
-            # Cache incomplete - resume from stored frame index if available
-            if cache_data is not None:
-                video_id = cache_data.get("video_id")
-                if video_id is not None:
-                    cache_db = CacheDB(cache_dir)
-                    # Get last frame index for resume
-                    last_frame = cache_db.execute_sql(
-                        "SELECT MAX(frame_index) AS max_idx FROM frames WHERE video_id = ?",
-                        (video_id,),
-                    )
-                    if last_frame and last_frame[0]["max_idx"] is not None:
-                        frame_index = last_frame[0]["max_idx"]
-                    # Get passing count (frames with score >= floor)
-                    passing_rows = cache_db.execute_sql(
-                        "SELECT COUNT(*) AS n FROM frames WHERE video_id = ? AND score >= ?",
-                        (video_id, decision_model_floor),
-                    )
-                    if passing_rows:
-                        passing_count = passing_rows[0]["n"]
-                    # Get last batch_id
-                    batch_rows = cache_db.execute_sql(
-                        "SELECT MAX(batch_id) AS max_bid FROM frames WHERE video_id = ?",
-                        (video_id,),
-                    )
-                    if batch_rows and batch_rows[0]["max_bid"] is not None:
-                        batch_id_counter = batch_rows[0]["max_bid"]
-                    print(f"Resuming from cache: frame_index={frame_index}, validated={passing_count}", file=sys.stderr)
-                    cache_db.close()
-                else:
-                    print(f"Cache incomplete for {vp} - resuming from frame 0", file=sys.stderr)
-
-        cap = cv2.VideoCapture(vp)
-        if not cap.isOpened():
-            print(f"Warning: Cannot open video {vp}, skipping", file=sys.stderr)
-            continue
-
-        print(f"Processing video: {vp}", file=sys.stderr)
-
-        prev_small_gray = None
-        prev_ts = None
-
-        # Get total frame count (if available)
-        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) if cap.get(cv2.CAP_PROP_FRAME_COUNT) is not None else None
-
-        # --- Blind uniform sampling mode ---
-        fps = cap.get(cv2.CAP_PROP_FPS)
-        if fps is None or fps <= 0:
-            fps = 30.0
-        stride = max(1, int(fps * sample_rate))
-        total_sampled = int((total_frames + stride - 1) / stride) if total_frames is not None else 0
-
-        # Seek to resume position if cache provided one
-        if frame_index > 0:
-            cap.set(cv2.CAP_PROP_POS_FRAMES, frame_index)
-
-        while True:
-            ret, frame_bgr = cap.read()
-            if not ret:
-                break
-
-            if frame_index % stride == 0:
-                small_bgr = _scaled_bgr(frame_bgr)
-                small_gray = cv2.cvtColor(small_bgr, cv2.COLOR_BGR2GRAY)
-
-                b64 = _b64_from_bgr(frame_bgr)
-                ts = frame_index / fps
-
-                skip_frame = True
-
-                if prev_small_gray is not None:
-                    diff = cv2.absdiff(prev_small_gray, small_gray)
-                    mean_diff = float(np.mean(diff))
-                    similarity = 1.0 - (mean_diff / 255.0)
-
-                    ts_prev_formatted = f"{int(prev_ts)//3600:02d}:{int(prev_ts)%3600//60:02d}:{int(prev_ts)%60:02d}"
-                    ts_cur_formatted = f"{int(ts)//3600:02d}:{int(ts)%3600//60:02d}:{int(ts)%60:02d}"
-
-                    if similarity >= still_frame_threshold:
-                        skip_frame = True
-                        print(f"sim check {ts_cur_formatted} <-> {ts_prev_formatted} sim={similarity:.2f} (still frame, skipped)", file=sys.stderr)
-                        # Crash-safe: immediately append skipped frame with zero score so it is persisted to cache
-                        all_results.append({
-                            "timestamp_seconds": ts,
-                            "timestamp_formatted": ts_cur_formatted,
-                            "score": 0.0,
-                            "source_video_path": vp,
-                        })
-                        total_extracted += 1
-                    elif similarity >= same_scene_threshold and len(batch) < MAX_SCENE_BATCH_SIZE:
-                        print(f"sim check {ts_cur_formatted} <-> {ts_prev_formatted} sim={similarity:.2f} (same scene)", file=sys.stderr)
-                        batch.append((ts, b64, vp))
-                        total_extracted += 1
-                        batch_ts = ", ".join(f"{int(t)//3600:02d}:{int(t)%3600//60:02d}:{int(t)%60:02d}" for t, _, _ in batch)
-                        print(f"add {ts_cur_formatted} to request [{batch_ts}]", file=sys.stderr)
-                        if len(batch) >= MAX_SCENE_BATCH_SIZE:
-                            _flush_batch()
-                        skip_frame = False
-                    else:
-                        print(f"sim check {ts_cur_formatted} <-> {ts_prev_formatted} sim={similarity:.2f} (new scene)", file=sys.stderr)
-                        _flush_batch()
-                        batch = [(ts, b64, vp)]
-                        total_extracted += 1
-                        skip_frame = False
-                else:
-                    batch = [(ts, b64, vp)]
-                    total_extracted += 1
-                    skip_frame = False
-                    ts_formatted = f"{int(ts)//3600:02d}:{int(ts)%3600//60:02d}:{int(ts)%60:02d}"
-                    print(f"add {ts_formatted} to request [{ts_formatted}]", file=sys.stderr)
-
-                if not skip_frame:
-                    prev_small_gray = small_gray
-                    prev_ts = ts
-
-                if total_extracted % 10 == 0:
-                    # Show progress as extracted/total_sampled so at end it reads extracted=720/720
-                    print(f"{vp} (extracted={total_extracted}/{total_sampled}, validated={total_validated}, passing={passing_count})", file=sys.stderr)
-
-            frame_index += 1
-
-        cap.release()
-
-        # Flush remaining batch for this video
-        _flush_batch()
-
-        # Save cache for this video (includes resume state)
-        if save_cache_dir:
-            video_results = [r for r in all_results if r.get("source_video_path") == vp]
-            if video_results:
-                # Sort results by timestamp to ensure correct ordering in cache
-                video_results.sort(key=lambda x: x["timestamp_seconds"])
-                _save_cache(
-                    save_cache_dir, vp,
-                    sample_rate, frame_scale,
-                    state_template, instructions_template, model_for_cache,
-                    video_results, {},
-                    total_sampled=total_sampled,
-                    total_validated=total_validated,
-                    total_extracted=total_extracted,
-                    frame_index=frame_index,
-                    passing_count=passing_count,
-                    same_scene_threshold=same_scene_threshold,
-                    still_frame_threshold=still_frame_threshold,
-                )
-
-    # Filter by floor, then merge into ranges (if --merge-range), then order chronologically
-    all_results_filtered = [r for r in all_results if r["score"] >= decision_model_floor]
-    all_results_filtered.sort(key=lambda x: x["score"], reverse=True)
-
-    # Merge same-scene batches and adjacent timestamps (within sample_rate) into ranges if --merge-range enabled
-    if merge_range:
-        merged = []
-        for r in all_results_filtered:
-            vid = r.get("source_video_path", "")
-            bid = r.get("batch_id")
-            ts = r["timestamp_seconds"]
-            if merged and merged[-1].get("video_path") == vid:
-                prev_end = merged[-1]["end_seconds"]
-                # Merge if same batch_id OR if gap <= sample_rate (adjacent samples)
-                same_batch = bid is not None and merged[-1].get("batch_id") == bid
-                # Ensure ts is at or after prev_end (results are sorted by score, not timestamp)
-                close_enough = (ts >= prev_end) and (ts - prev_end) <= sample_rate + 0.5  # small tolerance
-                if same_batch or close_enough:
-                    # Extend current range
-                    merged[-1]["end_seconds"] = ts
-                    merged[-1]["sample_count"] += 1
-                    # Update avg score
-                    old_avg = merged[-1]["score_avg"]
-                    old_n = merged[-1]["sample_count"] - 1
-                    merged[-1]["score_avg"] = (old_avg * old_n + r["score"]) / merged[-1]["sample_count"]
-                    merged[-1]["score_max"] = max(merged[-1]["score_max"], r["score"])
-                else:
-                    merged.append({
-                        "video_path": vid,
-                        "batch_id": bid,
-                        "start_seconds": ts,
-                        "end_seconds": ts,
-                        "score_max": r["score"],
-                        "score_avg": r["score"],
-                        "sample_count": 1,
-                    })
-            else:
-                merged.append({
-                    "video_path": vid,
-                    "batch_id": bid,
-                    "start_seconds": ts,
-                    "end_seconds": ts,
-                    "score_max": r["score"],
-                    "score_avg": r["score"],
-                    "sample_count": 1,
-                })
-        # Add formatted timestamps for merged results
-        for m in merged:
-            m["start_formatted"] = f"{int(m['start_seconds'])//3600:02d}:{int(m['start_seconds'])%3600//60:02d}:{int(m['start_seconds'])%60:02d}"
-            m["end_formatted"] = f"{int(m['end_seconds'])//3600:02d}:{int(m['end_seconds'])%3600//60:02d}:{int(m['end_seconds'])%60:02d}"
-        final_results = merged
-    else:
-        final_results = all_results_filtered
-
-    # Select top-k / global-k AFTER merge_range so we count merged ranges
-    if global_k is not None and global_k > 0:
-        final_results = final_results[:global_k]
-    elif top_k is not None and top_k > 0:
-        final_results = final_results[:top_k]
-    final_results.sort(key=lambda x: (x.get("source_video_path", ""), x["start_seconds"] if "start_seconds" in x else x["timestamp_seconds"]))
-
-    # Save matched frames
-    if save_frames and final_results:
-        saved_count, _paths = _save_matched_frames(final_results, video_paths[0], save_frames)
-        print(f"Saved {saved_count} frame(s) to {save_frames}", file=sys.stderr)
-
-    # Stitch matched ranges/timestamps into a single output video if --stitch given
-    if stitch and final_results:
-        output_path = stitch
-        if os.path.isdir(output_path):
-            first_video_name = os.path.splitext(os.path.basename(video_paths[0]))[0]
-            output_path = os.path.join(output_path, f"{first_video_name}_stitched.mp4")
-        if not os.path.splitext(output_path)[1]:
-            output_path = output_path + ".mp4"
-        stitch_dir = tempfile.mkdtemp(prefix="vsearch_stitch_")
-        segments = []
-        for r in final_results:
-            if "start_seconds" in r and "end_seconds" in r:
-                start = r["start_seconds"]
-                duration = max(0.0, r["end_seconds"] - r["start_seconds"])
-                src = r.get("video_path", video_paths[0])
-            else:
-                start = r.get("timestamp_seconds", 0)
-                duration = stitch_duration
-                src = r.get("source_video_path", video_paths[0])
-            seg_path = os.path.join(stitch_dir, f"seg_{len(segments):06d}.mp4")
-            # Re-encode so cuts are frame-accurate. With re-encoding, -ss before -i
-            # is both fast (keyframe seek) and accurate (ffmpeg decodes forward to the
-            # exact start), avoiding the keyframe-snapping that made -c copy jumpy.
-            # All segments share the same codec params so the final concat uses -c copy.
-            cmd = [
-                "ffmpeg", "-y", "-v", "error",
-                "-ss", str(start),
-                "-i", src,
-                "-t", str(duration),
-                "-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
-                "-c:a", "aac", "-avoid_negative_ts", "make_zero",
-                seg_path,
-            ]
-            try:
-                subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                segments.append((seg_path, src, start, duration))
-                print(f"Stitch: extracted segment [{start:.2f}s, +{duration:.2f}s] from {src}", file=sys.stderr)
-            except subprocess.CalledProcessError:
-                print(f"Warning: Failed to extract stitch segment at {start:.2f}s from {src}", file=sys.stderr)
-        print(f"Stitch: prepared {len(segments)} segments, concatenating...", file=sys.stderr)
-        if segments:
-            concat_list = os.path.join(stitch_dir, "concat.txt")
-            with open(concat_list, "w") as f:
-                for seg, src, start, dur in segments:
-                    f.write(f"file '{seg}'\n")
-            cmd = [
-                "ffmpeg", "-y", "-v", "error",
-                "-f", "concat", "-safe", "0",
-                "-i", concat_list,
-                "-c", "copy",
-                output_path,
-            ]
-            try:
-                subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                print(f"Stitched video saved to {output_path}", file=sys.stderr)
-            except subprocess.CalledProcessError as e:
-                print(f"Warning: Failed to stitch video: {e}", file=sys.stderr)
-        shutil.rmtree(stitch_dir, ignore_errors=True)
-
-    # Output
-    if json_output:
-        def _safe(v):
-            if isinstance(v, (np.integer,)):
-                return int(v)
-            if isinstance(v, (np.floating,)):
-                return float(v)
-            return v
-
-        serializable = [{k: _safe(v) for k, v in r.items()} for r in final_results]
-        payload = {
-            "query": query,
-            "results": serializable,
-            "metadata": {
-                "decision_model_floor": _safe(decision_model_floor),
-                "decision_model_sample_rate": _safe(sample_rate),
-                "ollama_host": _safe(ollama_endpoint),
-                "ollama_model": _safe(model),
-                "ollama_frame_scale": _safe(frame_scale),
-                "top_k": _safe(top_k),
-                "global_k": _safe(global_k),
-                "merge_range": _safe(merge_range),
-                "stitch": _safe(stitch),
-                "stitch_duration": _safe(stitch_duration),
-                "video": _safe(video_paths[0]),
-            },
-        }
-        print(json.dumps(payload))
-    else:
-        if final_results:
-            for r in final_results:
-                if 'timestamp_formatted' in r:
-                    # Raw result
-                    print(f"ts={r['timestamp_formatted']}  score={r['score']:.4f}")
-                else:
-                    # Merged range
-                    print(f"ts={r['start_formatted']}-{r['end_formatted']}  score={r['score_max']:.4f}  (max={r['score_max']:.4f}, avg={r['score_avg']:.4f}, n={r['sample_count']})")
-        else:
-            print("No matches found.")
-
 
 
 def _parse_criteria(criteria_str):
@@ -941,7 +337,6 @@ def _validate_batch_classify(frames_batch, model, state_template, classify_quest
         results.append({
             "timestamp_seconds": ts,
             "timestamp_formatted": ts_formatted,
-            "score": top_prob,
             "source_video_path": vp,
             "batch_id": batch_id,
             "probabilities": probs,
@@ -1114,8 +509,7 @@ def cmd_classify(args):
                     )
                     if last_frame and last_frame[0]["max_idx"] is not None:
                         frame_index = last_frame[0]["max_idx"]
-                    # Get passing count (frames with score >= floor)
-                    # Note: classify frames don't have a "score" column, they have "top_probability"
+                    # Get passing count (frames with top_probability >= floor)
                     passing_rows = cache_db.execute_sql(
                         "SELECT COUNT(*) AS n FROM frames WHERE video_id = ?",
                         (video_id,),
@@ -1179,7 +573,6 @@ def cmd_classify(args):
                         all_results.append({
                             "timestamp_seconds": ts,
                             "timestamp_formatted": ts_cur_formatted,
-                            "score": 0.0,
                             "source_video_path": vp,
                             "probabilities": {},
                             "top_choice": None,
@@ -1242,11 +635,11 @@ def cmd_classify(args):
                 )
 
     # Build final results
-    all_results_filtered = [r for r in all_results if r.get("score", 0) >= decision_model_floor]
+    all_results_filtered = [r for r in all_results if r.get("top_probability", 0) >= decision_model_floor]
     if top_choice:
         choices_set = {c.strip() for c in top_choice.split(",") if c.strip()}
         all_results_filtered = [r for r in all_results_filtered if r.get("top_choice") in choices_set]
-    all_results_filtered.sort(key=lambda x: x["score"], reverse=True)
+    all_results_filtered.sort(key=lambda x: x.get("top_probability", 0), reverse=True)
 
     if merge_range:
         merged = []
@@ -1261,18 +654,18 @@ def cmd_classify(args):
                 if same_batch or close_enough:
                     merged[-1]["end_seconds"] = ts
                     merged[-1]["sample_count"] += 1
-                    old_avg = merged[-1]["score_avg"]
+                    old_avg = merged[-1]["top_probability_avg"]
                     old_n = merged[-1]["sample_count"] - 1
-                    merged[-1]["score_avg"] = (old_avg * old_n + r["score"]) / merged[-1]["sample_count"]
-                    merged[-1]["score_max"] = max(merged[-1]["score_max"], r["score"])
+                    merged[-1]["top_probability_avg"] = (old_avg * old_n + r["top_probability"]) / merged[-1]["sample_count"]
+                    merged[-1]["top_probability_max"] = max(merged[-1]["top_probability_max"], r["top_probability"])
                 else:
                     merged.append({
                         "video_path": vid,
                         "batch_id": bid,
                         "start_seconds": ts,
                         "end_seconds": ts,
-                        "score_max": r["score"],
-                        "score_avg": r["score"],
+                        "top_probability_max": r["top_probability"],
+                        "top_probability_avg": r["top_probability"],
                         "sample_count": 1,
                         "start_formatted": f"{int(ts)//3600:02d}:{int(ts)%3600//60:02d}:{int(ts)%60:02d}",
                         "end_formatted": f"{int(ts)//3600:02d}:{int(ts)%3600//60:02d}:{int(ts)%60:02d}",
@@ -1283,8 +676,8 @@ def cmd_classify(args):
                     "batch_id": bid,
                     "start_seconds": ts,
                     "end_seconds": ts,
-                    "score_max": r["score"],
-                    "score_avg": r["score"],
+                    "top_probability_max": r["top_probability"],
+                    "top_probability_avg": r["top_probability"],
                     "sample_count": 1,
                     "start_formatted": f"{int(ts)//3600:02d}:{int(ts)%3600//60:02d}:{int(ts)%60:02d}",
                     "end_formatted": f"{int(ts)//3600:02d}:{int(ts)%3600//60:02d}:{int(ts)%60:02d}",
@@ -1389,37 +782,10 @@ def cmd_cache(args):
 def main():
     parser = argparse.ArgumentParser(
         prog="vsearch",
-        description="Semantic video timestamp search using an Ollama decision model.",
+        description="Semantic video frame classification using an Ollama decision model."
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
-    p_search = sub.add_parser("search", help="Search videos using the decision model")
-    p_search.add_argument("video_paths", nargs="+", help="One or more video files, directories, or glob patterns (e.g., video1.mp4 video2/*.mp4)")
-
-    p_search.add_argument("--top-k", "-k", type=int, default=None, help="Maximum number of top results to return (default: all passing)")
-    p_search.add_argument("--global-k", "-gk", type=int, default=None, help="Global top-K across all videos, overriding --top-k")
-    p_search.add_argument("--json", action="store_true", default=None, help="Output results in strict JSON format")
-    p_search.add_argument("--save-frames", "-sf", default=None, help="Directory to save matched frame images as {video_name}_{HHMMSS}_{score}.jpg")
-    p_search.add_argument("--decision-model-floor", "-dmt", type=float, default=None, help="Threshold for Ollama score (default: 0.5). Results below are discarded.")
-    p_search.add_argument("--decision-model-sample-rate", "-dmsr", type=int, default=None, help="Frame sampling interval in seconds (default: 1)")
-    p_search.add_argument("--ollama-host", "-oh", default=None, help="Ollama server address (default: 192.168.1.190). Falls back to localhost if unreachable")
-    p_search.add_argument("--ollama-frame-scale", "-ofs", type=float, default=None, help="Scale factor for frames sent to Ollama (0.0-1.0, default: 0.2). Lower = faster")
-    p_search.add_argument("--ollama-model", "-dm", default=None, help="Ollama model name(s), comma-separated fallback list tried in order")
-    p_search.add_argument("--ollama-timeout", "-ot", type=int, default=None, help="Ollama request timeout in seconds (default: 60)")
-    p_search.add_argument("--still-frame-threshold", type=float, default=None, help="Similarity (0-1) above which a frame is considered still (default: 0.95)")
-    p_search.add_argument("--same-scene-threshold", type=float, default=None, help="Similarity (0-1) above which frames are considered same scene (default: 0.80)")
-    p_search.add_argument("--merge-range", action="store_true", default=None, help="Merge same-scene batches into timestamp ranges in output")
-    p_search.add_argument("--stitch", type=str, default=None, nargs="?", const=".", help="Stitch matched ranges/timestamps into a single output video. Pass a file path or a directory (a filename will be auto-generated). If not given, uses the current working directory.")
-    p_search.add_argument("--recursive", "-R", action="store_true", default=False, help="Recursively scan directories for video files")
-    # Old lookup/save flags are kept for backward compatibility; --cache-dir is the preferred unified flag.
-    p_search.add_argument("--cache", "-c", type=str, default=None, help=argparse.SUPPRESS)
-    p_search.add_argument("--save-cache", "-sc", type=str, default=None, nargs="?", const=".", help=argparse.SUPPRESS)
-    p_search.add_argument("--cache-dir", type=str, default=None, help="Directory for caching search results (lookup if present, otherwise save after run). Overrides --cache and --save-cache.")
-    p_search.add_argument("--ollama-state", "-s", type=str, default=None, help="State context string for Ollama (default: empty)")
-    p_search.add_argument("--ollama-instructions", "-oi", type=str, default=None, help="Instructions string for Ollama (default: empty)")
-    p_search.add_argument("--ollama-search-question", "-csq", type=str, default=None, help="Search question name (default: is_valid)")
-    p_search.add_argument("--ollama-search-question-type", "-csqt", type=str, default=None, help="Search question type (default: noul)")
-    p_search.set_defaults(func=cmd_search)
     p_classify = sub.add_parser("classify", help="Classify video frames using Ollama choice-question model")
     p_classify.add_argument("video_paths", nargs="+", help="One or more video files, directories, or glob patterns (e.g., video1.mp4 video2/*.mp4)")
 
@@ -1447,7 +813,7 @@ def main():
     p_classify.set_defaults(func=cmd_classify)
 
     # Cache management subcommand
-    p_cache = sub.add_parser("cache", help="Manage the search/classify result cache")
+    p_cache = sub.add_parser("cache", help="Manage the classify result cache")
     cache_parent = argparse.ArgumentParser(add_help=False)
     cache_parent.add_argument("--cache-dir", type=str, default=None, help="Cache directory (default: /tmp/cache)")
     cache_sub = p_cache.add_subparsers(dest="cache_action", required=True)

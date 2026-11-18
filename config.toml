@@ -1,39 +1,5 @@
 # vsearch - Default configuration
-# Decision-model-only search mode: uses an Ollama decision model as the sole judge
-
-[search]
-top_k = -1
-json_output = false
-save_frames = ""
-decision_model_floor = 0.8
-decision_model_sample_rate = 3
-ollama_host = "192.168.1.190"
-ollama_frame_scale = 0.1
-ollama_decision_model = "clef-flash:9b" #"d3:4b" d1:3b
-ollama_timeout = 60
-cache_dir = "/tmp"
-still_frame_threshold = 0.95
-same_scene_threshold = 0.80
-merge_range = false
-stitch = ""
-ollama_state_template = "sample frame from a video"
-ollama_instructions_template = ""
-# Ollama search question name and type used in the request body
-ollama_search_question = "is_valid"
-ollama_search_question_type = "noul"
-
-# Example Ollama request JSON body for search mode (built from the above config fields):
-# {
-#   "model": "clef-flash:9b",           # ollama_decision_model
-#   "state": "sample frame from a video",   # ollama_state_template
-#   "images": ["base64_image1", "base64_image2", ...],  # injected at runtime
-#   "questions": {
-#     "is_valid": {                       # ollama_search_question
-#       "type": "noul",                   # ollama_search_question_type
-#       "instructions": "",               # ollama_instructions_template
-#     }
-#   }
-# }
+# Uses an Ollama decision model as the sole judge for classification.
 
 [classify]
 top_k = -1

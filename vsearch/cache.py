@@ -1,7 +1,7 @@
 """SQLite-based cache for vsearch video search/classify results.
 
 Replaces JSON file cache with a proper relational database for:
-- Fast lookup by video path, score threshold, timestamp range
+- Fast lookup by video path, probability threshold, timestamp range
 - Concurrent reads (safe for AI agents)
 - Atomic writes (no corruption)
 - Custom SQL queries for advanced users
@@ -40,9 +40,9 @@ CREATE TABLE IF NOT EXISTS frames (
     video_id INTEGER NOT NULL REFERENCES videos(id) ON DELETE CASCADE,
     frame_index INTEGER NOT NULL,
     timestamp_seconds REAL NOT NULL,
-    score REAL,
     top_choice TEXT,
     top_probability REAL,
+    probabilities_json TEXT,  -- full choice probabilities dict as JSON
     batch_id INTEGER,
     raw_response TEXT,  -- stored Ollama response for debugging
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
@@ -50,7 +50,7 @@ CREATE TABLE IF NOT EXISTS frames (
 );
 
 CREATE INDEX IF NOT EXISTS idx_frames_video ON frames(video_id);
-CREATE INDEX IF NOT EXISTS idx_frames_score ON frames(score);
+CREATE INDEX IF NOT EXISTS idx_frames_prob ON frames(top_probability);
 CREATE INDEX IF NOT EXISTS idx_frames_ts ON frames(timestamp_seconds);
 CREATE INDEX IF NOT EXISTS idx_frames_choice ON frames(top_choice);
 CREATE INDEX IF NOT EXISTS idx_videos_path ON videos(video_path);
@@ -165,13 +165,16 @@ class CacheDB:
             return 0
         with self.conn:
             for frame in frames:
+                # Store full probabilities dict as JSON
+                probs = frame.get("probabilities", {})
+                probs_json = json.dumps(probs) if isinstance(probs, dict) else "{}"
                 self.conn.execute(
-                    """INSERT INTO frames (video_id, frame_index, timestamp_seconds, score, top_choice, top_probability, batch_id, raw_response)
+                    """INSERT INTO frames (video_id, frame_index, timestamp_seconds, top_choice, top_probability, probabilities_json, batch_id, raw_response)
                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                        ON CONFLICT(video_id, frame_index) DO UPDATE SET
-                           score=excluded.score,
                            top_choice=excluded.top_choice,
                            top_probability=excluded.top_probability,
+                           probabilities_json=excluded.probabilities_json,
                            batch_id=excluded.batch_id,
                            raw_response=excluded.raw_response,
                            created_at=datetime('now')""",
@@ -179,9 +182,9 @@ class CacheDB:
                         video_id,
                         frame.get("frame_index"),
                         frame.get("timestamp_seconds"),
-                        frame.get("score"),
                         frame.get("top_choice"),
                         frame.get("top_probability"),
+                        probs_json,
                         frame.get("batch_id"),
                         json.dumps(frame) if isinstance(frame, dict) else frame,
                     ),
@@ -195,8 +198,8 @@ class CacheDB:
     def get_frames(
         self,
         video_id: int,
-        min_score: Optional[float] = None,
-        max_score: Optional[float] = None,
+        min_probability: Optional[float] = None,
+        max_probability: Optional[float] = None,
         top_choice: Optional[str] = None,
         limit: Optional[int] = None,
     ) -> List[Dict]:
@@ -207,12 +210,12 @@ class CacheDB:
         query = "SELECT f.*, v.video_path AS source_video_path FROM frames f JOIN videos v ON f.video_id = v.id WHERE f.video_id = ?"
         params: List[Any] = [video_id]
 
-        if min_score is not None:
-            query += " AND f.score >= ?"
-            params.append(min_score)
-        if max_score is not None:
-            query += " AND f.score <= ?"
-            params.append(max_score)
+        if min_probability is not None:
+            query += " AND f.top_probability >= ?"
+            params.append(min_probability)
+        if max_probability is not None:
+            query += " AND f.top_probability <= ?"
+            params.append(max_probability)
         if top_choice is not None:
             query += " AND f.top_choice = ?"
             params.append(top_choice)
@@ -255,11 +258,11 @@ class CacheDB:
         # In a full impl, we'd compare params_hash against current params
 
         # Return all frames for this video, floor-filtered
-        frames = self.get_frames(video_id=video["id"], min_score=decision_model_floor)
+        frames = self.get_frames(video_id=video["id"], min_probability=decision_model_floor)
         if not frames:
             return None, None
 
-        results = frames  # already filtered by score in SQL
+        results = frames  # already filtered by top_probability in SQL
         return results, {"video_id": video["id"], "video_path": video_path}
 
     # --- Custom SQL support ---
