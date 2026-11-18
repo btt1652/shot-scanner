@@ -94,6 +94,11 @@ def _try_load_cache(cache_dir, video_path, sample_rate, frame_scale, state, inst
         all_results = data.get("all_results")
         if all_results is None:
             all_results = data.get("results", [])
+        # Validate cache schema version
+        cache_version = data.get("version", 0)
+        if cache_version != 1:
+            print(f"Cache version mismatch: {cache_version} != 1, ignoring", file=sys.stderr)
+            return None, None
         # total_sampled is the number of frames actually sampled (not raw video frames)
         total_sampled = data.get("total_sampled")
         total_extracted = data.get("total_extracted")
