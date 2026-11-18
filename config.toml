@@ -14,7 +14,6 @@ ollama_timeout = 60
 cache_dir = "/tmp"
 still_frame_threshold = 0.95
 same_scene_threshold = 0.80
-max_scene_batch_size = 4
 merge_range = false
 stitch = ""
 ollama_state_template = "sample frame from a video"
@@ -48,7 +47,6 @@ ollama_timeout = 60
 cache_dir = "/tmp"
 still_frame_threshold = 0.95
 same_scene_threshold = 0.80
-max_scene_batch_size = 4
 merge_range = false
 ollama_state_template = "sample frame from a video"
 # The question name used in the Ollama request and response (e.g. "team")

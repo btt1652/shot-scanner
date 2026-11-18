@@ -111,7 +111,7 @@ ollama_instructions_template = ""
 ## Performance Tips
 
 - **Scale down images** with `--ollama-frame-scale` (e.g. `0.15`) — lower = faster inference.
-- **Same-scene batching** — consecutive frames with similarity ≥ `same_scene_threshold` (default `0.8`) are grouped into batches (max `max_scene_batch_size`, default `4`) and sent to Ollama as a single multi-image request.
+- **Same-scene batching** — consecutive frames with similarity ≥ `same_scene_threshold` (default `0.8`) are grouped into batches (max 4 frames per batch, constrained by Ollama's multi-image limit) and sent to Ollama as a single multi-image request.
 - **Coarser sampling** with `--decision-model-sample-rate 5` — one frame every 5 seconds.
 - **Lower the threshold** with `--decision-model-floor 0.4` to keep more passing frames.
 
@@ -121,7 +121,7 @@ ollama_instructions_template = ""
 - **No `.npz` cache** — frames are extracted and validated on the fly.
 - **Ollama-only scoring** — `final_score = Ollama_score`; CLIP is never invoked.
 - **Endpoint fallback** — if the configured Ollama host is unreachable, `localhost:11434` is used automatically.
-- **Same-scene batching** — frames with high visual similarity within a short window are grouped and sent to Ollama as a single multi-image batch request (max `max_scene_batch_size` frames per batch).
+- **Same-scene batching** — frames with high visual similarity within a short window are grouped and sent to Ollama as a single multi-image batch request (max 4 frames per batch, constrained by Ollama's multi-image limit).
 
 
 ## Search Cache
@@ -262,11 +262,11 @@ vsearch search /path/to/videos/ --ollama-state "..." --ollama-instructions "..."
 - **No `.npz` cache** — frames are extracted and validated on the fly.
 - **Ollama-only scoring** — `final_score = Ollama_score`; CLIP is never invoked.
 - **Endpoint fallback** — if the configured Ollama host is unreachable, `localhost:11434` is used automatically.
-- **Same-scene batching** — frames with high visual similarity within a short window are grouped and sent to Ollama as a single multi-image batch request (max `max_scene_batch_size` frames per batch).
+- **Same-scene batching** — frames with high visual similarity within a short window are grouped and sent to Ollama as a single multi-image batch request (max 4 frames per batch, constrained by Ollama's multi-image limit).
 
 - No indexing step — videos are read directly with OpenCV.
 - No `.npz` cache — frames are extracted and validated on the fly.
 - Ollama-only scoring — `final_score = Ollama_score`; CLIP is never invoked.
 - Endpoint fallback — if the configured Ollama host is unreachable, `localhost:11434` is used automatically.
-- Same-scene batching — frames with high visual similarity within a short window are grouped and sent to Ollama as a single multi-image batch request (max `max_scene_batch_size` frames per batch).
+- Same-scene batching — frames with high visual similarity within a short window are grouped and sent to Ollama as a single multi-image batch request (max 4 frames per batch, constrained by Ollama's multi-image limit).
 

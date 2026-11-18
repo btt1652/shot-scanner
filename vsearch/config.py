@@ -59,7 +59,6 @@ def default_config() -> dict:
             "cache_dir": "/tmp",
             "still_frame_threshold": 0.95,
             "same_scene_threshold": 0.80,
-            "max_scene_batch_size": 4,
         },
     }
 

@@ -25,6 +25,9 @@ from .config import load_config, get_config_value
 
 DEFAULT_VIDEO_EXTENSIONS = [".mp4", ".avi", ".mov", ".mkv", ".webm", ".flv", ".wmv"]
 
+# Ollama supports at most 4 images per multi-image request, so scene batches are fixed at 4.
+MAX_SCENE_BATCH_SIZE = 4
+
 
 def _hash_video_content(video_path, chunk_mb=8):
     """Hash first and last N MB of video file using BLAKE2b. Returns raw digest bytes."""
@@ -39,29 +42,34 @@ def _hash_video_content(video_path, chunk_mb=8):
     return h.digest()
 
 
-def _hash_params(sample_rate, frame_scale, state, instructions, model, criteria_json=None):
-    """Hash search params (sample-rate, frame-scale, state, instructions, model[, criteria]).
+def _hash_params(sample_rate, frame_scale, state, instructions, model, criteria_json=None, same_scene_threshold=None, still_frame_threshold=None):
+    """Hash search params.
 
-    When `criteria_json` is provided (classify mode), it's included in the hash so
-    different choice-criteria produce different caches.
+    Includes same_scene_threshold and still_frame_threshold so that changing scene
+    grouping behavior invalidates the cache. max_scene_batch_size is fixed at 4
+    (Ollama limit) and not part of the key.
     """
     s = f"{sample_rate}|{frame_scale}|{state}|{instructions}|{model}"
     if criteria_json is not None:
         s = f"{s}|{criteria_json}"
+    if same_scene_threshold is not None:
+        s = f"{s}|same_scene_threshold={same_scene_threshold}"
+    if still_frame_threshold is not None:
+        s = f"{s}|still_frame_threshold={still_frame_threshold}"
     return hashlib.blake2b(s.encode("utf-8"), digest_size=32).digest()
 
 
-def _cache_filename(video_path, sample_rate, frame_scale, state, instructions, model, criteria_json=None):
+def _cache_filename(video_path, sample_rate, frame_scale, state, instructions, model, criteria_json=None, same_scene_threshold=None, still_frame_threshold=None):
     """Build cache filename: <single_hash>.json from content + params."""
     content_bytes = _hash_video_content(video_path)
-    params_bytes = _hash_params(sample_rate, frame_scale, state, instructions, model, criteria_json)
+    params_bytes = _hash_params(sample_rate, frame_scale, state, instructions, model, criteria_json, same_scene_threshold, still_frame_threshold)
     h = hashlib.blake2b()
     h.update(content_bytes)
     h.update(params_bytes)
     return f"{h.hexdigest()[:16]}.json"
 
 
-def _try_load_cache(cache_dir, video_path, sample_rate, frame_scale, state, instructions, model, decision_model_floor, criteria_json=None):
+def _try_load_cache(cache_dir, video_path, sample_rate, frame_scale, state, instructions, model, decision_model_floor, criteria_json=None, same_scene_threshold=None, still_frame_threshold=None):
     """Try to load cached results.
 
     Returns (results, data) where:
@@ -74,7 +82,7 @@ def _try_load_cache(cache_dir, video_path, sample_rate, frame_scale, state, inst
     """
     if not cache_dir:
         return None, None
-    fname = _cache_filename(video_path, sample_rate, frame_scale, state, instructions, model, criteria_json)
+    fname = _cache_filename(video_path, sample_rate, frame_scale, state, instructions, model, criteria_json, same_scene_threshold, still_frame_threshold)
     cache_file = os.path.join(cache_dir, fname)
     print(f"Cache lookup: {cache_file}", file=sys.stderr)
     if not os.path.exists(cache_file):
@@ -101,11 +109,11 @@ def _try_load_cache(cache_dir, video_path, sample_rate, frame_scale, state, inst
         return None, None
 
 
-def _save_cache(cache_dir, video_path, sample_rate, frame_scale, state, instructions, model, all_results, metadata, total_sampled=None, total_validated=None, total_extracted=None, frame_index=None, passing_count=None, criteria_json=None, batch_id_counter=None):
+def _save_cache(cache_dir, video_path, sample_rate, frame_scale, state, instructions, model, all_results, metadata, total_sampled=None, total_validated=None, total_extracted=None, frame_index=None, passing_count=None, criteria_json=None, batch_id_counter=None, same_scene_threshold=None, still_frame_threshold=None):
     """Save all results (including resume state) to a cache JSON file."""
     if not cache_dir:
         return
-    fname = _cache_filename(video_path, sample_rate, frame_scale, state, instructions, model, criteria_json)
+    fname = _cache_filename(video_path, sample_rate, frame_scale, state, instructions, model, criteria_json, same_scene_threshold, still_frame_threshold)
     cache_file = os.path.join(cache_dir, fname)
     try:
         os.makedirs(cache_dir, exist_ok=True)
@@ -334,8 +342,6 @@ def cmd_search(args):
     cache_dir = cfg_val("cache_dir", "cache")
     still_frame_threshold = cfg_val("still_frame_threshold", "still_frame_threshold") or 0.95
     same_scene_threshold = cfg_val("same_scene_threshold", "same_scene_threshold") or 0.80
-    max_scene_batch_size = cfg_val("max_scene_batch_size", "max_scene_batch_size") or 4
-    max_scene_batch_size = min(max_scene_batch_size, 4)
     merge_range = cfg_val("merge_range", "merge_range")
     stitch = cfg_val("stitch", "stitch")
     # stitch_duration is always derived from decision_model_sample_rate (the run's sample rate)
@@ -509,6 +515,8 @@ def cmd_search(args):
                     total_extracted=total_extracted,
                     frame_index=frame_index,
                     passing_count=passing_count,
+                    same_scene_threshold=same_scene_threshold,
+                    still_frame_threshold=still_frame_threshold,
                 )
 
     # Unified --cache-dir takes precedence over legacy --cache/--save-cache.
@@ -535,6 +543,8 @@ def cmd_search(args):
                 sample_rate, frame_scale,
                 state_template, instructions_template, model_for_cache,
                 decision_model_floor,
+                same_scene_threshold=same_scene_threshold,
+                still_frame_threshold=still_frame_threshold,
             )
             if cache_results is not None:
                 all_results.extend(cache_results)
@@ -607,13 +617,13 @@ def cmd_search(args):
                             "source_video_path": vp,
                         })
                         total_extracted += 1
-                    elif similarity >= same_scene_threshold and len(batch) < max_scene_batch_size:
+                    elif similarity >= same_scene_threshold and len(batch) < MAX_SCENE_BATCH_SIZE:
                         print(f"sim check {ts_cur_formatted} <-> {ts_prev_formatted} sim={similarity:.2f} (same scene)", file=sys.stderr)
                         batch.append((ts, b64, vp))
                         total_extracted += 1
                         batch_ts = ", ".join(f"{int(t)//3600:02d}:{int(t)%3600//60:02d}:{int(t)%60:02d}" for t, _, _ in batch)
                         print(f"add {ts_cur_formatted} to request [{batch_ts}]", file=sys.stderr)
-                        if len(batch) >= max_scene_batch_size:
+                        if len(batch) >= MAX_SCENE_BATCH_SIZE:
                             _flush_batch()
                         skip_frame = False
                     else:
@@ -660,6 +670,8 @@ def cmd_search(args):
                     total_extracted=total_extracted,
                     frame_index=frame_index,
                     passing_count=passing_count,
+                    same_scene_threshold=same_scene_threshold,
+                    still_frame_threshold=still_frame_threshold,
                 )
 
     # Filter by floor, then merge into ranges (if --merge-range), then order chronologically
@@ -952,8 +964,6 @@ def cmd_classify(args):
     cache_dir = cfg_val("cache_dir", "cache")
     still_frame_threshold = cfg_val("still_frame_threshold", "still_frame_threshold") or 0.95
     same_scene_threshold = cfg_val("same_scene_threshold", "same_scene_threshold") or 0.80
-    max_scene_batch_size = cfg_val("max_scene_batch_size", "max_scene_batch_size") or 4
-    max_scene_batch_size = min(max_scene_batch_size, 4)
     merge_range = cfg_val("merge_range", "merge_range")
     ollama_timeout = cfg_val("ollama_timeout", "ollama_timeout")
     top_choice = cfg_val("ollama_top_choice", "top_choice")
@@ -1046,6 +1056,8 @@ def cmd_classify(args):
                     total_extracted=total_extracted,
                     passing_count=passing_count,
                     criteria_json=criteria_json,
+                    same_scene_threshold=same_scene_threshold,
+                    still_frame_threshold=still_frame_threshold,
                 )
 
     # Fallback for backward compatibility: try to get cache_dir from legacy args.
@@ -1066,6 +1078,8 @@ def cmd_classify(args):
                 state_template, classify_instructions, model_for_cache,
                 decision_model_floor,
                 criteria_json=criteria_json,
+                same_scene_threshold=same_scene_threshold,
+                still_frame_threshold=still_frame_threshold,
             )
             if cache_results is not None:
                 all_results.extend(cache_results)
@@ -1132,13 +1146,13 @@ def cmd_classify(args):
                             "top_probability": 0.0,
                         })
                         total_extracted += 1
-                    elif similarity >= same_scene_threshold and len(batch) < max_scene_batch_size:
+                    elif similarity >= same_scene_threshold and len(batch) < MAX_SCENE_BATCH_SIZE:
                         print(f"sim check {ts_cur_formatted} <-> {ts_prev_formatted} sim={similarity:.2f} (same scene)", file=sys.stderr)
                         batch.append((ts, b64, vp))
                         total_extracted += 1
                         batch_ts = ", ".join(f"{int(t)//3600:02d}:{int(t)%3600//60:02d}:{int(t)%60:02d}" for t, _, _ in batch)
                         print(f"add {ts_cur_formatted} to request [{batch_ts}]", file=sys.stderr)
-                        if len(batch) >= max_scene_batch_size:
+                        if len(batch) >= MAX_SCENE_BATCH_SIZE:
                             _flush_batch()
                         skip_frame = False
                     else:
@@ -1183,6 +1197,8 @@ def cmd_classify(args):
                     total_extracted=total_extracted,
                     passing_count=passing_count,
                     criteria_json=criteria_json,
+                    same_scene_threshold=same_scene_threshold,
+                    still_frame_threshold=still_frame_threshold,
                 )
 
     # Build final results
@@ -1301,7 +1317,6 @@ def main():
     p_search.add_argument("--ollama-timeout", "-ot", type=int, default=None, help="Ollama request timeout in seconds (default: 60)")
     p_search.add_argument("--still-frame-threshold", type=float, default=None, help="Similarity (0-1) above which a frame is considered still (default: 0.95)")
     p_search.add_argument("--same-scene-threshold", type=float, default=None, help="Similarity (0-1) above which frames are considered same scene (default: 0.80)")
-    p_search.add_argument("--max-scene-batch-size", type=int, default=None, help="Maximum number of consecutive same-scene frames per Ollama request (default: 4, capped by Ollama limit)")
     p_search.add_argument("--merge-range", action="store_true", default=None, help="Merge same-scene batches into timestamp ranges in output")
     p_search.add_argument("--stitch", type=str, default=None, nargs="?", const=".", help="Stitch matched ranges/timestamps into a single output video. Pass a file path or a directory (a filename will be auto-generated). If not given, uses the current working directory.")
     p_search.add_argument("--recursive", "-R", action="store_true", default=False, help="Recursively scan directories for video files")
@@ -1328,7 +1343,6 @@ def main():
     p_classify.add_argument("--ollama-timeout", "-ot", type=int, default=None, help="Ollama request timeout in seconds (default: 60)")
     p_classify.add_argument("--still-frame-threshold", type=float, default=None, help="Similarity (0-1) above which a frame is considered still (default: 0.95)")
     p_classify.add_argument("--same-scene-threshold", type=float, default=None, help="Similarity (0-1) above which frames are considered same scene (default: 0.80)")
-    p_classify.add_argument("--max-scene-batch-size", type=int, default=None, help="Maximum number of consecutive same-scene frames per Ollama request (default: 4, capped by Ollama limit)")
     p_classify.add_argument("--merge-range", action="store_true", default=None, help="Merge adjacent same-scene frames into timestamp ranges in output")
     p_classify.add_argument("--recursive", "-R", action="store_true", default=False, help="Recursively scan directories for video files")
     p_classify.add_argument("--cache", "-c", type=str, default=None, help=argparse.SUPPRESS)
