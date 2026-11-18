@@ -5,6 +5,7 @@ No CLIP embeddings or .npz caches are required.
 """
 import argparse
 import base64
+import datetime
 import hashlib
 import io
 import json
@@ -100,7 +101,7 @@ def _try_load_cache(cache_dir, video_path, sample_rate, frame_scale, state, inst
         return None, None
 
 
-def _save_cache(cache_dir, video_path, sample_rate, frame_scale, state, instructions, model, all_results, metadata, total_sampled=None, total_validated=None, total_extracted=None, frame_index=None, passing_count=None, criteria_json=None):
+def _save_cache(cache_dir, video_path, sample_rate, frame_scale, state, instructions, model, all_results, metadata, total_sampled=None, total_validated=None, total_extracted=None, frame_index=None, passing_count=None, criteria_json=None, batch_id_counter=None):
     """Save all results (including resume state) to a cache JSON file."""
     if not cache_dir:
         return
@@ -109,8 +110,10 @@ def _save_cache(cache_dir, video_path, sample_rate, frame_scale, state, instruct
     try:
         os.makedirs(cache_dir, exist_ok=True)
         data = {
+            "version": 1,
             "video_path": video_path,
             "query": state or instructions or "",
+            "created_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
             "parameters": {
                 "decision_model_sample_rate": sample_rate,
                 "ollama_frame_scale": frame_scale,
@@ -124,6 +127,7 @@ def _save_cache(cache_dir, video_path, sample_rate, frame_scale, state, instruct
             "total_validated": total_validated,
             "total_extracted": total_extracted,
             "frame_index": frame_index,
+            "batch_id_counter": batch_id_counter,
             "passing_count": passing_count,
         }
         with open(cache_file, "w", encoding="utf-8") as f:
@@ -508,10 +512,14 @@ def cmd_search(args):
                     passing_count=passing_count,
                 )
 
-    # Cache lookup when --cache flag provided (CLI overrides config)
-    cache_dir = getattr(args, "cache", None) or cache_dir
-    # Save-cache directory (--save-cache). Defaults to None (no save) if flag not used.
-    save_cache_dir = getattr(args, "save_cache", None) or save_cache_dir
+    # Unified --cache-dir takes precedence over legacy --cache/--save-cache.
+    if getattr(args, "cache_dir", None):
+        cache_dir = args.cache_dir
+        save_cache_dir = args.cache_dir
+    else:
+        # Legacy behavior: --cache for lookup, --save-cache for saving.
+        cache_dir = getattr(args, "cache", None) or cache_dir
+        save_cache_dir = getattr(args, "save_cache", None) or save_cache_dir
 
     model_for_cache = model
 
@@ -538,6 +546,7 @@ def cmd_search(args):
                 passing_count = int(cache_data.get("passing_count", 0))
                 total_extracted = int(cache_data.get("total_extracted", 0))
                 total_validated = int(cache_data.get("total_validated", 0))
+                batch_id_counter = int(cache_data.get("batch_id_counter", batch_id_counter))
                 print(f"Resuming from cache: frame_index={frame_index}, validated={total_validated}", file=sys.stderr)
 
         cap = cv2.VideoCapture(vp)
@@ -1039,9 +1048,14 @@ def cmd_classify(args):
                     criteria_json=criteria_json,
                 )
 
-    # Resolve cache directories (CLI overrides config)
-    cache_dir = getattr(args, "cache", None) or cache_dir
-    save_cache_dir = getattr(args, "save_cache", None) or save_cache_dir
+    # Unified --cache-dir takes precedence over legacy --cache/--save-cache.
+    if getattr(args, "cache_dir", None):
+        cache_dir = args.cache_dir
+        save_cache_dir = args.cache_dir
+    else:
+        # Legacy behavior: --cache for lookup, --save-cache for saving.
+        cache_dir = getattr(args, "cache", None) or cache_dir
+        save_cache_dir = getattr(args, "save_cache", None) or save_cache_dir
     model_for_cache = model
 
     # Process each video: check cache first, then classify if miss
@@ -1065,6 +1079,7 @@ def cmd_classify(args):
                 passing_count = int(cache_data.get("passing_count", 0))
                 total_extracted = int(cache_data.get("total_extracted", 0))
                 total_validated = int(cache_data.get("total_validated", 0))
+                batch_id_counter = int(cache_data.get("batch_id_counter", batch_id_counter))
                 print(f"Resuming from cache: frame_index={frame_index}, validated={total_validated}", file=sys.stderr)
 
         cap = cv2.VideoCapture(vp)
@@ -1292,8 +1307,10 @@ def main():
     p_search.add_argument("--merge-range", action="store_true", default=None, help="Merge same-scene batches into timestamp ranges in output")
     p_search.add_argument("--stitch", type=str, default=None, nargs="?", const=".", help="Stitch matched ranges/timestamps into a single output video. Pass a file path or a directory (a filename will be auto-generated). If not given, uses the current working directory.")
     p_search.add_argument("--recursive", "-R", action="store_true", default=False, help="Recursively scan directories for video files")
-    p_search.add_argument("--cache", "-c", type=str, default=None, help="Path to cache directory to look up existing cache files. Overrides config 'cache_dir'. Only used when this flag is given")
-    p_search.add_argument("--save-cache", "-sc", type=str, default=None, nargs="?", const=".", help="Path to cache directory for saving search results. Overrides config 'save_cache_dir'. Defaults to current directory (.) if used without a path")
+    # Old lookup/save flags are kept for backward compatibility; --cache-dir is the preferred unified flag.
+    p_search.add_argument("--cache", "-c", type=str, default=None, help=argparse.SUPPRESS)
+    p_search.add_argument("--save-cache", "-sc", type=str, default=None, nargs="?", const=".", help=argparse.SUPPRESS)
+    p_search.add_argument("--cache-dir", type=str, default=None, help="Directory for caching search results (lookup if present, otherwise save after run). Overrides --cache and --save-cache.")
     p_search.add_argument("--ollama-state", "-s", type=str, default=None, help="State context string for Ollama (default: empty)")
     p_search.add_argument("--ollama-instructions", "-oi", type=str, default=None, help="Instructions string for Ollama (default: empty)")
     p_search.add_argument("--ollama-search-question", "-csq", type=str, default=None, help="Search question name (default: is_valid)")
@@ -1316,8 +1333,9 @@ def main():
     p_classify.add_argument("--max-scene-batch-size", type=int, default=None, help="Maximum number of consecutive same-scene frames per Ollama request (default: 4, capped by Ollama limit)")
     p_classify.add_argument("--merge-range", action="store_true", default=None, help="Merge adjacent same-scene frames into timestamp ranges in output")
     p_classify.add_argument("--recursive", "-R", action="store_true", default=False, help="Recursively scan directories for video files")
-    p_classify.add_argument("--cache", "-c", type=str, default=None, help="Path to cache directory to look up existing cache files. Overrides config 'cache_dir'")
-    p_classify.add_argument("--save-cache", "-sc", type=str, default=None, nargs="?", const=".", help="Path to cache directory for saving classify results. Overrides config 'save_cache_dir'. Defaults to current directory (.) if used without a path")
+    p_classify.add_argument("--cache", "-c", type=str, default=None, help=argparse.SUPPRESS)
+    p_classify.add_argument("--save-cache", "-sc", type=str, default=None, nargs="?", const=".", help=argparse.SUPPRESS)
+    p_classify.add_argument("--cache-dir", type=str, default=None, help="Directory for caching classify results (lookup if present, otherwise save after run). Overrides --cache and --save-cache.")
     p_classify.add_argument("--ollama-state", "-s", type=str, default=None, help="State context string for Ollama (default: 'sample frame from a video')")
     p_classify.add_argument("--ollama-classify-question", "-cq", type=str, default=None, help="Question name (e.g., 'team')")
     p_classify.add_argument("--ollama-classify-instructions", "-ci", type=str, default=None, help="Instructions for the choice question (e.g., 'Which team should handle this scene?')")

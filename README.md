@@ -73,6 +73,7 @@ CLIP is not involved in scoring at all.
 | `--recursive` | `-R` | Recursively scan directories for video files |
 | `--ollama-search-question` | `-csq` | Search question name (default: `is_valid`) |
 | `--ollama-search-question-type` | `-csqt` | Search question type (default: `noul`) |
+| `--cache-dir` | | Directory for caching search results (lookup if present, otherwise save). Overrides `--cache` and `--save-cache`.
 
 ## Configuration (`config.toml`)
 
@@ -125,7 +126,13 @@ ollama_instructions_template = ""
 
 ## Search Cache
 
-Search results can be cached to JSON files to avoid re-running expensive Ollama validation on the same video + query combination. Cache is **opt-in** — it's only used when you explicitly pass the `--cache` or `--save-cache` flags.
+Search results can be cached to JSON files to avoid re-running expensive Ollama validation on the same video + query combination. Cache is **opt-in** — it's only used when you explicitly pass the `--cache-dir` flag.
+
+The unified `--cache-dir` flag handles both lookup and save:
+- **If a cache file exists** → results are loaded (lookup) and the run is skipped.
+- **If no cache file exists** → the run proceeds and after completion a cache file is saved to that directory.
+
+The legacy `--cache` and `--save-cache` flags are deprecated but still honored for backward compatibility.
 
 ### Cache File Naming
 
@@ -164,9 +171,9 @@ vsearch search myvideo.mp4 --ollama-state "..." --ollama-instructions "..." \
 **Reusable across**: `decision_model_floor`, `top_k`, `global_k`
 **Not reusable across**: `decision_model_sample_rate`, `ollama_frame_scale`, `ollama_state`, `ollama_instructions`, `ollama_model`
 
-### Lookup Cache (`--cache`)
+### Lookup Cache (`--cache-dir`)
 
-Use `--cache /path/to/cache` to look up existing cached results. If a matching cache file exists (same video, query, and parameters), the search is skipped and cached results are returned instantly:
+Use `--cache-dir /path/to/cache` to look up existing cached results. If a matching cache file exists (same video, query, and parameters), the search is skipped and cached results are returned instantly:
 
 ```bash
 # First run: no cache, performs full search
@@ -178,7 +185,7 @@ vsearch search myvideo.mp4 --ollama-state "A user is searching for: a person" --
 
 ### Save Cache (`--save-cache`)
 
-Use `--save-cache /path/to/cache` (or just `--save-cache` to default to the current directory) to save results after a search completes. The file is written only if the search actually ran (not when a cache hit occurred):
+Use `--cache-dir /path/to/cache` to save results after a search completes (if no cache hit occurred). The file is written only if the search actually ran (not when a cache hit occurred):
 
 ```bash
 # Save to explicit directory
@@ -187,14 +194,14 @@ vsearch search myvideo.mp4 --ollama-state "A user is searching for: a person" --
 # Save to current directory (.)
 vsearch search myvideo.mp4 --ollama-state "A user is searching for: a person" --ollama-instructions "Does the image match the query: a person?" --save-cache
 
-# Combined: look up cache first, save new results if not found
-vsearch search myvideo.mp4 --ollama-state "A user is searching for: a person" --ollama-instructions "Does the image match the query: a person?" --cache /tmp/cache --save-cache /tmp/cache
+# Combined: look up cache first, save new results if not found (same flag does both)
+vsearch search myvideo.mp4 --ollama-state "A user is searching for: a person" --ollama-instructions "Does the image match the query: a person?" --cache-dir /tmp/cache
 ```
 
 ### Cache Hit Behavior
 
 - **Cache hit**: No Ollama calls, no frame extraction — results loaded from disk, filtered by current `decision_model_floor`
-- **Cache miss**: Full search runs, results saved to cache directory (if `--save-cache` provided)
+- **Cache miss**: Full search runs, results saved to cache directory (if `--cache-dir` provided)
 - **Parameter mismatch**: If sample rate, frame scale, state, instructions, or model differ, cache is treated as miss
 - **Video change**: If video content changes (first/last 8 MB differ), cache is invalidated
 
@@ -209,11 +216,11 @@ Cache works **per video file**, not per search session:
 
 ```bash
 # Search 2 videos: video1 has cache, video2 does not
-vsearch search video1.mp4 video2.mp4 --ollama-state "..." --ollama-instructions "..." --cache /tmp/cache
+vsearch search video1.mp4 video2.mp4 --ollama-state "..." --ollama-instructions "..." --cache-dir /tmp/cache
 # → video1: cache hit (instant), video2: full search
 
 # Search directory with 5 videos, all cached
-vsearch search /path/to/videos/ --ollama-state "..." --ollama-instructions "..." --cache /tmp/cache
+vsearch search /path/to/videos/ --ollama-state "..." --ollama-instructions "..." --cache-dir /tmp/cache
 # → all 5: cache hits (instant)
 ```
 
@@ -221,8 +228,10 @@ vsearch search /path/to/videos/ --ollama-state "..." --ollama-instructions "..."
 
 ```json
 {
+  "version": 1,
   "video_path": "/mnt/hdd/myvideo.mp4",
   "query": "A user is searching for: a person running",
+  "created_at": "2025-01-15T10:30:00+00:00",
   "parameters": {
     "decision_model_sample_rate": 3,
     "ollama_frame_scale": 0.2,
@@ -254,9 +263,11 @@ vsearch search /path/to/videos/ --ollama-state "..." --ollama-instructions "..."
     "total_extracted": 45,
     "total_validated": 40,
     "search_time_seconds": 12.5,
-    "cached": false,
-    "created_at": "2025-01-15T10:30:00Z"
-  }
+    "cached": false
+  },
+  "frame_index": 45,
+  "batch_id_counter": 12,
+  "passing_count": 18
 }
 ```
 

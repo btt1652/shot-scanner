@@ -56,6 +56,7 @@ def default_config() -> dict:
             "ollama_classify_question": "team",
             "ollama_classify_instructions": "Which team should handle this scene?",
             "ollama_classify_criteria": "",
+            "ollama_top_choice": "",
             "cache_dir": "/tmp",
             "save_cache_dir": "/tmp",
             "still_frame_threshold": 0.95,
