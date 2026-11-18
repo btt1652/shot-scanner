@@ -332,7 +332,6 @@ def cmd_search(args):
     search_question = cfg_val("ollama_search_question", "ollama_search_question") or "is_valid"
     search_question_type = cfg_val("ollama_search_question_type", "ollama_search_question_type") or "noul"
     cache_dir = cfg_val("cache_dir", "cache")
-    save_cache_dir = cfg_val("save_cache_dir", "save_cache")
     still_frame_threshold = cfg_val("still_frame_threshold", "still_frame_threshold") or 0.95
     same_scene_threshold = cfg_val("same_scene_threshold", "same_scene_threshold") or 0.80
     max_scene_batch_size = cfg_val("max_scene_batch_size", "max_scene_batch_size") or 4
@@ -515,11 +514,13 @@ def cmd_search(args):
     # Unified --cache-dir takes precedence over legacy --cache/--save-cache.
     if getattr(args, "cache_dir", None):
         cache_dir = args.cache_dir
-        save_cache_dir = args.cache_dir
     else:
         # Legacy behavior: --cache for lookup, --save-cache for saving.
         cache_dir = getattr(args, "cache", None) or cache_dir
-        save_cache_dir = getattr(args, "save_cache", None) or save_cache_dir
+        legacy_save = getattr(args, "save_cache", None)
+        if legacy_save:
+            cache_dir = legacy_save
+    save_cache_dir = cache_dir
 
     model_for_cache = model
 
@@ -949,7 +950,6 @@ def cmd_classify(args):
     classify_instructions = cfg_val("ollama_classify_instructions", "classify_instructions")
     classify_criteria = cfg_val("ollama_classify_criteria", "classify_criteria")
     cache_dir = cfg_val("cache_dir", "cache")
-    save_cache_dir = cfg_val("save_cache_dir", "save_cache")
     still_frame_threshold = cfg_val("still_frame_threshold", "still_frame_threshold") or 0.95
     same_scene_threshold = cfg_val("same_scene_threshold", "same_scene_threshold") or 0.80
     max_scene_batch_size = cfg_val("max_scene_batch_size", "max_scene_batch_size") or 4
@@ -1048,15 +1048,13 @@ def cmd_classify(args):
                     criteria_json=criteria_json,
                 )
 
-    # Unified --cache-dir takes precedence over legacy --cache/--save-cache.
-    if getattr(args, "cache_dir", None):
-        cache_dir = args.cache_dir
-        save_cache_dir = args.cache_dir
-    else:
-        # Legacy behavior: --cache for lookup, --save-cache for saving.
-        cache_dir = getattr(args, "cache", None) or cache_dir
-        save_cache_dir = getattr(args, "save_cache", None) or save_cache_dir
+    # Fallback for backward compatibility: try to get cache_dir from legacy args.
+    cache_dir = getattr(args, "cache_dir", None) or getattr(args, "cache", None) or cache_dir
+    # If user explicitly asked for save via --save-cache, override to avoid implicit lookup.
+    if getattr(args, "save_cache", None):
+        cache_dir = getattr(args, "save_cache", None)
     model_for_cache = model
+    save_cache_dir = cache_dir
 
     # Process each video: check cache first, then classify if miss
     for vp in video_paths:

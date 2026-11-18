@@ -160,41 +160,26 @@ The cache stores **all validated frames** (not just those passing the floor), so
 # First run: save full cache
 vsearch search myvideo.mp4 --ollama-state "..." --ollama-instructions "..." \
   --decision-model-floor 0.8 --decision-model-sample-rate 3 \
-  --save-cache /tmp/cache
+  --cache-dir /tmp/cache
 
 # Later: reuse with lower floor (no Ollama calls!)
 vsearch search myvideo.mp4 --ollama-state "..." --ollama-instructions "..." \
   --decision-model-floor 0.4 --decision-model-sample-rate 3 \
-  --cache /tmp/cache
+  --cache-dir /tmp/cache
 ```
 
 **Reusable across**: `decision_model_floor`, `top_k`, `global_k`
 **Not reusable across**: `decision_model_sample_rate`, `ollama_frame_scale`, `ollama_state`, `ollama_instructions`, `ollama_model`
 
-### Lookup Cache (`--cache-dir`)
+### Unified Cache (`--cache-dir`)
 
-Use `--cache-dir /path/to/cache` to look up existing cached results. If a matching cache file exists (same video, query, and parameters), the search is skipped and cached results are returned instantly:
+Use `--cache-dir /path/to/cache` to look up **and**, if no cache hit occurs, save results. If a matching cache file exists (same video, query, and parameters), the search is skipped and cached results are returned instantly. If not, the run proceeds and writes a new cache file to the same directory after completion.
 
 ```bash
-# First run: no cache, performs full search
-vsearch search myvideo.mp4 --ollama-state "A user is searching for: a person" --ollama-instructions "Does the image match the query: a person?" --save-cache /tmp/cache
+# First run: no cache, performs full search, saves results
+vsearch search myvideo.mp4 --ollama-state "A user is searching for: a person" --ollama-instructions "Does the image match the query: a person?" --cache-dir /tmp/cache
 
 # Second run: cache hit, returns instantly without Ollama
-vsearch search myvideo.mp4 --ollama-state "A user is searching for: a person" --ollama-instructions "Does the image match the query: a person?" --cache /tmp/cache
-```
-
-### Save Cache (`--save-cache`)
-
-Use `--cache-dir /path/to/cache` to save results after a search completes (if no cache hit occurred). The file is written only if the search actually ran (not when a cache hit occurred):
-
-```bash
-# Save to explicit directory
-vsearch search myvideo.mp4 --ollama-state "A user is searching for: a person" --ollama-instructions "Does the image match the query: a person?" --save-cache /tmp/cache
-
-# Save to current directory (.)
-vsearch search myvideo.mp4 --ollama-state "A user is searching for: a person" --ollama-instructions "Does the image match the query: a person?" --save-cache
-
-# Combined: look up cache first, save new results if not found (same flag does both)
 vsearch search myvideo.mp4 --ollama-state "A user is searching for: a person" --ollama-instructions "Does the image match the query: a person?" --cache-dir /tmp/cache
 ```
 

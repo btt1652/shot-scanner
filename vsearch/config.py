@@ -40,7 +40,6 @@ def default_config() -> dict:
             "ollama_search_question": "is_valid",
             "ollama_search_question_type": "noul",
             "cache_dir": "/tmp",
-            "save_cache_dir": "/tmp",
         },
         "classify": {
             "top_k": -1,
@@ -58,7 +57,6 @@ def default_config() -> dict:
             "ollama_classify_criteria": "",
             "ollama_top_choice": "",
             "cache_dir": "/tmp",
-            "save_cache_dir": "/tmp",
             "still_frame_threshold": 0.95,
             "same_scene_threshold": 0.80,
             "max_scene_batch_size": 4,
