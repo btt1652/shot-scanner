@@ -69,6 +69,8 @@ CLIP is not involved in scoring at all.
 | `--ollama-frame-scale` | `-ofs` | Scale factor for frames sent to Ollama (0.0–1.0, default: 0.2). Lower = faster |
 | `--ollama-model` | `-dm` | Ollama model name (single model, no fallback) |
 | `--recursive` | `-R` | Recursively scan directories for video files |
+| `--ollama-search-question` | `-csq` | Search question name (default: `is_valid`) |
+| `--ollama-search-question-type` | `-csqt` | Search question type (default: `noul`) |
 
 ## Configuration (`config.toml`)
 
@@ -99,6 +101,8 @@ ollama_instructions_template = ""
 - `ollama_decision_model` — model name (default: `"clef-flash:9b"`)
 - `ollama_state_template` — state context string sent to Ollama (default: empty)
 - `ollama_instructions_template` — instructions string sent to Ollama (default: empty)
+- `ollama_search_question` — search question name (default: `is_valid`)
+- `ollama_search_question_type` — search question type (default: `noul`)
 
 ## Performance Tips
 

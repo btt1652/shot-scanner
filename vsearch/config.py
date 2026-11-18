@@ -37,6 +37,8 @@ def default_config() -> dict:
             "ollama_timeout": 60,
             "ollama_state_template": "",
             "ollama_instructions_template": "",
+            "ollama_search_question": "is_valid",
+            "ollama_search_question_type": "noul",
             "cache_dir": "/tmp",
             "save_cache_dir": "/tmp",
         },

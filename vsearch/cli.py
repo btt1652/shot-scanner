@@ -325,6 +325,8 @@ def cmd_search(args):
     recursive = cfg_val("recursive", "recursive")
     state_template = cfg_val("ollama_state_template", "ollama_state")
     instructions_template = cfg_val("ollama_instructions_template", "ollama_instructions")
+    search_question = cfg_val("ollama_search_question", "ollama_search_question") or "is_valid"
+    search_question_type = cfg_val("ollama_search_question_type", "ollama_search_question_type") or "noul"
     cache_dir = cfg_val("cache_dir", "cache")
     save_cache_dir = cfg_val("save_cache_dir", "save_cache")
     still_frame_threshold = cfg_val("still_frame_threshold", "still_frame_threshold") or 0.95
@@ -371,7 +373,7 @@ def cmd_search(args):
     ollama_timeout = cfg_val("ollama_timeout", "ollama_timeout")
 
     print(f"Config: top_k={top_k}, global_k={global_k}, json_output={json_output}", file=sys.stderr)
-    print(f"        save_frames={save_frames}, video={video_paths[0]}, decision_model_floor={decision_model_floor}, decision_model_sample_rate={decision_model_sample_rate}, ollama_host={ollama_endpoint}, ollama_model={ollama_model}, ollama_frame_scale={frame_scale:.2f}, ollama_state={state_template!r}, ollama_instructions={instructions_template!r}, ollama_timeout={ollama_timeout}", file=sys.stderr)
+    print(f"        save_frames={save_frames}, video={video_paths[0]}, decision_model_floor={decision_model_floor}, decision_model_sample_rate={decision_model_sample_rate}, ollama_host={ollama_endpoint}, ollama_model={ollama_model}, ollama_frame_scale={frame_scale:.2f}, ollama_state={state_template!r}, ollama_instructions={instructions_template!r}, ollama_timeout={ollama_timeout}, ollama_search_question={search_question!r}, ollama_search_question_type={search_question_type!r}", file=sys.stderr)
 
     sample_rate = decision_model_sample_rate if decision_model_sample_rate else 1
 
@@ -428,8 +430,8 @@ def cmd_search(args):
             "state": state_template or "",
             "images": images,
             "questions": {
-                "is_valid": {
-                    "type": "noul",
+                search_question: {
+                    "type": search_question_type,
                     "instructions": instructions_template or ""
                 }
             }
@@ -442,7 +444,7 @@ def cmd_search(args):
             )
             with urllib.request.urlopen(req, timeout=ollama_timeout) as response:
                 res_json = json.loads(response.read().decode("utf-8"))
-            batch_score = res_json["answers"]["is_valid"]["noul"]
+            batch_score = res_json["answers"][search_question][search_question_type]
             if isinstance(batch_score, list):
                 batch_score = max(batch_score) if batch_score else 0.0
         except urllib.error.URLError as e:
@@ -1290,6 +1292,8 @@ def main():
     p_search.add_argument("--save-cache", "-sc", type=str, default=None, nargs="?", const=".", help="Path to cache directory for saving search results. Overrides config 'save_cache_dir'. Defaults to current directory (.) if used without a path")
     p_search.add_argument("--ollama-state", "-s", type=str, default=None, help="State context string for Ollama (default: empty)")
     p_search.add_argument("--ollama-instructions", "-oi", type=str, default=None, help="Instructions string for Ollama (default: empty)")
+    p_search.add_argument("--ollama-search-question", "-csq", type=str, default=None, help="Search question name (default: is_valid)")
+    p_search.add_argument("--ollama-search-question-type", "-csqt", type=str, default=None, help="Search question type (default: noul)")
     p_search.set_defaults(func=cmd_search)
     p_classify = sub.add_parser("classify", help="Classify video frames using Ollama choice-question model")
     p_classify.add_argument("video_paths", nargs="+", help="One or more video files, directories, or glob patterns (e.g., video1.mp4 video2/*.mp4)")

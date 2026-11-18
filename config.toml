@@ -20,6 +20,22 @@ merge_range = false
 stitch = ""
 ollama_state_template = "sample frame from a video"
 ollama_instructions_template = ""
+# Ollama search question name and type used in the request body
+ollama_search_question = "is_valid"
+ollama_search_question_type = "noul"
+
+# Example Ollama request JSON body for search mode (built from the above config fields):
+# {
+#   "model": "clef-flash:9b",           # ollama_decision_model
+#   "state": "sample frame from a video",   # ollama_state_template
+#   "images": ["base64_image1", "base64_image2", ...],  # injected at runtime
+#   "questions": {
+#     "is_valid": {                       # ollama_search_question
+#       "type": "noul",                   # ollama_search_question_type
+#       "instructions": "",               # ollama_instructions_template
+#     }
+#   }
+# }
 
 [classify]
 top_k = -1
@@ -47,3 +63,21 @@ billing: Payments, payouts, invoices, refunds
 technical: Bugs, outages, integrations, API errors
 sales: Pricing, upgrades, new accounts
 """
+
+# Example Ollama request JSON body (built from the above config fields):
+# {
+#   "model": "typesafe/jev-1.14",           # ollama_decision_model
+#   "state": "sample frame from a video",   # ollama_state_template
+#   "images": ["base64_image1", "base64_image2", ...],  # injected at runtime
+#   "questions": {
+#     "team": {                               # ollama_classify_question
+#       "type": "choice",
+#       "instructions": "Which team should handle this scene?",  # ollama_classify_instructions
+#       "criteria": {                         # ollama_classify_criteria parsed as key: description
+#         "billing": "Payments, payouts, invoices, refunds",
+#         "technical": "Bugs, outages, integrations, API errors",
+#         "sales": "Pricing, upgrades, new accounts"
+#       }
+#     }
+#   }
+# }
