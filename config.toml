@@ -43,3 +43,13 @@ sales: Pricing, upgrades, new accounts
 #     }
 #   }
 # }
+
+# Example: yes/no (search-equivalent) criteria
+# This replicates the old vsearch search mode exactly:
+# ollama_classify_question = "is_valid"
+# ollama_classify_instructions = "Does the image match the query: a person?"
+# ollama_classify_criteria = """
+# yes: the frame matches the query
+# no: the frame does not match
+# """
+# then use --top-choice yes --decision-model-floor 0.7

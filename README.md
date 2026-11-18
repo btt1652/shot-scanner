@@ -75,6 +75,24 @@ required — frames are extracted and validated on the fly.
 | `--ollama-classify-instructions` | `-ci` | Instructions for the choice question |
 | `--ollama-classify-criteria` | `-cc` | Criteria as JSON dict or multiline `key: description` |
 
+## Yes/No (Search-Equivalent) Classification
+
+To replicate the old `vsearch search` behavior that used the `noul` (yes/no)
+question type, simply use a two-choice criteria:
+
+```bash
+vsearch classify myvideo.mp4 \
+  --ollama-classify-question is_valid \
+  --ollama-classify-instructions "Does this frame match the query?" \
+  --ollama-classify-criteria "yes: the frame matches the query\nno: the frame does not match" \
+  --top-choice yes --decision-model-floor 0.7
+```
+
+This is exactly equivalent to the old search mode with `ollama-search-question
+is_valid` and `ollama-search-question-type noul` — the `choice` question type
+with `yes`/`no` criteria handles binary judgment cleanly, and the unified cache
+and filtering apply.
+
 ## Configuration (`config.toml`)
 
 The config file contains a single `[classify]` section:
