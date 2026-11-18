@@ -1,6 +1,8 @@
 """Config handling for vsearch.
 
-The config file (TOML) contains a single [search] section for decision-model-only search defaults.
+The config file contains per-mode sections:
+  [search]   — decision-model-only search mode defaults
+  [classify] — classify (choice-question) mode defaults
 
 CLI flags always override config values when given.
 
@@ -37,7 +39,27 @@ def default_config() -> dict:
             "ollama_instructions_template": "",
             "cache_dir": "/tmp",
             "save_cache_dir": "/tmp",
-        }
+        },
+        "classify": {
+            "top_k": -1,
+            "json_output": False,
+            "decision_model_floor": 0.5,
+            "decision_model_sample_rate": 3,
+            "ollama_host": "192.168.1.190",
+            "ollama_frame_scale": 0.1,
+            "ollama_decision_model": "typesafe/jev-1.14",
+            "ollama_timeout": 60,
+            "ollama_state_template": "sample frame from a video",
+            "ollama_instructions_template": "",
+            "ollama_classify_question": "team",
+            "ollama_classify_instructions": "Which team should handle this scene?",
+            "ollama_classify_criteria": "",
+            "cache_dir": "/tmp",
+            "save_cache_dir": "/tmp",
+            "still_frame_threshold": 0.95,
+            "same_scene_threshold": 0.80,
+            "max_scene_batch_size": 4,
+        },
     }
 
 

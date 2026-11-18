@@ -38,23 +38,29 @@ def _hash_video_content(video_path, chunk_mb=8):
     return h.digest()
 
 
-def _hash_params(sample_rate, frame_scale, state, instructions, model):
-    """Hash search params (sample-rate, frame-scale, state, instructions, model)."""
+def _hash_params(sample_rate, frame_scale, state, instructions, model, criteria_json=None):
+    """Hash search params (sample-rate, frame-scale, state, instructions, model[, criteria]).
+
+    When `criteria_json` is provided (classify mode), it's included in the hash so
+    different choice-criteria produce different caches.
+    """
     s = f"{sample_rate}|{frame_scale}|{state}|{instructions}|{model}"
+    if criteria_json is not None:
+        s = f"{s}|{criteria_json}"
     return hashlib.blake2b(s.encode("utf-8"), digest_size=32).digest()
 
 
-def _cache_filename(video_path, sample_rate, frame_scale, state, instructions, model):
+def _cache_filename(video_path, sample_rate, frame_scale, state, instructions, model, criteria_json=None):
     """Build cache filename: <single_hash>.json from content + params."""
     content_bytes = _hash_video_content(video_path)
-    params_bytes = _hash_params(sample_rate, frame_scale, state, instructions, model)
+    params_bytes = _hash_params(sample_rate, frame_scale, state, instructions, model, criteria_json)
     h = hashlib.blake2b()
     h.update(content_bytes)
     h.update(params_bytes)
     return f"{h.hexdigest()[:16]}.json"
 
 
-def _try_load_cache(cache_dir, video_path, sample_rate, frame_scale, state, instructions, model, decision_model_floor):
+def _try_load_cache(cache_dir, video_path, sample_rate, frame_scale, state, instructions, model, decision_model_floor, criteria_json=None):
     """Try to load cached results.
 
     Returns (results, data) where:
@@ -67,7 +73,7 @@ def _try_load_cache(cache_dir, video_path, sample_rate, frame_scale, state, inst
     """
     if not cache_dir:
         return None, None
-    fname = _cache_filename(video_path, sample_rate, frame_scale, state, instructions, model)
+    fname = _cache_filename(video_path, sample_rate, frame_scale, state, instructions, model, criteria_json)
     cache_file = os.path.join(cache_dir, fname)
     print(f"Cache lookup: {cache_file}", file=sys.stderr)
     if not os.path.exists(cache_file):
@@ -94,11 +100,11 @@ def _try_load_cache(cache_dir, video_path, sample_rate, frame_scale, state, inst
         return None, None
 
 
-def _save_cache(cache_dir, video_path, sample_rate, frame_scale, state, instructions, model, all_results, metadata, total_sampled=None, total_validated=None, total_extracted=None, frame_index=None, passing_count=None):
+def _save_cache(cache_dir, video_path, sample_rate, frame_scale, state, instructions, model, all_results, metadata, total_sampled=None, total_validated=None, total_extracted=None, frame_index=None, passing_count=None, criteria_json=None):
     """Save all results (including resume state) to a cache JSON file."""
     if not cache_dir:
         return
-    fname = _cache_filename(video_path, sample_rate, frame_scale, state, instructions, model)
+    fname = _cache_filename(video_path, sample_rate, frame_scale, state, instructions, model, criteria_json)
     cache_file = os.path.join(cache_dir, fname)
     try:
         os.makedirs(cache_dir, exist_ok=True)
@@ -810,6 +816,450 @@ def cmd_search(args):
             print("No matches found.")
 
 
+
+def _parse_criteria(criteria_str):
+    """Parse criteria from a string. Accepts JSON dict or multiline 'key: description' format."""
+    if not criteria_str:
+        return {}
+    criteria_str = criteria_str.strip()
+    if not criteria_str:
+        return {}
+    try:
+        obj = json.loads(criteria_str)
+        if isinstance(obj, dict):
+            return obj
+    except (json.JSONDecodeError, ValueError):
+        pass
+    result = {}
+    for line in criteria_str.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if ":" in line:
+            key, _, desc = line.partition(":")
+            key = key.strip()
+            desc = desc.strip()
+            if key:
+                result[key] = desc
+    return result
+
+
+def _validate_batch_classify(frames_batch, model, state_template, classify_question, classify_instructions, criteria_dict, decision_model_floor, ollama_timeout, ollama_endpoint, batch_id_counter=None):
+    """Validate a batch of frames using a choice question. Sends one multi-image Ollama request. Returns (results, passing, batch_id)."""
+    results = []
+    passing = 0
+    if not frames_batch:
+        return results, passing, 0
+    batch_id = (batch_id_counter or 0) + 1
+
+    ts_list = ", ".join(f"{int(ts)//3600:02d}:{int(ts)%3600//60:02d}:{int(ts)%60:02d}" for ts, _, _ in frames_batch)
+    print(f"send request [{ts_list}]", file=sys.stderr)
+
+    images = [b64 for _, b64, _ in frames_batch]
+    payload = {
+        "model": model,
+        "state": state_template or "",
+        "images": images,
+        "questions": {
+            classify_question: {
+                "type": "choice",
+                "instructions": classify_instructions or "",
+                "criteria": criteria_dict,
+            }
+        }
+    }
+    try:
+        req = urllib.request.Request(ollama_endpoint, data=json.dumps(payload).encode("utf-8"), headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=ollama_timeout) as response:
+            res_json = json.loads(response.read().decode("utf-8"))
+        answers = res_json.get("answers", {})
+        q_ans = answers.get(classify_question, {})
+        probs = q_ans.get("choice", q_ans) if isinstance(q_ans, dict) else {}
+        if not isinstance(probs, dict):
+            probs = {}
+    except urllib.error.URLError as e:
+        print(f"Classify request failed: {e}. Discarding batch.", file=sys.stderr)
+        return results, passing, batch_id
+    except Exception as e:
+        print(f"Classify request error: {e}. Discarding batch.", file=sys.stderr)
+        return results, passing, batch_id
+
+    top_choice = None
+    top_prob = 0.0
+    for ch, p in probs.items():
+        try:
+            pv = float(p)
+        except (TypeError, ValueError):
+            pv = 0.0
+        if top_choice is None or pv > top_prob:
+            top_prob = pv
+            top_choice = ch
+
+    for ts, _b64, vp in frames_batch:
+        ts_formatted = f"{int(ts)//3600:02d}:{int(ts)%3600//60:02d}:{int(ts)%60:02d}"
+        results.append({
+            "timestamp_seconds": ts,
+            "timestamp_formatted": ts_formatted,
+            "score": top_prob,
+            "source_video_path": vp,
+            "batch_id": batch_id,
+            "probabilities": probs,
+            "top_choice": top_choice,
+            "top_probability": top_prob,
+        })
+        if top_prob >= decision_model_floor:
+            passing += 1
+
+    pass_fail = "pass" if top_prob >= decision_model_floor else "fail"
+    print(f"response [{ts_list}] top={top_choice} ({top_prob:.2f}) {pass_fail}", file=sys.stderr)
+    return results, passing, batch_id
+
+
+
+def cmd_classify(args):
+    """Classify video frames using an Ollama choice-question model."""
+    cfg = load_config()
+
+    def cfg_val(key, cli_arg):
+        return get_config_value(cfg, "classify", key, getattr(args, cli_arg, None))
+
+    top_k = cfg_val("top_k", "top_k")
+    global_k = cfg_val("global_k", "global_k")
+    json_output = cfg_val("json_output", "json")
+    decision_model_floor = cfg_val("decision_model_floor", "decision_model_floor")
+    decision_model_sample_rate = cfg_val("decision_model_sample_rate", "decision_model_sample_rate")
+    ollama_endpoint = cfg_val("ollama_host", "ollama_host")
+    ollama_model = cfg_val("ollama_decision_model", "ollama_model")
+    frame_scale = cfg_val("ollama_frame_scale", "ollama_frame_scale")
+    recursive = cfg_val("recursive", "recursive")
+    state_template = cfg_val("ollama_state_template", "ollama_state")
+    instructions_template = cfg_val("ollama_instructions_template", "ollama_instructions")
+    classify_question = cfg_val("ollama_classify_question", "classify_question")
+    classify_instructions = cfg_val("ollama_classify_instructions", "classify_instructions")
+    classify_criteria = cfg_val("ollama_classify_criteria", "classify_criteria")
+    cache_dir = cfg_val("cache_dir", "cache")
+    save_cache_dir = cfg_val("save_cache_dir", "save_cache")
+    still_frame_threshold = cfg_val("still_frame_threshold", "still_frame_threshold") or 0.95
+    same_scene_threshold = cfg_val("same_scene_threshold", "same_scene_threshold") or 0.80
+    max_scene_batch_size = cfg_val("max_scene_batch_size", "max_scene_batch_size") or 4
+    max_scene_batch_size = min(max_scene_batch_size, 4)
+    merge_range = cfg_val("merge_range", "merge_range")
+    ollama_timeout = cfg_val("ollama_timeout", "ollama_timeout")
+
+    if not state_template:
+        state_template = ""
+    if not instructions_template:
+        instructions_template = ""
+    if not classify_instructions:
+        classify_instructions = ""
+
+    criteria_dict = _parse_criteria(classify_criteria) if classify_criteria else {}
+    if not criteria_dict:
+        print("Error: classify criteria is empty — provide ollama_classify_criteria in config or --ollama-classify-criteria", file=sys.stderr)
+        sys.exit(1)
+    criteria_json = json.dumps(criteria_dict, sort_keys=True, ensure_ascii=False)
+
+    query = classify_instructions or state_template or ""
+
+    video_input = getattr(args, "video_paths", None)
+    if not video_input:
+        print("Error: video path(s) required", file=sys.stderr)
+        sys.exit(1)
+
+    video_paths, missing = _resolve_video_paths(video_input, recursive=recursive)
+    if not video_paths:
+        print(f"Error: no video files found from input '{video_input}'", file=sys.stderr)
+        sys.exit(1)
+    for m in missing:
+        print(f"Warning: no video matched input '{m}'", file=sys.stderr)
+
+    ollama_endpoint = resolve_ollama_endpoint(ollama_endpoint)
+
+    print(f"Config: top_k={top_k}, global_k={global_k}, json_output={json_output}", file=sys.stderr)
+    print(f"        question={classify_question!r}, instructions={classify_instructions!r}, criteria={criteria_dict}", file=sys.stderr)
+    print(f"        video={video_paths[0]}, decision_model_floor={decision_model_floor}, decision_model_sample_rate={decision_model_sample_rate}, ollama_host={ollama_endpoint}, ollama_model={ollama_model}, ollama_frame_scale={frame_scale:.2f}, ollama_state={state_template!r}, ollama_timeout={ollama_timeout}", file=sys.stderr)
+
+    sample_rate = decision_model_sample_rate if decision_model_sample_rate else 1
+    model = ollama_model if ollama_model else "typesafe/jev-1.14"
+
+    batch = []
+    all_results = []
+    passing_count = 0
+    total_extracted = 0
+    total_validated = 0
+    batch_id_counter = 0
+
+    def _scaled_bgr(frame_bgr):
+        scale = frame_scale if frame_scale else 0.2
+        h, w = frame_bgr.shape[:2]
+        new_w = max(1, int(w * scale))
+        new_h = max(1, int(h * scale))
+        return cv2.resize(frame_bgr, (new_w, new_h), interpolation=cv2.INTER_AREA)
+
+    def _b64_from_bgr(frame_bgr):
+        rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+        pil_img = Image.fromarray(rgb)
+        scale = frame_scale if frame_scale else 0.2
+        new_w = max(1, int(pil_img.width * scale))
+        new_h = max(1, int(pil_img.height * scale))
+        pil_img = pil_img.resize((new_w, new_h), Image.LANCZOS)
+        buffered = io.BytesIO()
+        pil_img.save(buffered, format="JPEG", quality=80)
+        return base64.b64encode(buffered.getvalue()).decode("utf-8")
+
+    def _flush_batch():
+        nonlocal batch, total_validated, passing_count, batch_id_counter
+        if not batch:
+            return
+        out, passing, batch_id_counter = _validate_batch_classify(
+            batch, model, state_template, classify_question, classify_instructions,
+            criteria_dict, decision_model_floor, ollama_timeout, ollama_endpoint,
+            batch_id_counter,
+        )
+        all_results.extend(out)
+        passing_count += passing
+        total_validated += len(batch)
+        batch = []
+        if save_cache_dir:
+            video_results = [r for r in all_results if r.get("source_video_path") == vp]
+            if video_results:
+                video_results.sort(key=lambda x: x["timestamp_seconds"])
+                _save_cache(
+                    save_cache_dir, vp,
+                    sample_rate, frame_scale,
+                    state_template, classify_instructions, model,
+                    video_results, {},
+                    total_sampled=total_sampled,
+                    frame_index=frame_index,
+                    total_extracted=total_extracted,
+                    passing_count=passing_count,
+                    criteria_json=criteria_json,
+                )
+
+    # Resolve cache directories (CLI overrides config)
+    cache_dir = getattr(args, "cache", None) or cache_dir
+    save_cache_dir = getattr(args, "save_cache", None) or save_cache_dir
+    model_for_cache = model
+
+    # Process each video: check cache first, then classify if miss
+    for vp in video_paths:
+        frame_index = 0
+        if cache_dir:
+            cache_results, cache_data = _try_load_cache(
+                cache_dir, vp,
+                sample_rate, frame_scale,
+                state_template, classify_instructions, model_for_cache,
+                decision_model_floor,
+                criteria_json=criteria_json,
+            )
+            if cache_results is not None:
+                all_results.extend(cache_results)
+                passing_count += len(cache_results)
+                print(f"Loaded {len(cache_results)} result(s) from cache for {vp}", file=sys.stderr)
+                continue
+            if cache_data is not None:
+                frame_index = int(cache_data.get("frame_index", 0))
+                passing_count = int(cache_data.get("passing_count", 0))
+                total_extracted = int(cache_data.get("total_extracted", 0))
+                total_validated = int(cache_data.get("total_validated", 0))
+                print(f"Resuming from cache: frame_index={frame_index}, validated={total_validated}", file=sys.stderr)
+
+        cap = cv2.VideoCapture(vp)
+        if not cap.isOpened():
+            print(f"Warning: Cannot open video {vp}, skipping", file=sys.stderr)
+            continue
+
+        print(f"Processing video: {vp}", file=sys.stderr)
+        prev_small_gray = None
+        prev_ts = None
+
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) if cap.get(cv2.CAP_PROP_FRAME_COUNT) is not None else None
+        fps = cap.get(cv2.CAP_PROP_FPS)
+        if fps is None or fps <= 0:
+            fps = 30.0
+        stride = max(1, int(fps * sample_rate))
+        total_sampled = int((total_frames + stride - 1) / stride) if total_frames is not None else 0
+
+        if frame_index > 0:
+            cap.set(cv2.CAP_PROP_POS_FRAMES, frame_index)
+
+        while True:
+            ret, frame_bgr = cap.read()
+            if not ret:
+                break
+
+            if frame_index % stride == 0:
+                small_bgr = _scaled_bgr(frame_bgr)
+                small_gray = cv2.cvtColor(small_bgr, cv2.COLOR_BGR2GRAY)
+                b64 = _b64_from_bgr(frame_bgr)
+                ts = frame_index / fps
+                skip_frame = True
+
+                if prev_small_gray is not None:
+                    diff = cv2.absdiff(prev_small_gray, small_gray)
+                    mean_diff = float(np.mean(diff))
+                    similarity = 1.0 - (mean_diff / 255.0)
+
+                    ts_prev_formatted = f"{int(prev_ts)//3600:02d}:{int(prev_ts)%3600//60:02d}:{int(prev_ts)%60:02d}"
+                    ts_cur_formatted = f"{int(ts)//3600:02d}:{int(ts)%3600//60:02d}:{int(ts)%60:02d}"
+
+                    if similarity >= still_frame_threshold:
+                        skip_frame = True
+                        print(f"sim check {ts_cur_formatted} <-> {ts_prev_formatted} sim={similarity:.2f} (still frame, skipped)", file=sys.stderr)
+                        all_results.append({
+                            "timestamp_seconds": ts,
+                            "timestamp_formatted": ts_cur_formatted,
+                            "score": 0.0,
+                            "source_video_path": vp,
+                            "probabilities": {},
+                            "top_choice": None,
+                            "top_probability": 0.0,
+                        })
+                        total_extracted += 1
+                    elif similarity >= same_scene_threshold and len(batch) < max_scene_batch_size:
+                        print(f"sim check {ts_cur_formatted} <-> {ts_prev_formatted} sim={similarity:.2f} (same scene)", file=sys.stderr)
+                        batch.append((ts, b64, vp))
+                        total_extracted += 1
+                        batch_ts = ", ".join(f"{int(t)//3600:02d}:{int(t)%3600//60:02d}:{int(t)%60:02d}" for t, _, _ in batch)
+                        print(f"add {ts_cur_formatted} to request [{batch_ts}]", file=sys.stderr)
+                        if len(batch) >= max_scene_batch_size:
+                            _flush_batch()
+                        skip_frame = False
+                    else:
+                        print(f"sim check {ts_cur_formatted} <-> {ts_prev_formatted} sim={similarity:.2f} (new scene)", file=sys.stderr)
+                        _flush_batch()
+                        batch = [(ts, b64, vp)]
+                        total_extracted += 1
+                        skip_frame = False
+                else:
+                    batch = [(ts, b64, vp)]
+                    total_extracted += 1
+                    skip_frame = False
+                    ts_formatted = f"{int(ts)//3600:02d}:{int(ts)%3600//60:02d}:{int(ts)%60:02d}"
+                    print(f"add {ts_formatted} to request [{ts_formatted}]", file=sys.stderr)
+
+                if not skip_frame:
+                    prev_small_gray = small_gray
+                    prev_ts = ts
+
+                if total_extracted % 10 == 0:
+                    print(f"{vp} (extracted={total_extracted}/{total_sampled}, validated={total_validated}, passing={passing_count})", file=sys.stderr)
+
+            frame_index += 1
+
+        cap.release()
+
+        # Flush remaining batch for this video
+        _flush_batch()
+
+        # Save cache for this video
+        if save_cache_dir:
+            video_results = [r for r in all_results if r.get("source_video_path") == vp]
+            if video_results:
+                video_results.sort(key=lambda x: x["timestamp_seconds"])
+                _save_cache(
+                    save_cache_dir, vp,
+                    sample_rate, frame_scale,
+                    state_template, classify_instructions, model,
+                    video_results, {},
+                    total_sampled=total_sampled,
+                    frame_index=frame_index,
+                    total_extracted=total_extracted,
+                    passing_count=passing_count,
+                    criteria_json=criteria_json,
+                )
+
+    # Build final results
+    all_results_filtered = [r for r in all_results if r.get("score", 0) >= decision_model_floor]
+    all_results_filtered.sort(key=lambda x: x["score"], reverse=True)
+
+    if merge_range:
+        merged = []
+        for r in all_results_filtered:
+            vid = r.get("source_video_path", "")
+            bid = r.get("batch_id")
+            ts = r["timestamp_seconds"]
+            if merged and merged[-1].get("video_path") == vid:
+                prev_end = merged[-1]["end_seconds"]
+                same_batch = bid is not None and merged[-1].get("batch_id") == bid
+                close_enough = (ts >= prev_end) and (ts - prev_end) <= sample_rate + 0.5
+                if same_batch or close_enough:
+                    merged[-1]["end_seconds"] = ts
+                    merged[-1]["sample_count"] += 1
+                    old_avg = merged[-1]["score_avg"]
+                    old_n = merged[-1]["sample_count"] - 1
+                    merged[-1]["score_avg"] = (old_avg * old_n + r["score"]) / merged[-1]["sample_count"]
+                    merged[-1]["score_max"] = max(merged[-1]["score_max"], r["score"])
+                else:
+                    merged.append({
+                        "video_path": vid,
+                        "batch_id": bid,
+                        "start_seconds": ts,
+                        "end_seconds": ts,
+                        "score_max": r["score"],
+                        "score_avg": r["score"],
+                        "sample_count": 1,
+                        "start_formatted": f"{int(ts)//3600:02d}:{int(ts)%3600//60:02d}:{int(ts)%60:02d}",
+                        "end_formatted": f"{int(ts)//3600:02d}:{int(ts)%3600//60:02d}:{int(ts)%60:02d}",
+                    })
+            else:
+                merged.append({
+                    "video_path": vid,
+                    "batch_id": bid,
+                    "start_seconds": ts,
+                    "end_seconds": ts,
+                    "score_max": r["score"],
+                    "score_avg": r["score"],
+                    "sample_count": 1,
+                    "start_formatted": f"{int(ts)//3600:02d}:{int(ts)%3600//60:02d}:{int(ts)%60:02d}",
+                    "end_formatted": f"{int(ts)//3600:02d}:{int(ts)%3600//60:02d}:{int(ts)%60:02d}",
+                })
+        final_results = merged
+    else:
+        final_results = all_results_filtered
+
+    # Apply top-k / global-k AFTER merge_range
+    if global_k is not None and global_k > 0:
+        final_results = final_results[:global_k]
+    elif top_k is not None and top_k > 0:
+        final_results = final_results[:top_k]
+
+    final_results.sort(key=lambda x: (x.get("source_video_path", ""), x["start_seconds"] if "start_seconds" in x else x["timestamp_seconds"]))
+
+    # Output
+    if json_output:
+        serializable = [{k: v for k, v in r.items()} for r in final_results]
+        payload = {
+            "query": query,
+            "question": classify_question,
+            "choices": criteria_dict,
+            "results": serializable,
+            "metadata": {
+                "decision_model_floor": decision_model_floor,
+                "decision_model_sample_rate": sample_rate,
+                "ollama_host": ollama_endpoint,
+                "ollama_model": model,
+                "ollama_frame_scale": frame_scale,
+                "top_k": top_k,
+                "global_k": global_k,
+                "merge_range": merge_range,
+                "video": video_paths[0],
+            },
+        }
+        print(json.dumps(payload))
+    else:
+        if final_results:
+            for r in final_results:
+                if "start_seconds" in r and "end_seconds" in r:
+                    probs_str = " ".join(f"{k}={v:.3f}" for k, v in r.get("probabilities", {}).items())
+                    print(f"ts={r['start_formatted']}-{r['end_formatted']} top={r.get('top_choice')} ({r.get('top_probability',0):.3f}) {probs_str} (n={r['sample_count']})")
+                else:
+                    probs_str = " ".join(f"{k}={v:.3f}" for k, v in r.get("probabilities", {}).items())
+                    print(f"ts={r['timestamp_formatted']} top={r.get('top_choice')} ({r.get('top_probability',0):.3f}) {probs_str}")
+        else:
+            print("No matches found.")
+
+
 def main():
     parser = argparse.ArgumentParser(
         prog="vsearch",
@@ -841,6 +1291,31 @@ def main():
     p_search.add_argument("--ollama-state", "-s", type=str, default=None, help="State context string for Ollama (default: empty)")
     p_search.add_argument("--ollama-instructions", "-oi", type=str, default=None, help="Instructions string for Ollama (default: empty)")
     p_search.set_defaults(func=cmd_search)
+    p_classify = sub.add_parser("classify", help="Classify video frames using Ollama choice-question model")
+    p_classify.add_argument("video_paths", nargs="+", help="One or more video files, directories, or glob patterns (e.g., video1.mp4 video2/*.mp4)")
+
+    p_classify.add_argument("--top-k", "-k", type=int, default=None, help="Maximum number of top results to return (default: all passing)")
+    p_classify.add_argument("--global-k", "-gk", type=int, default=None, help="Global top-K across all videos, overriding --top-k")
+    p_classify.add_argument("--json", action="store_true", default=None, help="Output results in strict JSON format")
+    p_classify.add_argument("--decision-model-floor", "-dmt", type=float, default=None, help="Threshold for Ollama top-choice probability (default: 0.5). Results below are discarded.")
+    p_classify.add_argument("--decision-model-sample-rate", "-dmsr", type=int, default=None, help="Frame sampling interval in seconds (default: 3)")
+    p_classify.add_argument("--ollama-host", "-oh", default=None, help="Ollama server address (default: 192.168.1.190). Falls back to localhost if unreachable")
+    p_classify.add_argument("--ollama-frame-scale", "-ofs", type=float, default=None, help="Scale factor for frames sent to Ollama (0.0-1.0, default: 0.1). Lower = faster")
+    p_classify.add_argument("--ollama-model", "-dm", default=None, help="Ollama model name (default: typesafe/jev-1.14)")
+    p_classify.add_argument("--ollama-timeout", "-ot", type=int, default=None, help="Ollama request timeout in seconds (default: 60)")
+    p_classify.add_argument("--still-frame-threshold", type=float, default=None, help="Similarity (0-1) above which a frame is considered still (default: 0.95)")
+    p_classify.add_argument("--same-scene-threshold", type=float, default=None, help="Similarity (0-1) above which frames are considered same scene (default: 0.80)")
+    p_classify.add_argument("--max-scene-batch-size", type=int, default=None, help="Maximum number of consecutive same-scene frames per Ollama request (default: 4, capped by Ollama limit)")
+    p_classify.add_argument("--merge-range", action="store_true", default=None, help="Merge adjacent same-scene frames into timestamp ranges in output")
+    p_classify.add_argument("--recursive", "-R", action="store_true", default=False, help="Recursively scan directories for video files")
+    p_classify.add_argument("--cache", "-c", type=str, default=None, help="Path to cache directory to look up existing cache files. Overrides config 'cache_dir'")
+    p_classify.add_argument("--save-cache", "-sc", type=str, default=None, nargs="?", const=".", help="Path to cache directory for saving classify results. Overrides config 'save_cache_dir'. Defaults to current directory (.) if used without a path")
+    p_classify.add_argument("--ollama-state", "-s", type=str, default=None, help="State context string for Ollama (default: 'sample frame from a video')")
+    p_classify.add_argument("--ollama-classify-question", "-cq", type=str, default=None, help="Question name (e.g., 'team')")
+    p_classify.add_argument("--ollama-classify-instructions", "-ci", type=str, default=None, help="Instructions for the choice question (e.g., 'Which team should handle this scene?')")
+    p_classify.add_argument("--ollama-classify-criteria", "-cc", type=str, default=None, help="Criteria as JSON dict {\"key\": \"desc\"} or multiline 'key: description'")
+    p_classify.set_defaults(func=cmd_classify)
+
 
     args = parser.parse_args()
     args.func(args)

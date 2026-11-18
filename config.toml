@@ -7,7 +7,7 @@ json_output = false
 save_frames = ""
 decision_model_floor = 0.8
 decision_model_sample_rate = 3
-ollama_host = "192.168.1.190" 
+ollama_host = "192.168.1.190"
 ollama_frame_scale = 0.1
 ollama_decision_model = "clef-flash:9b" #"d3:4b" d1:3b
 ollama_timeout = 60
@@ -20,3 +20,30 @@ merge_range = false
 stitch = ""
 ollama_state_template = "sample frame from a video"
 ollama_instructions_template = ""
+
+[classify]
+top_k = -1
+json_output = false
+decision_model_floor = 0.5
+decision_model_sample_rate = 3
+ollama_host = "192.168.1.190"
+ollama_frame_scale = 0.1
+ollama_decision_model = "typesafe/jev-1.14"
+ollama_timeout = 60
+cache_dir = "/tmp"
+save_cache_dir = "/tmp"
+still_frame_threshold = 0.95
+same_scene_threshold = 0.80
+max_scene_batch_size = 4
+merge_range = false
+ollama_state_template = "sample frame from a video"
+# The question name used in the Ollama request and response (e.g. "team")
+ollama_classify_question = "team"
+# The instructions string for the choice question
+ollama_classify_instructions = "Which team should handle this scene?"
+# Criteria as "key: description" lines (parsed into a dict sent to Ollama)
+ollama_classify_criteria = """
+billing: Payments, payouts, invoices, refunds
+technical: Bugs, outages, integrations, API errors
+sales: Pricing, upgrades, new accounts
+"""
