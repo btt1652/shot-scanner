@@ -45,17 +45,17 @@ def _cache_params(sample_rate, frame_scale, state, questions_json, model, same_s
     return params
 
 
-def _try_load_cache(cache_file, video_path, sample_rate, frame_scale, state, questions_json, model, same_scene_threshold=None, still_frame_threshold=None):
+def _try_load_cache(cache, video_path, sample_rate, frame_scale, state, questions_json, model, same_scene_threshold=None, still_frame_threshold=None):
     """Try to load cached results from SQLite cache.
 
     Returns (answers, data) where:
       - Cache hit: answers = frame answer rows, data = {'video_id': ..., 'video_path': ...}
       - Cache miss/incomplete: answers = None, data = None
     """
-    if not cache_file:
+    if not cache:
         return None, None
     try:
-        cache_db = CacheDB(cache_file)
+        cache_db = CacheDB(cache)
         params_hash = _params_hash(**_cache_params(
             sample_rate, frame_scale, state, questions_json, model,
             same_scene_threshold, still_frame_threshold,
@@ -83,12 +83,12 @@ def _try_load_cache(cache_file, video_path, sample_rate, frame_scale, state, que
         return None, None
 
 
-def _save_cache(cache_file, video_path, sample_rate, frame_scale, state, questions_json, model, all_results, total_sampled=None, same_scene_threshold=None, still_frame_threshold=None):
+def _save_cache(cache, video_path, sample_rate, frame_scale, state, questions_json, model, all_results, total_sampled=None, same_scene_threshold=None, still_frame_threshold=None):
     """Save all answer rows to SQLite cache."""
-    if not cache_file:
+    if not cache:
         return
     try:
-        cache_db = CacheDB(cache_file)
+        cache_db = CacheDB(cache)
         params_hash = _params_hash(**_cache_params(
             sample_rate, frame_scale, state, questions_json, model,
             same_scene_threshold, still_frame_threshold,
@@ -368,7 +368,7 @@ def cmd_classify(args):
     frame_scale = cfg_val("ollama_frame_scale", "ollama_frame_scale")
     recursive = cfg_val("recursive", "recursive")
     state_template = cfg_val("ollama_state_template", "ollama_state")
-    cache_file = cfg_val("cache_file", "cache_file")
+    cache = cfg_val("cache", "cache")
     still_frame_threshold = cfg_val("still_frame_threshold", "still_frame_threshold") or 0.95
     same_scene_threshold = cfg_val("same_scene_threshold", "same_scene_threshold") or 0.80
     ollama_timeout = cfg_val("ollama_timeout", "ollama_timeout")
@@ -442,14 +442,14 @@ def cmd_classify(args):
         total_validated += len(batch)
         batch = []
 
-    save_cache_file = cache_file
+    save_cache = cache
 
     # Process each video: check cache first, then classify if miss
     for vp in video_paths:
         frame_index = 0
-        if cache_file:
+        if cache:
             cache_results, cache_data = _try_load_cache(
-                cache_file, vp,
+                cache, vp,
                 sample_rate, frame_scale,
                 state_template, questions_json, model,
                 same_scene_threshold, still_frame_threshold,
@@ -461,7 +461,7 @@ def cmd_classify(args):
             if cache_data is not None:
                 video_id = cache_data.get("video_id")
                 if video_id is not None:
-                    cache_db = CacheDB(cache_file)
+                    cache_db = CacheDB(cache)
                     last_frame = cache_db.execute_sql(
                         "SELECT MAX(frame_index) AS max_idx FROM frame_answers WHERE video_id = ?",
                         (video_id,),
@@ -559,12 +559,12 @@ def cmd_classify(args):
         _flush_batch()
 
         # Save cache for this video
-        if save_cache_file:
+        if save_cache:
             video_results = [r for r in all_results if r.get("source_video_path") == vp]
             if video_results:
                 video_results.sort(key=lambda x: x["timestamp_seconds"])
                 _save_cache(
-                    save_cache_file, vp,
+                    save_cache, vp,
                     sample_rate, frame_scale,
                     state_template, questions_json, model,
                     video_results,
@@ -585,7 +585,7 @@ def cmd_classify(args):
             summary[q][tc] += 1
         for q, counts in summary.items():
             print(f"  {q}: {dict(counts)}", file=sys.stderr)
-        print(f"Use: vsearch cache sql \"SELECT * FROM frame_answers WHERE question_name='{questions[0]['name']}'\" --cache-file {cache_file or './.cache.db'}", file=sys.stderr)
+        print(f"Use: vsearch cache sql \"SELECT * FROM frame_answers WHERE question_name='{questions[0]['name']}'\" --cache {cache or './.cache.db'}", file=sys.stderr)
     else:
         print("No answers generated.", file=sys.stderr)
 
@@ -607,12 +607,12 @@ def cmd_cache(args):
     """Cache management subcommand.
 
     Usage:
-        vsearch cache list [--cache-file FILE]
-        vsearch cache stats [--cache-file FILE]
-        vsearch cache prune [DAYS] [--cache-file FILE]
-        vsearch cache sql "SELECT ..." [--cache-file FILE]
+        vsearch cache list [--cache FILE]
+        vsearch cache stats [--cache FILE]
+        vsearch cache prune [DAYS] [--cache FILE]
+        vsearch cache sql "SELECT ..." [--cache FILE]
     """
-    cache_db = CacheDB(args.cache_file or "./.cache.db")
+    cache_db = CacheDB(args.cache or "./.cache.db")
     try:
         if getattr(args, "list", False):
             _print_table(cache_db.list_videos(limit=args.limit or 50))
@@ -620,7 +620,7 @@ def cmd_cache(args):
             videos = cache_db.list_videos(limit=10000)
             frame_count = cache_db.execute_sql("SELECT COUNT(*) AS n FROM frame_answers")
             total_answers = frame_count[0]["n"] if frame_count else 0
-            print(f"Cache file: {args.cache_file or './.cache.db'}")
+            print(f"Cache file: {args.cache or './.cache.db'}")
             print(f"Database:        {cache_db.db_path}")
             print(f"Total videos:    {len(videos)}")
             print(f"Total answers:   {total_answers}")
@@ -637,7 +637,7 @@ def cmd_cache(args):
                 rowcount = cache_db.execute_sql_command(sql)
                 print(f"OK ({rowcount} rows affected)")
         else:
-            print(f"Usage: vsearch cache {{list|stats|prune|sql}} [--cache-file FILE]")
+            print(f"Usage: vsearch cache {{list|stats|prune|sql}} [--cache FILE]")
     finally:
         cache_db.close()
 
@@ -661,14 +661,14 @@ def main():
     p_classify.add_argument("--still-frame-threshold", type=float, default=None, help="Similarity (0-1) above which a frame is considered still (default: 0.95)")
     p_classify.add_argument("--same-scene-threshold", type=float, default=None, help="Similarity (0-1) above which frames are considered same scene (default: 0.80)")
     p_classify.add_argument("--recursive", "-R", action="store_true", default=False, help="Recursively scan directories for video files")
-    p_classify.add_argument("--cache-file", type=str, default=None, help="Path to SQLite cache file (default: ./.cache.db)")
+    p_classify.add_argument("--cache", type=str, default=None, help="Path to SQLite cache file (default: ./.cache.db)")
     p_classify.add_argument("--ollama-state", "-s", type=str, default=None, help="State context string for Ollama (default: 'sample frame from a video')")
     p_classify.set_defaults(func=cmd_classify)
 
     # Cache management subcommand
     p_cache = sub.add_parser("cache", help="Manage the classify result cache")
     cache_parent = argparse.ArgumentParser(add_help=False)
-    cache_parent.add_argument("--cache-file", type=str, default=None, help="Path to SQLite cache file (default: ./.cache.db)")
+    cache_parent.add_argument("--cache", type=str, default=None, help="Path to SQLite cache file (default: ./.cache.db)")
     cache_sub = p_cache.add_subparsers(dest="cache_action", required=True)
     p_list = cache_sub.add_parser("list", parents=[cache_parent], help="List cached videos")
     p_list.add_argument("--limit", type=int, default=50, help="Max number of videos to list (default: 50)")

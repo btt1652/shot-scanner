@@ -18,7 +18,7 @@ import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-# Cache database location (per cache_file)
+# Cache database location (per cache)
 DB_NAME = "cache.db"
 
 SCHEMA_SQL = """
@@ -76,10 +76,10 @@ STAT_LAST_PRUNE = "last_prune"
 class CacheDB:
     """SQLite cache manager for vsearch results."""
 
-    def __init__(self, cache_file: str = "./.cache.db"):
-        self.cache_file = Path(cache_file).resolve()
-        self.cache_file.parent.mkdir(parents=True, exist_ok=True)
-        self.db_path = self.cache_file
+    def __init__(self, cache: str = "./.cache.db"):
+        self.cache = Path(cache).resolve()
+        self.cache.parent.mkdir(parents=True, exist_ok=True)
+        self.db_path = self.cache
         self._conn: Optional[sqli3.Connection] = None
 
     @property
@@ -344,6 +344,6 @@ def _params_hash(**kwargs) -> str:
 
 
 # Convenience function for CLI
-def init_cache(cache_file: str = "./.cache.db") -> CacheDB:
+def init_cache(cache: str = "./.cache.db") -> CacheDB:
     """Initialize/cache database at the given file path."""
-    return CacheDB(cache_file)
+    return CacheDB(cache)

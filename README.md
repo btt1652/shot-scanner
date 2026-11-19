@@ -39,7 +39,7 @@ A lightweight CLI that classifies video frames using an Ollama **choice-question
 5. Query cached answers with SQL:
 
    ```bash
-   vsearch cache sql "SELECT video_path, timestamp_seconds, top_choice FROM frame_answers WHERE question_name='activity' AND top_choice='walking'" --cache-file ./.cache.db
+   vsearch cache sql "SELECT video_path, timestamp_seconds, top_choice FROM frame_answers WHERE question_name='activity' AND top_choice='walking'" --cache ./.cache.db
    ```
 
 ---
@@ -68,7 +68,7 @@ A lightweight CLI that classifies video frames using an Ollama **choice-question
 | `--still-frame-threshold` | | Similarity (0–1) above which a frame is considered still (default: 0.95) |
 | `--same-scene-threshold` | | Similarity (0–1) above which frames are same scene (default: 0.80) |
 | `--recursive` | `-R` | Recursively scan directories for video files |
-| `--cache-file` | | Path to SQLite cache file (lookup if present, otherwise save) |
+| `--cache` | | Path to SQLite cache file (default: ./.cache.db) |
 | `--ollama-state` | `-s` | State context string for Ollama (default: `sample frame from a video`) |
 
 **Removed flags** (use SQL instead):
@@ -84,16 +84,16 @@ A lightweight CLI that classifies video frames using an Ollama **choice-question
 
 ```bash
 # List all cached videos
-vsearch cache list --cache-file ./.cache.db
+vsearch cache list --cache ./.cache.db
 
 # Show cache statistics
-vsearch cache stats --cache-file ./.cache.db
+vsearch cache stats --cache ./.cache.db
 
 # Prune entries older than N days (default 30)
-vsearch cache prune 7 --cache-file ./.cache.db
+vsearch cache prune 7 --cache ./.cache.db
 
 # Execute custom SQL query
-vsearch cache sql "SELECT * FROM frame_answers WHERE question_name='activity'" --cache-file ./.cache.db
+vsearch cache sql "SELECT * FROM frame_answers WHERE question_name='activity'" --cache ./.cache.db
 ```
 
 ---
@@ -109,7 +109,7 @@ ollama_host = "192.168.1.190"
 ollama_frame_scale = 0.1
 ollama_decision_model = "typesafe/jev-1.14"
 ollama_timeout = 60
-cache_file = "./.cache.db"
+cache = "./.cache.db"
 still_frame_threshold = 0.95
 same_scene_threshold = 0.80
 ollama_state_template = "sample frame from a video"
@@ -179,14 +179,14 @@ vsearch cache sql "
   SELECT v.video_path, fa.timestamp_seconds, fa.top_choice, fa.top_probability
   FROM frame_answers fa JOIN videos v ON fa.video_id=v.id
   WHERE fa.question_name='activity' AND fa.top_choice='walking'
-" --cache-file ./.cache.db
+" --cache ./.cache.db
 
 # All morning scenes (join on frame_index to combine questions)
 vsearch cache sql "
   SELECT v.video_path, fa.timestamp_seconds
   FROM frame_answers fa JOIN videos v ON fa.video_id=v.id
   WHERE fa.question_name='time_of_day' AND fa.top_choice='morning'
-" --cache-file ./.cache.db
+" --cache ./.cache.db
 
 # Top-5 activity frames by probability
 vsearch cache sql "
@@ -195,7 +195,7 @@ vsearch cache sql "
     SELECT *, ROW_NUMBER() OVER (PARTITION BY question_name ORDER BY top_probability DESC) rn
     FROM frame_answers WHERE question_name='activity'
   ) WHERE rn <= 5
-" --cache-file ./.cache.db
+" --cache ./.cache.db
 
 # Frames with high 'technical' probability (even if not top choice)
 vsearch cache sql "
@@ -203,7 +203,7 @@ vsearch cache sql "
          json_extract(fa.probabilities_json, '$.technical') AS technical_prob
   FROM frame_answers fa JOIN videos v ON fa.video_id=v.id
   WHERE fa.question_name='activity' AND technical_prob > 0.5
-" --cache-file ./.cache.db
+" --cache ./.cache.db
 ```
 
 ---
@@ -248,7 +248,7 @@ vsearch classify myvideo.mp4 \
 Then query:
 
 ```bash
-vsearch cache sql "SELECT video_path, timestamp_seconds FROM frame_answers WHERE question_name='is_valid' AND top_choice='yes'" --cache-file ./.cache.db
+vsearch cache sql "SELECT video_path, timestamp_seconds FROM frame_answers WHERE question_name='is_valid' AND top_choice='yes'" --cache ./.cache.db
 ```
 
 ---
@@ -259,16 +259,16 @@ For AI agents using vsearch as a tool:
 
 ```bash
 # Initialize/check cache DB
-vsearch cache stats --cache-file /path/to/cache.db
+vsearch cache stats --cache /path/to/cache.db
 
 # Classify with caching (uses config.toml questions)
-vsearch classify video.mp4 --cache-file /path/to/cache.db
+vsearch classify video.mp4 --cache /path/to/cache.db
 
 # Query cached answers
-vsearch cache sql "SELECT video_path, timestamp_seconds, top_choice FROM frame_answers WHERE question_name='activity' AND top_choice='walking'" --cache-file /path/to/cache.db
+vsearch cache sql "SELECT video_path, timestamp_seconds, top_choice FROM frame_answers WHERE question_name='activity' AND top_choice='walking'" --cache /path/to/cache.db
 
 # Prune old entries
-vsearch cache prune 30 --cache-file /path/to/cache.db  # keep last 30 days only
+vsearch cache prune 30 --cache /path/to/cache.db  # keep last 30 days only
 ```
 
 ---

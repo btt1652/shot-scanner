@@ -31,7 +31,7 @@ def default_config() -> dict:
             "ollama_decision_model": "typesafe/jev-1.14",
             "ollama_timeout": 60,
             "ollama_state_template": "sample frame from a video",
-            "cache_file": "./.cache.db",
+            "cache": "./.cache.db",
             "still_frame_threshold": 0.95,
             "same_scene_threshold": 0.80,
             "questions": [
