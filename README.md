@@ -94,6 +94,20 @@ vsearch cache prune 7 --cache ./.cache.db
 
 # Execute custom SQL query
 vsearch cache sql "SELECT * FROM frame_answers WHERE question_name='activity'" --cache ./.cache.db
+
+# Extract and save frame images from videos based on cached answer filters
+vsearch cache extract-frames --question activity --output-dir ./activity_frames --format jpg
+
+# Filter by question + choice
+vsearch cache extract-frames --question activity --choice walking --output-dir ./walking_frames --format png
+
+# Only high-confidence frames
+vsearch cache extract-frames --question activity --min-prob 0.8 --output-dir ./high_conf_activity
+
+# Custom SQL filter
+vsearch cache extract-frames --sql "SELECT * FROM frame_answers WHERE question_name='activity' AND top_choice='walking'" --output-dir ./walking_frames
+
+# Filename format: video_name_f000001_12.3s_activity_walking.jpg
 ```
 
 ---
@@ -266,6 +280,9 @@ vsearch classify video.mp4 --cache /path/to/cache.db
 
 # Query cached answers
 vsearch cache sql "SELECT video_path, timestamp_seconds, top_choice FROM frame_answers WHERE question_name='activity' AND top_choice='walking'" --cache /path/to/cache.db
+
+# Extract frame images for review/training
+vsearch cache extract-frames --question activity --choice walking --output-dir ./walking_frames --format jpg
 
 # Prune old entries
 vsearch cache prune 30 --cache /path/to/cache.db  # keep last 30 days only
