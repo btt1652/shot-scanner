@@ -590,7 +590,99 @@ def cmd_classify(args):
         print("No answers generated.", file=sys.stderr)
 
 
-def _print_table(rows):
+def cmd_cache_extract(args):
+    """Extract and save frame images from videos based on cached answer filters.
+
+    Usage:
+        vsearch cache extract-frames [--cache FILE] [--output-dir DIR] \
+            [--question NAME] [--choice CHOICE] [--min-prob FLOAT] \
+            [--sql "SELECT ..."] [--limit N] [--format jpg|png]
+    """
+    import cv2
+    import os
+
+    cache_db = CacheDB(args.cache or "./.cache.db")
+    output_dir = args.output_dir or "./extracted_frames"
+    os.makedirs(output_dir, exist_ok=True)
+
+    # Build query from flags or use raw SQL
+    sql = args.sql
+    if not sql:
+        conditions = []
+        params = []
+        if args.question:
+            conditions.append("question_name = ?")
+            params.append(args.question)
+        if args.choice:
+            conditions.append("top_choice = ?")
+            params.append(args.choice)
+        if args.min_prob is not None:
+            conditions.append("top_probability >= ?")
+            params.append(args.min_prob)
+
+        where = " WHERE " + " AND ".join(conditions) if conditions else ""
+        sql = f"SELECT video_id, source_video_path, frame_index, timestamp_seconds, question_name, top_choice FROM frame_answers{where} ORDER BY video_id, frame_index"
+
+        rows = cache_db.execute_sql(sql, tuple(params))
+    else:
+        rows = cache_db.execute_sql(sql)
+
+    if not rows:
+        print("No matching frames found.", file=sys.stderr)
+        cache_db.close()
+        return
+
+    # Group by video to batch seeks
+    from collections import defaultdict
+    by_video = defaultdict(list)
+    for row in rows:
+        by_video[row["source_video_path"]].append(row)
+
+    saved = 0
+    fmt = args.format or "jpg"
+    quality = 90
+
+    for video_path, frames in by_video.items():
+        if not os.path.exists(video_path):
+            print(f"Warning: video not found: {video_path}, skipping {len(frames)} frames", file=sys.stderr)
+            continue
+
+        cap = cv2.VideoCapture(video_path)
+        if not cap.isOpened():
+            print(f"Warning: cannot open video: {video_path}", file=sys.stderr)
+            continue
+
+        # Sort frames by index
+        frames_sorted = sorted(frames, key=lambda r: r["frame_index"])
+
+        for frame_info in frames_sorted:
+            fi = frame_info["frame_index"]
+            cap.set(cv2.CAP_PROP_POS_FRAMES, fi)
+            ret, frame = cap.read()
+            if not ret:
+                print(f"Warning: could not read frame {fi} from {video_path}", file=sys.stderr)
+                continue
+
+            # Build filename: video_name_frameXXXX_question_choice.ext
+            video_name = os.path.splitext(os.path.basename(video_path))[0]
+            q_name = frame_info.get("question_name", "frame")
+            choice = frame_info.get("top_choice", "unknown")
+            ts = frame_info.get("timestamp_seconds", 0)
+            fname = f"{video_name}_f{fi:06d}_{ts:.1f}s_{q_name}_{choice}.{fmt}"
+            out_path = os.path.join(output_dir, fname)
+
+            if fmt == "jpg":
+                cv2.imwrite(out_path, frame, [int(cv2.IMWRITE_JPEG_QUALITY), quality])
+            elif fmt == "png":
+                cv2.imwrite(out_path, frame)
+            else:
+                cv2.imwrite(out_path, frame)
+            saved += 1
+
+        cap.release()
+
+    print(f"Extracted {saved} frame(s) to {output_dir}", file=sys.stderr)
+    cache_db.close()
     """Print a list of dicts as an aligned text table."""
     if not rows:
         print("(no rows)")
@@ -681,6 +773,15 @@ def main():
     p_sql = cache_sub.add_parser("sql", parents=[cache_parent], help="Execute custom SQL query against cache database")
     p_sql.add_argument("sql", type=str, help="SQL query to execute (SELECT for read-only, others for modification)")
     p_sql.set_defaults(func=cmd_cache, list=False, stats=False, prune=None)
+    p_extract = cache_sub.add_parser("extract-frames", parents=[cache_parent], help="Extract and save frame images from videos based on cached answer filters")
+    p_extract.add_argument("--output-dir", type=str, default="./extracted_frames", help="Directory to save extracted frames (default: ./extracted_frames)")
+    p_extract.add_argument("--question", type=str, help="Filter by specific question name")
+    p_extract.add_argument("--choice", type=str, help="Filter by specific top_choice answer")
+    p_extract.add_argument("--min-prob", type=float, help="Minimum probability threshold (0-1)")
+    p_extract.add_argument("--sql", type=str, help="Custom SQL query to execute")
+    p_extract.add_argument("--limit", type=int, default=1000, help="Maximum number of frames to extract (default: 1000)")
+    p_extract.add_argument("--format", choices=["jpg", "png"], default="jpg", help="Output image format (jpg or png)")
+    p_extract.set_defaults(func=cmd_cache_extract)
 
     args = parser.parse_args()
     args.func(args)
