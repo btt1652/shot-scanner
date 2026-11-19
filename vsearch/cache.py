@@ -7,7 +7,7 @@ Replaces JSON file cache with a proper relational database for:
 - Custom SQL queries for advanced users
 - Cache statistics and management
 
-Cache schema version: 1
+Cache schema version: 2
 """
 
 import sqlite3
@@ -18,7 +18,7 @@ import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-# Cache database location (per cache_dir)
+# Cache database location (per cache_file)
 DB_NAME = "cache.db"
 
 SCHEMA_SQL = """
@@ -35,25 +35,27 @@ CREATE TABLE IF NOT EXISTS videos (
     cache_status TEXT NOT NULL DEFAULT 'empty' -- empty, partial, complete
 );
 
-CREATE TABLE IF NOT EXISTS frames (
+CREATE TABLE IF NOT EXISTS frame_answers (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     video_id INTEGER NOT NULL REFERENCES videos(id) ON DELETE CASCADE,
     frame_index INTEGER NOT NULL,
     timestamp_seconds REAL NOT NULL,
+    question_name TEXT NOT NULL,
+    question_instructions TEXT,
+    criteria_json TEXT,
     top_choice TEXT,
     top_probability REAL,
-    probabilities_json TEXT,  -- full choice probabilities dict as JSON
+    probabilities_json TEXT,
     batch_id INTEGER,
-    raw_response TEXT,  -- stored Ollama response for debugging
+    raw_response TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
-    UNIQUE(video_id, frame_index)
+    UNIQUE(video_id, frame_index, question_name)
 );
 
-CREATE INDEX IF NOT EXISTS idx_frames_video ON frames(video_id);
-CREATE INDEX IF NOT EXISTS idx_frames_prob ON frames(top_probability);
-CREATE INDEX IF NOT EXISTS idx_frames_ts ON frames(timestamp_seconds);
-CREATE INDEX IF NOT EXISTS idx_frames_choice ON frames(top_choice);
-CREATE INDEX IF NOT EXISTS idx_videos_path ON videos(video_path);
+CREATE INDEX IF NOT EXISTS idx_frame_answers_video ON frame_answers(video_id);
+CREATE INDEX IF NOT EXISTS idx_frame_answers_choice ON frame_answers(top_choice);
+CREATE INDEX IF NOT EXISTS idx_frame_answers_qname ON frame_answers(question_name);
+CREATE INDEX IF NOT EXISTS idx_frame_answers_qname_choice ON frame_answers(question_name, top_choice);
 
 CREATE TABLE IF NOT EXISTS cache_stats (
     key TEXT PRIMARY KEY,
@@ -61,6 +63,8 @@ CREATE TABLE IF NOT EXISTS cache_stats (
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 """
+
+SCHEMA_VERSION = 2
 
 # Keys for cache_stats
 STAT_TOTAL_VIDEOS = "total_videos"
@@ -72,10 +76,10 @@ STAT_LAST_PRUNE = "last_prune"
 class CacheDB:
     """SQLite cache manager for vsearch results."""
 
-    def __init__(self, cache_dir: str):
-        self.cache_dir = Path(cache_dir)
-        self.cache_dir.mkdir(parents=True, exist_ok=True)
-        self.db_path = self.cache_dir / DB_NAME
+    def __init__(self, cache_file: str = "./.cache.db"):
+        self.cache_file = Path(cache_file).resolve()
+        self.cache_file.parent.mkdir(parents=True, exist_ok=True)
+        self.db_path = self.cache_file
         self._conn: Optional[sqli3.Connection] = None
 
     @property
@@ -153,25 +157,34 @@ class CacheDB:
         )
         return [dict(r) for r in cur.fetchall()]
 
-    # --- Frame operations ---
+    # --- Frame answer operations ---
 
-    def upsert_frames(
+    def upsert_frame_answers(
         self,
         video_id: int,
-        frames: List[Dict],
+        answers: List[Dict],
     ) -> int:
-        """Insert or update frames for a video. Returns number of frames inserted/updated."""
-        if not frames:
+        """Insert or update per-question answers for a video.
+
+        Each item in answers should contain:
+          frame_index, timestamp_seconds, question_name, top_choice,
+          top_probability, probabilities_json, batch_id
+        plus optional question_instructions, criteria_json, raw_response.
+        """
+        if not answers:
             return 0
         with self.conn:
-            for frame in frames:
-                # Store full probabilities dict as JSON
-                probs = frame.get("probabilities", {})
-                probs_json = json.dumps(probs) if isinstance(probs, dict) else "{}"
+            for a in answers:
                 self.conn.execute(
-                    """INSERT INTO frames (video_id, frame_index, timestamp_seconds, top_choice, top_probability, probabilities_json, batch_id, raw_response)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                       ON CONFLICT(video_id, frame_index) DO UPDATE SET
+                    """INSERT INTO frame_answers (
+                           video_id, frame_index, timestamp_seconds, question_name,
+                           question_instructions, criteria_json, top_choice, top_probability,
+                           probabilities_json, batch_id, raw_response)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                       ON CONFLICT(video_id, frame_index, question_name) DO UPDATE SET
+                           timestamp_seconds=excluded.timestamp_seconds,
+                           question_instructions=excluded.question_instructions,
+                           criteria_json=excluded.criteria_json,
                            top_choice=excluded.top_choice,
                            top_probability=excluded.top_probability,
                            probabilities_json=excluded.probabilities_json,
@@ -180,47 +193,49 @@ class CacheDB:
                            created_at=datetime('now')""",
                     (
                         video_id,
-                        frame.get("frame_index"),
-                        frame.get("timestamp_seconds"),
-                        frame.get("top_choice"),
-                        frame.get("top_probability"),
-                        probs_json,
-                        frame.get("batch_id"),
-                        json.dumps(frame) if isinstance(frame, dict) else frame,
+                        a.get("frame_index"),
+                        a.get("timestamp_seconds"),
+                        a.get("question_name"),
+                        a.get("question_instructions"),
+                        a.get("criteria_json"),
+                        a.get("top_choice"),
+                        a.get("top_probability"),
+                        a.get("probabilities_json"),
+                        a.get("batch_id"),
+                        a.get("raw_response"),
                     ),
                 )
-        # Count affected rows
         cur = self.conn.execute(
-            "SELECT COUNT(*) FROM frames WHERE video_id = ?", (video_id,)
+            "SELECT COUNT(*) FROM frame_answers WHERE video_id = ?", (video_id,)
         )
         return cur.fetchone()[0]
 
-    def get_frames(
+    def get_answers(
         self,
         video_id: int,
-        min_probability: Optional[float] = None,
-        max_probability: Optional[float] = None,
+        question_name: Optional[str] = None,
         top_choice: Optional[str] = None,
+        min_probability: Optional[float] = None,
         limit: Optional[int] = None,
     ) -> List[Dict]:
-        """Get frames for a video with optional filters.
-
-        Returns list of dicts with frame data plus source_video_path for compatibility.
-        """
-        query = "SELECT f.*, v.video_path AS source_video_path FROM frames f JOIN videos v ON f.video_id = v.id WHERE f.video_id = ?"
+        """Get frame answers with optional filters."""
+        query = (
+            "SELECT fa.*, v.video_path AS source_video_path FROM frame_answers fa "
+            "JOIN videos v ON fa.video_id = v.id WHERE fa.video_id = ?"
+        )
         params: List[Any] = [video_id]
 
-        if min_probability is not None:
-            query += " AND f.top_probability >= ?"
-            params.append(min_probability)
-        if max_probability is not None:
-            query += " AND f.top_probability <= ?"
-            params.append(max_probability)
+        if question_name is not None:
+            query += " AND fa.question_name = ?"
+            params.append(question_name)
         if top_choice is not None:
-            query += " AND f.top_choice = ?"
+            query += " AND fa.top_choice = ?"
             params.append(top_choice)
+        if min_probability is not None:
+            query += " AND fa.top_probability >= ?"
+            params.append(min_probability)
 
-        query += " ORDER BY f.timestamp_seconds ASC"
+        query += " ORDER BY fa.timestamp_seconds ASC"
         if limit is not None:
             query += " LIMIT ?"
             params.append(limit)
@@ -228,11 +243,16 @@ class CacheDB:
         cur = self.conn.execute(query, params)
         return [dict(r) for r in cur.fetchall()]
 
-    def get_frame(self, video_id: int, frame_index: int) -> Optional[Dict]:
-        """Get a single frame by video_id and frame_index."""
+    def get_answer(
+        self,
+        video_id: int,
+        frame_index: int,
+        question_name: str,
+    ) -> Optional[Dict]:
+        """Get a single answer by video, frame and question name."""
         cur = self.conn.execute(
-            "SELECT * FROM frames WHERE video_id = ? AND frame_index = ?",
-            (video_id, frame_index),
+            "SELECT * FROM frame_answers WHERE video_id = ? AND frame_index = ? AND question_name = ?",
+            (video_id, frame_index, question_name),
         )
         row = cur.fetchone()
         return dict(row) if row else None
@@ -257,12 +277,12 @@ class CacheDB:
         # ... simplified: we just check video exists and return what we have
         # In a full impl, we'd compare params_hash against current params
 
-        # Return all frames for this video, floor-filtered
-        frames = self.get_frames(video_id=video["id"], min_probability=decision_model_floor)
-        if not frames:
+        # Return all frame answers for this video
+        answers = self.get_answers(video_id=video["id"])
+        if not answers:
             return None, None
 
-        results = frames  # already filtered by top_probability in SQL
+        results = answers  # all answers stored in frame_answers
         return results, {"video_id": video["id"], "video_path": video_path}
 
     # --- Custom SQL support ---
@@ -324,6 +344,6 @@ def _params_hash(**kwargs) -> str:
 
 
 # Convenience function for CLI
-def init_cache(cache_dir: str) -> CacheDB:
-    """Initialize/cache database in the given directory."""
-    return CacheDB(cache_dir)
+def init_cache(cache_file: str = "./.cache.db") -> CacheDB:
+    """Initialize/cache database at the given file path."""
+    return CacheDB(cache_file)

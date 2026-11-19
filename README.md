@@ -1,179 +1,141 @@
 # vsearch — Semantic Video Frame Classification
 
-A lightweight CLI that classifies video frames using an Ollama choice-question
-model as the sole judge. No CLIP embeddings or pre-built `.npz` caches are
-required — frames are extracted and validated on the fly.
+A lightweight CLI that classifies video frames using an Ollama **choice-question** model as the sole judge. No CLIP embeddings or pre-built `.npz` caches are required — frames are extracted and validated on the fly.
+
+**New in this version:** Multiple questions per frame. Each question's answer is stored as a separate row in a searchable SQLite cache. Query with SQL instead of CLI filters.
+
+---
 
 ## Quick Start
 
 1. Install dependencies:
 
-   ```
+   ```bash
    pip install -r requirements.txt
    ```
 
-2. Classify a video with a choice question:
+2. Classify a video with default questions (from `config.toml`):
 
-   ```
-   vsearch classify myvideo.mp4 -k 5
+   ```bash
+   vsearch classify myvideo.mp4
    ```
 
-3. Customize the question and criteria (also configurable in `config.toml`):
+3. Customize questions via CLI (`--questions` takes a JSON array):
 
-   ```
+   ```bash
    vsearch classify myvideo.mp4 \
-     --ollama-classify-question team \
-     --ollama-classify-instructions "Which team should handle this scene?" \
-     --ollama-classify-criteria "billing: Payments|technical: Bugs|sales: Pricing"
+     --questions '[
+       {"name": "activity", "instructions": "What activity?", "criteria": {"walking": "Person walking", "running": "Person running"}},
+       {"name": "time_of_day", "instructions": "Time of day?", "criteria": {"morning": "Morning", "afternoon": "Afternoon"}}
+     ]'
    ```
 
-4. Filter results by choice label (comma-separated for multiple):
+4. Override other settings:
 
-   ```
-   vsearch classify myvideo.mp4 --top-choice technical
+   ```bash
+   vsearch classify myvideo.mp4 --decision-model-sample-rate 5 --ollama-frame-scale 0.15
    ```
 
-5. Output JSON:
+5. Query cached answers with SQL:
 
+   ```bash
+   vsearch cache sql "SELECT video_path, timestamp_seconds, top_choice FROM frame_answers WHERE question_name='activity' AND top_choice='walking'" --cache-file ./.cache.db
    ```
-   vsearch classify myvideo.mp4 --json
-   ```
+
+---
 
 ## How It Works
 
 1. Frames are sampled from the video at `--decision-model-sample-rate` intervals.
 2. Each frame is resized (`--ollama-frame-scale`) and base64-encoded.
-3. Consecutive frames with similarity ≥ `same_scene_threshold` (default 0.80) are
-   grouped into same-scene batches (max 4 frames per batch, constrained by
-   Ollama's multi-image limit) and sent to Ollama as a single multi-image request.
-4. Ollama returns a probability distribution over the choice criteria; the
-   `top_choice` and `top_probability` are extracted.
-5. Frames below `--decision-model-floor` (default 0.5) are discarded.
-6. Passing frames are sorted by `top_probability` descending, then capped with
-   `--top-k` / `--global-k`.
-7. `--top-choice` filters results by label after floor check.
+3. Consecutive frames with similarity ≥ `same_scene_threshold` (default 0.80) are grouped into same-scene batches (max 4 frames per batch, constrained by Ollama's multi-image limit) and sent to Ollama as a single multi-image request.
+4. Ollama receives **all questions at once** and returns a probability distribution for each question's choice criteria.
+5. Each question's answer for each frame is stored as a row in `frame_answers` (one frame = N rows, where N = number of questions).
+6. No CLI filtering (`--top-k`, `--top-choice`, `--decision-model-floor`) — store everything, filter via SQL.
 
-## CLI Flags
+---
+
+## CLI Flags (`vsearch classify`)
 
 | Flag | Short | Description |
 |------|-------|-------------|
-| `--top-k` | `-k` | Maximum number of top results to return (default: all passing) |
-| `--global-k` | `-gk` | Global top-K across all videos, overriding `--top-k` |
-| `--top-choice` | `-tc` | Only keep results where `top_choice` matches (comma-separated for multiple) |
-| `--decision-model-floor` | `-dmt` | Ollama probability threshold (default: 0.5) |
+| `--questions` | `-qs` | **JSON array** of questions: `[{"name":..., "instructions":..., "criteria":{...}}, ...]`. Replaces config questions when provided. |
 | `--decision-model-sample-rate` | `-dmsr` | Frame sampling interval in seconds (default: 3) |
 | `--ollama-host` | `-oh` | Ollama server address (default: `192.168.1.190`) |
+| `--ollama-frame-scale` | `-ofs` | Image scale factor (0.0–1.0, default: 0.1). Lower = faster. |
 | `--ollama-model` | `-dm` | Ollama model name (default: `typesafe/jev-1.14`) |
-| `--ollama-frame-scale` | `-ofs` | Image scale factor (0.0–1.0, default: 0.1) |
 | `--ollama-timeout` | `-ot` | Ollama request timeout in seconds (default: 60) |
-| `--still-frame-threshold` | | Similarity above which a frame is considered still (default: 0.95) |
-| `--same-scene-threshold` | | Similarity above which frames are same scene (default: 0.80) |
-| `--merge-range` | | Merge adjacent same-scene frames into timestamp ranges |
+| `--still-frame-threshold` | | Similarity (0–1) above which a frame is considered still (default: 0.95) |
+| `--same-scene-threshold` | | Similarity (0–1) above which frames are same scene (default: 0.80) |
 | `--recursive` | `-R` | Recursively scan directories for video files |
-| `--cache-dir` | | Directory for caching results (lookup if present, otherwise save) |
-| `--ollama-classify-question` | `-cq` | Question name (default: `team`) |
-| `--ollama-classify-instructions` | `-ci` | Instructions for the choice question |
-| `--ollama-classify-criteria` | `-cc` | Criteria as JSON dict or multiline `key: description` |
+| `--cache-file` | | Path to SQLite cache file (lookup if present, otherwise save) |
+| `--ollama-state` | `-s` | State context string for Ollama (default: `sample frame from a video`) |
 
-## Yes/No (Search-Equivalent) Classification
+**Removed flags** (use SQL instead):
+- `--top-k`, `--global-k` → `ORDER BY top_probability DESC LIMIT N` in SQL
+- `--top-choice` → `WHERE top_choice = '...'` in SQL
+- `--decision-model-floor` → `WHERE top_probability >= 0.5` in SQL
+- `--merge-range` → implement in SQL if needed
+- `--json` → results are in SQLite, query with SQL
 
-To replicate the old `vsearch search` behavior that used the `noul` (yes/no)
-question type, simply use a two-choice criteria:
+---
+
+## Cache Subcommand (`vsearch cache`)
 
 ```bash
-vsearch classify myvideo.mp4 \
-  --ollama-classify-question is_valid \
-  --ollama-classify-instructions "Does this frame match the query?" \
-  --ollama-classify-criteria "yes: the frame matches the query\nno: the frame does not match" \
-  --top-choice yes --decision-model-floor 0.7
+# List all cached videos
+vsearch cache list --cache-file ./.cache.db
+
+# Show cache statistics
+vsearch cache stats --cache-file ./.cache.db
+
+# Prune entries older than N days (default 30)
+vsearch cache prune 7 --cache-file ./.cache.db
+
+# Execute custom SQL query
+vsearch cache sql "SELECT * FROM frame_answers WHERE question_name='activity'" --cache-file ./.cache.db
 ```
 
-This is exactly equivalent to the old search mode with `ollama-search-question
-is_valid` and `ollama-search-question-type noul` — the `choice` question type
-with `yes`/`no` criteria handles binary judgment cleanly, and the unified cache
-and filtering apply.
+---
 
 ## Configuration (`config.toml`)
 
-The config file contains a single `[classify]` section:
+The config file uses a `[[classify.questions]]` array-of-tables for multi-question definitions:
 
 ```toml
 [classify]
-top_k = -1
-json_output = false
-decision_model_floor = 0.5
 decision_model_sample_rate = 3
 ollama_host = "192.168.1.190"
 ollama_frame_scale = 0.1
 ollama_decision_model = "typesafe/jev-1.14"
 ollama_timeout = 60
-cache_dir = "/tmp"
+cache_file = "./.cache.db"
 still_frame_threshold = 0.95
 same_scene_threshold = 0.80
-merge_range = false
 ollama_state_template = "sample frame from a video"
-ollama_classify_question = "team"
-ollama_classify_instructions = "Which team should handle this scene?"
-ollama_classify_criteria = """
-billing: Payments, payouts, invoices, refunds
-technical: Bugs, outages, integrations, API errors
-sales: Pricing, upgrades, new accounts
-"""
+
+[[classify.questions]]
+name = "activity"
+instructions = "What activity is happening in this frame?"
+criteria = { walking = "Person walking", running = "Person running", sitting = "Person sitting" }
+
+[[classify.questions]]
+name = "time_of_day"
+instructions = "What time of day is it?"
+criteria = { morning = "Morning light", afternoon = "Afternoon light", evening = "Evening light" }
+
+# Example: yes/no (search-equivalent) question
+# [[classify.questions]]
+# name = "is_valid"
+# instructions = "Does the image match the query?"
+# criteria = { yes = "the frame matches the query", no = "the frame does not match" }
 ```
 
-CLI flags always override config values.
+CLI `--questions` **replaces** the entire `classify.questions` array from config when provided.
 
-## Performance Tips
+---
 
-- **Scale down images** with `--ollama-frame-scale` (e.g. `0.15`) — lower = faster inference.
-- **Same-scene batching** — consecutive frames with similarity ≥ `same_scene_threshold` are grouped and sent as a single multi-image request.
-- **Coarser sampling** with `--decision-model-sample-rate 5` — one frame every 5 seconds.
-- **Lower the threshold** with `--decision-model-floor 0.4` to keep more passing frames.
-- **Use the cache** — re-running with different thresholds is instant on cache hit.
-
-## Architecture
-
-- **No indexing step** — videos are read directly with OpenCV.
-- **No `.npz` cache** — frames are extracted and validated on the fly.
-- **Ollama-only scoring** — `top_probability` from the choice question is the score.
-- **Endpoint fallback** — if the configured Ollama host is unreachable, `localhost:11434` is used automatically.
-- **Same-scene batching** — frames with high visual similarity within a short window are grouped and sent to Ollama as a single multi-image batch request (max 4 frames per batch).
-
-## Classification Cache
-
-The cache is a **SQLite database** stored on disk, enabling fast lookups,
-concurrent reads (safe for AI agents), and custom SQL queries for advanced users.
-
-### Unified `--cache-dir` Flag
-
-The `--cache-dir` flag serves double duty:
-
-- **If a matching cache entry exists** (same video content + same Ollama params) →
-  results loaded instantly from disk (no Ollama calls).
-- **If no match** → full classification runs, results saved to the SQLite
-  database after completion.
-
-```bash
-# First run: full classification, saves to cache DB
-vsearch classify video.mp4 --cache-dir /tmp/cache
-
-# Second run: cache hit (instant, no Ollama)
-vsearch classify video.mp4 --cache-dir /tmp/cache
-```
-
-### Cache Key (content + params)
-
-The cache matches on **both** video content and Ollama parameters:
-
-| Component | Description |
-|-----------|-------------|
-| `content_hash` | BLAKE2b of first/last 8 MB of video file |
-| `params_hash` | BLAKE2b of `sample_rate \| frame_scale \| state \| instructions \| model \| criteria_json` |
-
-If either changes, it's a cache miss. This ensures correctness when you change
-sampling rate, frame scale, state, instructions, criteria, or model between runs.
-
-### Cache Schema
+## Cache Schema
 
 The SQLite database contains three tables:
 
@@ -183,84 +145,174 @@ videos (
     fps, total_frames, stride, created_at, updated_at, cache_status
 )
 
-frames (
+frame_answers (
     id, video_id, frame_index, timestamp_seconds,
+    question_name, question_instructions, criteria_json,
     top_choice, top_probability, probabilities_json,
-    batch_id, raw_response, created_at
+    batch_id, raw_response, created_at,
+    UNIQUE(video_id, frame_index, question_name)
 )
 
 cache_stats (key, value, updated_at)
 ```
 
-### Cache Management CLI
+Indexes: `idx_frame_answers_video`, `idx_frame_answers_choice`, `idx_frame_answers_qname`, `idx_frame_answers_qname_choice`.
 
-`vsearch cache` subcommand for managing the SQLite cache:
+### Cache Key (content + params + questions)
 
-```bash
-# List all cached videos
-vsearch cache list --cache-dir /tmp/cache
+The cache matches on **video content AND all Ollama parameters AND the full questions JSON**:
 
-# Show cache statistics (videos count, frames count)
-vsearch cache stats --cache-dir /tmp/cache
+| Component | Description |
+|-----------|-------------|
+| `content_hash` | BLAKE2b of first/last 8 MB of video file |
+| `params_hash` | BLAKE2b of `sample_rate \| frame_scale \| state \| questions_json \| model` (+ thresholds) |
 
-# Prune entries older than N days (default 30)
-vsearch cache prune 7 --cache-dir /tmp/cache
+Changing **any question** (name, instructions, criteria) changes `questions_json` → cache miss → fresh run. This ensures correctness.
 
-# Execute custom SQL query
-vsearch cache sql "SELECT video_path, COUNT(*) AS n FROM frames GROUP BY video_path" --cache-dir /tmp/cache
-```
+---
 
-### Cache Hit Behavior
-
-- **Exact cache hit**: SQLite lookup matches video content + params → results loaded instantly, filtered by current `decision_model_floor`
-- **Cache miss**: Video not in DB or params changed → full Ollama inference runs, results saved to DB
-- **Params-aware**: Changing sample_rate, frame_scale, state, instructions, criteria, or model triggers a new run
-
-### Multi-Video Classification
-
-Cache works **per video file**:
-
-- Each video in a multi-video run gets its own cache entry
-- Cache-hit videos are skipped (no Ollama calls)
-- Cache-miss videos are classified normally
-- Results combined and sorted chronologically
+## Query Examples
 
 ```bash
-# Example: video1 cached, video2 not
-vsearch classify video1.mp4 video2.mp4 --cache-dir /tmp/cache
-# -> video1: cache hit, video2: full classification
+# All frames where activity = walking
+vsearch cache sql "
+  SELECT v.video_path, fa.timestamp_seconds, fa.top_choice, fa.top_probability
+  FROM frame_answers fa JOIN videos v ON fa.video_id=v.id
+  WHERE fa.question_name='activity' AND fa.top_choice='walking'
+" --cache-file ./.cache.db
 
-# Example: 5 videos all cached
-vsearch classify /path/to/videos/ --cache-dir /tmp/cache
-# -> all 5: cache hits
+# All morning scenes (join on frame_index to combine questions)
+vsearch cache sql "
+  SELECT v.video_path, fa.timestamp_seconds
+  FROM frame_answers fa JOIN videos v ON fa.video_id=v.id
+  WHERE fa.question_name='time_of_day' AND fa.top_choice='morning'
+" --cache-file ./.cache.db
+
+# Top-5 activity frames by probability
+vsearch cache sql "
+  SELECT video_id, frame_index, top_choice, top_probability
+  FROM (
+    SELECT *, ROW_NUMBER() OVER (PARTITION BY question_name ORDER BY top_probability DESC) rn
+    FROM frame_answers WHERE question_name='activity'
+  ) WHERE rn <= 5
+" --cache-file ./.cache.db
+
+# Frames with high 'technical' probability (even if not top choice)
+vsearch cache sql "
+  SELECT v.video_path, fa.timestamp_seconds,
+         json_extract(fa.probabilities_json, '$.technical') AS technical_prob
+  FROM frame_answers fa JOIN videos v ON fa.video_id=v.id
+  WHERE fa.question_name='activity' AND technical_prob > 0.5
+" --cache-file ./.cache.db
 ```
 
-### AI Agent Usage
+---
+
+## Performance Tips
+
+- **Scale down images** with `--ollama-frame-scale 0.15` — lower = faster inference.
+- **Same-scene batching** — consecutive frames with similarity ≥ `same_scene_threshold` are grouped and sent as a single multi-image request (max 4 frames/batch).
+- **Coarser sampling** with `--decision-model-sample-rate 5` — one frame every 5 seconds.
+- **Use the cache** — re-running with the same questions is instant on cache hit.
+
+---
+
+## Architecture
+
+- **No indexing step** — videos are read directly with OpenCV.
+- **No `.npz` cache** — frames are extracted and validated on the fly.
+- **Ollama-only scoring** — all questions sent in one request; each question returns its own probability distribution.
+- **Endpoint fallback** — if the configured Ollama host is unreachable, `localhost:11434` is used automatically.
+- **Same-scene batching** — frames with high visual similarity within a short window are grouped and sent to Ollama as a single multi-image batch request (max 4 frames per batch).
+
+---
+
+## Yes/No (Search-Equivalent) Classification
+
+To replicate the old `vsearch search` behavior, define a yes/no question as a two-choice criteria:
+
+```toml
+[[classify.questions]]
+name = "is_valid"
+instructions = "Does the image match the query?"
+criteria = { yes = "the frame matches the query", no = "the frame does not match" }
+```
+
+Or via CLI:
+
+```bash
+vsearch classify myvideo.mp4 \
+  --questions '[{"name":"is_valid","instructions":"Does this frame match?","criteria":{"yes":"matches","no":"does not match"}}]'
+```
+
+Then query:
+
+```bash
+vsearch cache sql "SELECT video_path, timestamp_seconds FROM frame_answers WHERE question_name='is_valid' AND top_choice='yes'" --cache-file ./.cache.db
+```
+
+---
+
+## AI Agent Usage
 
 For AI agents using vsearch as a tool:
 
 ```bash
 # Initialize/check cache DB
-vsearch cache stats --cache-dir /path/to/cache
+vsearch cache stats --cache-file /path/to/cache.db
 
-# Classify with caching
-vsearch classify video.mp4 --cache-dir /path/to/cache
+# Classify with caching (uses config.toml questions)
+vsearch classify video.mp4 --cache-file /path/to/cache.db
 
-# Re-run with different floor (cache hit, no Ollama calls needed):
-vsearch classify video.mp4 --cache-dir /path/to/cache --decision-model-floor 0.3
-
-# Re-run filtering by a specific choice (cache hit):
-vsearch classify video.mp4 --cache-dir /path/to/cache --top-choice technical
-
-# Inspect what's cached
-vsearch cache list --cache-dir /path/to/cache
-
-# Custom SQL query on cache
-vsearch cache sql "SELECT video_path, top_choice, COUNT(*) FROM frames GROUP BY video_path, top_choice" --cache-dir /path/to/cache
-
-# Query frames by secondary choice probability (even if not the top choice)
-vsearch cache sql "SELECT video_path, timestamp_seconds FROM frames WHERE json_extract(probabilities_json, '$.technical') > 0.5" --cache-dir /path/to/cache
+# Query cached answers
+vsearch cache sql "SELECT video_path, timestamp_seconds, top_choice FROM frame_answers WHERE question_name='activity' AND top_choice='walking'" --cache-file /path/to/cache.db
 
 # Prune old entries
-vsearch cache prune 30 --cache-dir /path/to/cache  # keep last 30 days only
+vsearch cache prune 30 --cache-file /path/to/cache.db  # keep last 30 days only
 ```
+
+---
+
+## Example Ollama Request (built from config)
+
+```json
+{
+  "model": "typesafe/jev-1.14",
+  "state": "sample frame from a video",
+  "images": ["base64_image1", "base64_image2"],
+  "questions": {
+    "activity": {
+      "type": "choice",
+      "instructions": "What activity is happening in this frame?",
+      "criteria": {
+        "walking": "Person walking",
+        "running": "Person running",
+        "sitting": "Person sitting"
+      }
+    },
+    "time_of_day": {
+      "type": "choice",
+      "instructions": "What time of day is it?",
+      "criteria": {
+        "morning": "Morning light",
+        "afternoon": "Afternoon light",
+        "evening": "Evening light"
+      }
+    }
+  }
+}
+```
+
+---
+
+## Migration from Old Version
+
+| Old | New |
+|-----|-----|
+| `--ollama-classify-question`, `--ollama-classify-instructions`, `--ollama-classify-criteria` | `--questions` JSON array or `[[classify.questions]]` in config.toml |
+| `--top-choice` | SQL: `WHERE top_choice = '...'` |
+| `--decision-model-floor` | SQL: `WHERE top_probability >= 0.5` |
+| `--top-k`, `--global-k` | SQL: `ORDER BY top_probability DESC LIMIT N` |
+| `--merge-range` | Implement in SQL / post-processing |
+| `frames` table | Replaced by `frame_answers` (one row per question per frame) |
+| `ollama_classify_*` config keys | Replaced by `[[classify.questions]]` array |

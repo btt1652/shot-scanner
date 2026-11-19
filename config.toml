@@ -1,55 +1,63 @@
 # vsearch - Default configuration
 # Uses an Ollama decision model as the sole judge for classification.
+# Multiple questions are defined in the [[classify.questions]] array.
 
 [classify]
-top_k = -1
-json_output = false
-decision_model_floor = 0.5
 decision_model_sample_rate = 3
 ollama_host = "192.168.1.190"
 ollama_frame_scale = 0.1
 ollama_decision_model = "typesafe/jev-1.14"
 ollama_timeout = 60
-cache_dir = "/tmp"
+cache_file = "./.cache.db"
 still_frame_threshold = 0.95
 same_scene_threshold = 0.80
-merge_range = false
 ollama_state_template = "sample frame from a video"
-# The question name used in the Ollama request and response (e.g. "team")
-ollama_classify_question = "team"
-# The instructions string for the choice question
-ollama_classify_instructions = "Which team should handle this scene?"
-# Criteria as "key: description" lines (parsed into a dict sent to Ollama)
-ollama_classify_criteria = """
-billing: Payments, payouts, invoices, refunds
-technical: Bugs, outages, integrations, API errors
-sales: Pricing, upgrades, new accounts
-"""
 
-# Example Ollama request JSON body (built from the above config fields):
+[[classify.questions]]
+name = "activity"
+instructions = "What activity is happening in this frame?"
+criteria = { walking = "Person walking", running = "Person running", sitting = "Person sitting" }
+
+[[classify.questions]]
+name = "time_of_day"
+instructions = "What time of day is it?"
+criteria = { morning = "Morning light", afternoon = "Afternoon light", evening = "Evening light" }
+
+# Example: yes/no (search-equivalent) question
+# This replicates the old vsearch search mode exactly:
+# [[classify.questions]]
+# name = "is_valid"
+# instructions = "Does the image match the query?"
+# criteria = { yes = "the frame matches the query", no = "the frame does not match" }
+
+# To override questions from CLI, pass a JSON array:
+# vsearch classify video.mp4 --questions '[{"name":"activity","instructions":"What activity?","criteria":{"walking":"Person walking","running":"Person running"}}]'
+
+# Example Ollama request JSON body (built from the above config):
 # {
-#   "model": "typesafe/jev-1.14",           # ollama_decision_model
-#   "state": "sample frame from a video",   # ollama_state_template
-#   "images": ["base64_image1", "base64_image2", ...],  # injected at runtime
+#   "model": "typesafe/jev-1.14",
+#   "state": "sample frame from a video",
+#   "images": ["base64_image1", "base64_image2", ...],
 #   "questions": {
-#     "team": {                               # ollama_classify_question
+#     "activity": {
 #       "type": "choice",
-#       "instructions": "Which team should handle this scene?",  # ollama_classify_instructions
-#       "criteria": {                         # ollama_classify_criteria parsed as key: description
-#         "billing": "Payments, payouts, invoices, refunds",
-#         "technical": "Bugs, outages, integrations, API errors",
-#         "sales": "Pricing, upgrades, new accounts"
+#       "instructions": "What activity is happening in this frame?",
+#       "criteria": {
+#         "walking": "Person walking",
+#         "running": "Person running",
+#         "sitting": "Person sitting"
+#       }
+#     },
+#     "time_of_day": {
+#       "type": "choice",
+#       "instructions": "What time of day is it?",
+#       "criteria": {
+#         "morning": "Morning light",
+#         "afternoon": "Afternoon light",
+#         "evening": "Evening light"
 #       }
 #     }
 #   }
 # }
 
-# Example: yes/no (search-equivalent) criteria
-# This replicates the old vsearch search mode exactly:
-# ollama_classify_question = "is_valid"
-# ollama_classify_instructions = "Does the image match the query: a person?"
-# ollama_classify_criteria = """
-# yes: the frame matches the query
-# no: the frame does not match
-# """
-# then use --top-choice yes --decision-model-floor 0.7
+# Cache key includes the full questions JSON, so changing any question invalidates the cache.
