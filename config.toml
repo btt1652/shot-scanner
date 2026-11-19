@@ -3,10 +3,10 @@
 # Multiple questions are defined in the [[classify.questions]] array.
 
 [classify]
-decision_model_sample_rate = 3
-ollama_host = "192.168.1.190"
+decision_model_sample_rate = 1
+ollama_host = "192.168.1.190" #"localhost" 
 ollama_frame_scale = 0.1
-ollama_decision_model = "typesafe/jev-1.14"
+ollama_decision_model = "clef-flash:9b" #"d1:3b"
 ollama_timeout = 60
 cache = "./.cache.db"
 still_frame_threshold = 0.95
@@ -16,7 +16,7 @@ ollama_state_template = "sample frame from a video"
 [[classify.questions]]
 name = "activity"
 instructions = "What activity is happening in this frame?"
-criteria = { walking = "Person walking", running = "Person running", sitting = "Person sitting" }
+criteria = { walking = "Person standing", running = "Person sitting", sitting = "Person laying down" }
 
 [[classify.questions]]
 name = "time_of_day"

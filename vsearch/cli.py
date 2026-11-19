@@ -12,6 +12,7 @@ import glob
 import io
 import json
 import os
+import signal
 import sys
 import tempfile
 import urllib.error
@@ -49,7 +50,7 @@ def _try_load_cache(cache, video_path, sample_rate, frame_scale, state, question
     """Try to load cached results from SQLite cache.
 
     Returns (answers, data) where:
-      - Cache hit: answers = frame answer rows, data = {'video_id': ..., 'video_path': ...}
+      - Cache hit (complete/partial): answers = frame answer rows, data includes video_id, cache_status, max_frame_index, max_batch_id
       - Cache miss/incomplete: answers = None, data = None
     """
     if not cache:
@@ -76,15 +77,35 @@ def _try_load_cache(cache, video_path, sample_rate, frame_scale, state, question
             print(f"Cache miss: no answers for {video_path}", file=sys.stderr)
             return None, None
 
-        print(f"Cache hit: {video_path} ({len(answers)} answer rows)", file=sys.stderr)
-        return answers, {"video_id": video["id"], "video_path": video_path}
+        # Determine cache status
+        cache_status = video.get("cache_status", "complete")
+
+        # Get resume metadata from stored answers
+        max_frame = max(a["frame_index"] for a in answers)
+        max_batch = max(a.get("batch_id", 0) for a in answers)
+
+        resume_data = {
+            "video_id": video["id"],
+            "video_path": video_path,
+            "cache_status": cache_status,
+            "max_frame_index": max_frame,
+            "max_batch_id": max_batch,
+        }
+
+        print(f"Cache hit: {video_path} ({len(answers)} answer rows, status={cache_status})", file=sys.stderr)
+        return answers, resume_data
     except Exception as e:
         print(f"Warning: Failed to read cache: {e}", file=sys.stderr)
         return None, None
 
 
-def _save_cache(cache, video_path, sample_rate, frame_scale, state, questions_json, model, all_results, total_sampled=None, same_scene_threshold=None, still_frame_threshold=None):
-    """Save all answer rows to SQLite cache."""
+def _save_cache(cache, video_path, sample_rate, frame_scale, state, questions_json, model, all_results, total_sampled=None, same_scene_threshold=None, still_frame_threshold=None, status="complete"):
+    """Save all answer rows to SQLite cache.
+
+    Args:
+        status: 'complete', 'partial', or 'incomplete'. Controls whether the
+            next run treats this video as fully done or resumes from it.
+    """
     if not cache:
         return
     try:
@@ -107,14 +128,14 @@ def _save_cache(cache, video_path, sample_rate, frame_scale, state, questions_js
 
         cache_db.upsert_frame_answers(video_id, all_results)
 
-        # Mark video as complete
+        # Mark video status (complete vs partial for resumable checkpoints)
         with cache_db.conn:
             cache_db.conn.execute(
-                "UPDATE videos SET cache_status = 'complete' WHERE id = ?",
-                (video_id,),
+                "UPDATE videos SET cache_status = ?, updated_at = datetime('now') WHERE id = ?",
+                (status, video_id),
             )
 
-        print(f"cache saved {video_path} ({len(all_results)} answer rows)", file=sys.stderr)
+        print(f"cache saved {video_path} ({len(all_results)} answer rows, status={status})", file=sys.stderr)
     except Exception as e:
         print(f"Warning: Failed to save cache: {e}", file=sys.stderr)
 def _parse_criteria(criteria_str):
@@ -222,7 +243,7 @@ def _validate_batch_classify(frames_batch, model, state_template, questions, oll
         for q in questions:
             qname = q["name"]
             q_ans = answers.get(qname, {})
-            probs = q_ans.get("choice", q_ans) if isinstance(q_ans, dict) else {}
+            probs = q_ans.get("probabilities", {}) if isinstance(q_ans, dict) else {}
             if not isinstance(probs, dict):
                 probs = {}
             top_choice = None
@@ -354,7 +375,7 @@ def resolve_ollama_endpoint(primary_endpoint):
     return fallback
 
 
-def cmd_classify(args):
+def cmd_analyze(args):
     """Classify video frames using an Ollama choice-question model."""
     cfg = load_config()
 
@@ -444,6 +465,38 @@ def cmd_classify(args):
 
     save_cache = cache
 
+    # Register signal handler for graceful Ctrl+C / SIGINT mid-run
+    _shutdown_saving = False
+    def _signal_handler(signum, frame):
+        nonlocal _shutdown_saving
+        if _shutdown_saving:
+            return  # Prevent re-entry
+        _shutdown_saving = True
+        print("\nInterrupted — saving partial progress before exit...", file=sys.stderr)
+        if save_cache and all_results:
+            # Save all accumulated results across all videos processed so far
+            # Note: we save per-video, so loop through unique video paths seen
+            seen_videos = set(r.get("source_video_path") for r in all_results)
+            for seen_vp in seen_videos:
+                vid_results = [r for r in all_results if r.get("source_video_path") == seen_vp]
+                if vid_results:
+                    vid_results.sort(key=lambda x: x["timestamp_seconds"])
+                    _save_cache(
+                        save_cache, seen_vp,
+                        sample_rate, frame_scale,
+                        state_template, questions_json, model,
+                        vid_results,
+                        total_sampled=total_sampled,
+                        same_scene_threshold=same_scene_threshold,
+                        still_frame_threshold=still_frame_threshold,
+                        status="partial",
+                    )
+        print("Progress saved. Exiting.", file=sys.stderr)
+        sys.exit(130)
+
+    signal.signal(signal.SIGINT, _signal_handler)
+    signal.signal(signal.SIGTERM, _signal_handler)
+
     # Process each video: check cache first, then classify if miss
     for vp in video_paths:
         frame_index = 0
@@ -457,27 +510,29 @@ def cmd_classify(args):
             if cache_results is not None:
                 all_results.extend(cache_results)
                 print(f"Loaded {len(cache_results)} answer row(s) from cache for {vp}", file=sys.stderr)
-                continue
-            if cache_data is not None:
-                video_id = cache_data.get("video_id")
-                if video_id is not None:
-                    cache_db = CacheDB(cache)
-                    last_frame = cache_db.execute_sql(
-                        "SELECT MAX(frame_index) AS max_idx FROM frame_answers WHERE video_id = ?",
-                        (video_id,),
-                    )
-                    if last_frame and last_frame[0]["max_idx"] is not None:
-                        frame_index = last_frame[0]["max_idx"]
-                    batch_rows = cache_db.execute_sql(
-                        "SELECT MAX(batch_id) AS max_bid FROM frame_answers WHERE video_id = ?",
-                        (video_id,),
-                    )
-                    if batch_rows and batch_rows[0]["max_bid"] is not None:
-                        batch_id_counter = batch_rows[0]["max_bid"]
-                    print(f"Resuming from cache: frame_index={frame_index}, validated={batch_id_counter} batches", file=sys.stderr)
-                    cache_db.close()
+                if cache_data is not None:
+                    cache_status = cache_data.get("cache_status", "complete")
+                    if cache_status == "partial":
+                        # Resume from where we left off
+                        frame_index = cache_data.get("max_frame_index", 0)
+                        batch_id_counter = cache_data.get("max_batch_id", 0)
+                        print(f"Resuming from frame_index={frame_index}, validated={batch_id_counter} batches", file=sys.stderr)
+                    elif cache_status == "complete":
+                        # Full cache hit - skip entire video processing
+                        print(f"Full cache hit for {vp}, skipping processing", file=sys.stderr)
+                        frame_index = -1  # sentinel to skip processing below
+                    else:
+                        print(f"Cache incomplete for {vp} - resuming from frame 0", file=sys.stderr)
                 else:
-                    print(f"Cache incomplete for {vp} - resuming from frame 0", file=sys.stderr)
+                    print(f"Cache incomplete for {vp} - no data available, resuming from frame 0", file=sys.stderr)
+            else:
+                print(f"Cache incomplete for {vp} - no answers found, resuming from frame 0", file=sys.stderr)
+        else:
+            frame_index = 0
+
+        if frame_index < 0:
+            # Already fully cached or nothing to do, skip to next video
+            continue
 
         cap = cv2.VideoCapture(vp)
         if not cap.isOpened():
@@ -487,6 +542,10 @@ def cmd_classify(args):
         print(f"Processing video: {vp}", file=sys.stderr)
         prev_small_gray = None
         prev_ts = None
+
+        if frame_index > 0:
+            cap.set(cv2.CAP_PROP_POS_FRAMES, frame_index)
+            print(f"Resuming from frame_index={frame_index}", file=sys.stderr)
 
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) if cap.get(cv2.CAP_PROP_FRAME_COUNT) is not None else None
         fps = cap.get(cv2.CAP_PROP_FPS)
@@ -551,6 +610,22 @@ def cmd_classify(args):
                 if total_extracted % 10 == 0:
                     print(f"{vp} (extracted={total_extracted}/{total_sampled}, validated={total_validated})", file=sys.stderr)
 
+                # Periodic checkpoint save every 100 extracted frames
+                if total_extracted % 100 == 0 and save_cache:
+                    video_results = [r for r in all_results if r.get("source_video_path") == vp]
+                    if video_results:
+                        video_results.sort(key=lambda x: x["timestamp_seconds"])
+                        _save_cache(
+                            save_cache, vp,
+                            sample_rate, frame_scale,
+                            state_template, questions_json, model,
+                            video_results,
+                            total_sampled=total_sampled,
+                            same_scene_threshold=same_scene_threshold,
+                            still_frame_threshold=still_frame_threshold,
+                            status="partial",
+                        )
+
             frame_index += 1
 
         cap.release()
@@ -590,99 +665,7 @@ def cmd_classify(args):
         print("No answers generated.", file=sys.stderr)
 
 
-def cmd_cache_extract(args):
-    """Extract and save frame images from videos based on cached answer filters.
-
-    Usage:
-        vsearch cache extract-frames [--cache FILE] [--output-dir DIR] \
-            [--question NAME] [--choice CHOICE] [--min-prob FLOAT] \
-            [--sql "SELECT ..."] [--limit N] [--format jpg|png]
-    """
-    import cv2
-    import os
-
-    cache_db = CacheDB(args.cache or "./.cache.db")
-    output_dir = args.output_dir or "./extracted_frames"
-    os.makedirs(output_dir, exist_ok=True)
-
-    # Build query from flags or use raw SQL
-    sql = args.sql
-    if not sql:
-        conditions = []
-        params = []
-        if args.question:
-            conditions.append("question_name = ?")
-            params.append(args.question)
-        if args.choice:
-            conditions.append("top_choice = ?")
-            params.append(args.choice)
-        if args.min_prob is not None:
-            conditions.append("top_probability >= ?")
-            params.append(args.min_prob)
-
-        where = " WHERE " + " AND ".join(conditions) if conditions else ""
-        sql = f"SELECT video_id, source_video_path, frame_index, timestamp_seconds, question_name, top_choice FROM frame_answers{where} ORDER BY video_id, frame_index"
-
-        rows = cache_db.execute_sql(sql, tuple(params))
-    else:
-        rows = cache_db.execute_sql(sql)
-
-    if not rows:
-        print("No matching frames found.", file=sys.stderr)
-        cache_db.close()
-        return
-
-    # Group by video to batch seeks
-    from collections import defaultdict
-    by_video = defaultdict(list)
-    for row in rows:
-        by_video[row["source_video_path"]].append(row)
-
-    saved = 0
-    fmt = args.format or "jpg"
-    quality = 90
-
-    for video_path, frames in by_video.items():
-        if not os.path.exists(video_path):
-            print(f"Warning: video not found: {video_path}, skipping {len(frames)} frames", file=sys.stderr)
-            continue
-
-        cap = cv2.VideoCapture(video_path)
-        if not cap.isOpened():
-            print(f"Warning: cannot open video: {video_path}", file=sys.stderr)
-            continue
-
-        # Sort frames by index
-        frames_sorted = sorted(frames, key=lambda r: r["frame_index"])
-
-        for frame_info in frames_sorted:
-            fi = frame_info["frame_index"]
-            cap.set(cv2.CAP_PROP_POS_FRAMES, fi)
-            ret, frame = cap.read()
-            if not ret:
-                print(f"Warning: could not read frame {fi} from {video_path}", file=sys.stderr)
-                continue
-
-            # Build filename: video_name_frameXXXX_question_choice.ext
-            video_name = os.path.splitext(os.path.basename(video_path))[0]
-            q_name = frame_info.get("question_name", "frame")
-            choice = frame_info.get("top_choice", "unknown")
-            ts = frame_info.get("timestamp_seconds", 0)
-            fname = f"{video_name}_f{fi:06d}_{ts:.1f}s_{q_name}_{choice}.{fmt}"
-            out_path = os.path.join(output_dir, fname)
-
-            if fmt == "jpg":
-                cv2.imwrite(out_path, frame, [int(cv2.IMWRITE_JPEG_QUALITY), quality])
-            elif fmt == "png":
-                cv2.imwrite(out_path, frame)
-            else:
-                cv2.imwrite(out_path, frame)
-            saved += 1
-
-        cap.release()
-
-    print(f"Extracted {saved} frame(s) to {output_dir}", file=sys.stderr)
-    cache_db.close()
+def _print_table(rows):
     """Print a list of dicts as an aligned text table."""
     if not rows:
         print("(no rows)")
@@ -695,43 +678,257 @@ def cmd_cache_extract(args):
         print("  ".join(str(r.get(c, "")).ljust(widths[c]) for c in cols))
 
 
-def cmd_cache(args):
-    """Cache management subcommand.
+def cmd_query(args):
+    """Run a SQL query on the cache, optionally extract matching frames."""
+    import cv2
+    import os
+
+    cache_db = CacheDB(args.cache or "./.cache.db")
+
+    sql = args.sql
+    if not sql:
+        print("Error: SQL query required", file=sys.stderr)
+        sys.exit(1)
+
+    try:
+        rows = cache_db.execute_sql(sql)
+    except Exception as e:
+        print(f"Error executing SQL: {e}", file=sys.stderr)
+        cache_db.close()
+        sys.exit(1)
+
+    save_frame_dir = args.save_frame
+    if save_frame_dir:
+        # Group by video to batch seeks
+        from collections import defaultdict
+        by_video = defaultdict(list)
+
+        # Build mapping from video_id to video_path
+        video_paths = {}
+        for v in cache_db.execute_sql("SELECT id, video_path FROM videos"):
+            video_paths[v["id"]] = v["video_path"]
+
+        # Add source_video_path to each row
+        for row in rows:
+            video_id = row.get("video_id")
+            if video_id and video_id in video_paths:
+                row["source_video_path"] = video_paths[video_id]
+                by_video[video_paths[video_id]].append(row)
+
+        if not by_video:
+            print("No matching frames to extract.", file=sys.stderr)
+            cache_db.close()
+            sys.exit(0)
+
+        os.makedirs(save_frame_dir, exist_ok=True)
+
+        saved = 0
+        fmt = "jpg"
+        quality = 90
+
+        for video_path, frames in by_video.items():
+            if not os.path.exists(video_path):
+                print(f"Warning: video not found: {video_path}, skipping", file=sys.stderr)
+                continue
+
+            cap = cv2.VideoCapture(video_path)
+            if not cap.isOpened():
+                print(f"Warning: cannot open video: {video_path}", file=sys.stderr)
+                continue
+
+            frames_sorted = sorted(frames, key=lambda r: r.get("frame_index", 0))
+
+            for frame_info in frames_sorted:
+                fi = frame_info.get("frame_index", 0)
+                cap.set(cv2.CAP_PROP_POS_FRAMES, fi)
+                ret, frame = cap.read()
+                if not ret:
+                    print(f"Warning: could not read frame {fi} from {video_path}", file=sys.stderr)
+                    continue
+
+                video_name = os.path.splitext(os.path.basename(video_path))[0]
+                q_name = frame_info.get("question_name", "frame")
+                choice = frame_info.get("top_choice", "unknown")
+                ts = frame_info.get("timestamp_seconds", 0)
+                fname = f"{video_name}_f{fi:06d}_{ts:.1f}s_{q_name}_{choice}.{fmt}"
+                out_path = os.path.join(save_frame_dir, fname)
+
+                if fmt == "jpg":
+                    cv2.imwrite(out_path, frame, [int(cv2.IMWRITE_JPEG_QUALITY), quality])
+                elif fmt == "png":
+                    cv2.imwrite(out_path, frame)
+                else:
+                    cv2.imwrite(out_path, frame)
+                saved += 1
+
+            cap.release()
+
+        print(f"Extracted {saved} frame(s) to {save_frame_dir}", file=sys.stderr)
+        cache_db.close()
+        sys.exit(0)
+
+    _print_table(rows)
+    cache_db.close()
+    sys.exit(0)
+
+def cmd_search(args):
+    """Search cached frame answers by question name, choice, and probability.
 
     Usage:
-        vsearch cache list [--cache FILE]
-        vsearch cache stats [--cache FILE]
-        vsearch cache prune [DAYS] [--cache FILE]
-        vsearch cache sql "SELECT ..." [--cache FILE]
+        vsearch search <video> [--q "question=choice:prob"]* [--top N] [--save-frame DIR]
+
+    Each --q adds a filter: 'question_name=choice:min_probability'. All must match for a row to qualify.
+    Example:
+        vsearch search video.mp4 \
+          --q "activity=yes:0.8" \
+          --q "time_of_day=no:0.9" \
+          --top 10 \
+          --save-frame ./frames
     """
+    import cv2
+    import os
+
     cache_db = CacheDB(args.cache or "./.cache.db")
-    try:
-        if getattr(args, "list", False):
-            _print_table(cache_db.list_videos(limit=args.limit or 50))
-        elif getattr(args, "stats", False):
-            videos = cache_db.list_videos(limit=10000)
-            frame_count = cache_db.execute_sql("SELECT COUNT(*) AS n FROM frame_answers")
-            total_answers = frame_count[0]["n"] if frame_count else 0
-            print(f"Cache file: {args.cache or './.cache.db'}")
-            print(f"Database:        {cache_db.db_path}")
-            print(f"Total videos:    {len(videos)}")
-            print(f"Total answers:   {total_answers}")
-        elif getattr(args, "prune", None) is not None:
-            days = args.prune or 30
-            cache_db.prune_old(max_age_days=days)
-            cache_db.set_stat("last_prune", str(days))
-            print(f"Pruned cache entries older than {days} days.")
-        elif getattr(args, "sql", None):
-            sql = args.sql
-            if sql.lstrip().upper().startswith(("SELECT", "PRAGMA", "WITH", "EXPLAIN")):
-                _print_table(cache_db.execute_sql(sql))
-            else:
-                rowcount = cache_db.execute_sql_command(sql)
-                print(f"OK ({rowcount} rows affected)")
-        else:
-            print(f"Usage: vsearch cache {{list|stats|prune|sql}} [--cache FILE]")
-    finally:
+
+    # Parse --q flags into list of (question_name, choice, min_probability)
+    q_list = [q.strip() for q in (args.q_values or []) if q.strip()]
+
+    conditions = []
+    for q in q_list:
+        parts = q.split('=')
+        if len(parts) < 2:
+            print(f"Error: invalid --q format '{q}'. Expected 'question=choice:prob'.", file=sys.stderr)
+            cache_db.close()
+            sys.exit(1)
+        qname = parts[0].strip()
+        rest = parts[1]  # e.g., "yes:0.8"
+        if ':' not in rest:
+            print(f"Error: invalid --q format '{q}'. Expected 'question=choice:prob'.", file=sys.stderr)
+            cache_db.close()
+            sys.exit(1)
+        choice_part, prob_part = rest.rsplit(':', 1)
+        choice = choice_part.strip().lower()
+        try:
+            prob = float(prob_part.strip())
+        except ValueError:
+            print(f"Error: invalid probability '{prob_part}' in '--q'. Use numeric value.", file=sys.stderr)
+            cache_db.close()
+            sys.exit(1)
+        conditions.append((qname, choice, prob))
+
+    top_n = int(args.top) if args.top is not None else None
+
+    # Build SQL - we need self-join for multiple question conditions on same frame
+    # Use frame_answers joined against itself for each condition
+    if not conditions:
+        print("Error: at least one --q filter required", file=sys.stderr)
         cache_db.close()
+        sys.exit(1)
+
+    # Build query with self-joins for multiple conditions
+    # First condition uses fa (main frame_answers), subsequent use fa1, fa2, etc.
+    select_cols = "fa.video_id, fa.frame_index, fa.timestamp_seconds, fa.question_name, fa.top_choice, fa.top_probability"
+    from_clause = "frame_answers fa"
+    where_clauses = []
+    params = []
+
+    for i, (qname, choice, prob) in enumerate(conditions):
+        alias = f"fa{i}" if i > 0 else "fa"
+        where_clauses.append(f"{alias}.question_name = ? AND {alias}.top_choice = ? AND {alias}.top_probability >= ?")
+        params.extend([qname, choice, prob])
+        if i > 0:
+            from_clause += f" JOIN frame_answers {alias} ON fa.video_id = {alias}.video_id AND fa.frame_index = {alias}.frame_index"
+
+    # Add video path filter
+    # We need to join videos for the path
+    from_clause += " LEFT JOIN videos v ON fa.video_id = v.id"
+
+    # Limit to specified video(s)
+    video_paths = args.video if isinstance(args.video, list) else [args.video]
+    video_placeholders = ','.join(['?'] * len(video_paths))
+    where_clauses.append(f"v.video_path IN ({video_placeholders})")
+    params.extend(video_paths)
+
+    limit_expr = f"LIMIT {top_n}" if top_n is not None else ""
+
+    query_sql = f"""
+        SELECT DISTINCT {select_cols}
+        FROM {from_clause}
+        WHERE {' AND '.join(where_clauses)}
+        ORDER BY fa.top_probability DESC
+        {limit_expr}
+    """
+
+    rows = cache_db.execute_sql(query_sql, params)
+
+    save_frame_dir = args.save_frame
+    if save_frame_dir:
+        # Group by video to batch seeks
+        from collections import defaultdict
+        by_video = defaultdict(list)
+
+        # Build mapping from video_id to video_path
+        video_paths = {}
+        for v in cache_db.execute_sql("SELECT id, video_path FROM videos"):
+            video_paths[v["id"]] = v["video_path"]
+
+        # Add source_video_path to each row
+        for row in rows:
+            video_id = row.get("video_id")
+            if video_id and video_id in video_paths:
+                row["source_video_path"] = video_paths[video_id]
+                by_video[video_paths[video_id]].append(row)
+
+        if not by_video:
+            print("No matching frames found.", file=sys.stderr)
+            cache_db.close()
+            sys.exit(0)
+
+        os.makedirs(save_frame_dir, exist_ok=True)
+
+        saved = 0
+        fmt = "jpg"
+        quality = 90
+
+        for video_path, frames in by_video.items():
+            if not os.path.exists(video_path):
+                print(f"Warning: video not found: {video_path}, skipping", file=sys.stderr)
+                continue
+
+            cap = cv2.VideoCapture(video_path)
+            if not cap.isOpened():
+                print(f"Warning: cannot open video: {video_path}", file=sys.stderr)
+                continue
+
+            frames_sorted = sorted(frames, key=lambda r: r.get("frame_index", 0))
+
+            for frame_info in frames_sorted:
+                fi = frame_info.get("frame_index", 0)
+                cap.set(cv2.CAP_PROP_POS_FRAMES, fi)
+                ret, frame = cap.read()
+                if not ret:
+                    print(f"Warning: could not read frame {fi} from {video_path}", file=sys.stderr)
+                    continue
+
+                video_name = os.path.splitext(os.path.basename(video_path))[0]
+                q_name = frame_info.get("question_name", "frame")
+                choice = frame_info.get("top_choice", "unknown")
+                ts = frame_info.get("timestamp_seconds", 0)
+                fname = f"{video_name}_f{fi:06d}_{ts:.1f}s_{q_name}_{choice}.jpg"
+                out_path = os.path.join(save_frame_dir, fname)
+
+                cv2.imwrite(out_path, frame, [int(cv2.IMWRITE_JPEG_QUALITY), quality])
+                saved += 1
+
+            cap.release()
+
+        print(f"Extracted {saved} frame(s) to {save_frame_dir}", file=sys.stderr)
+        cache_db.close()
+        sys.exit(0)
+
+    _print_table(rows)
+    cache_db.close()
+    sys.exit(0)
 
 
 def main():
@@ -741,7 +938,7 @@ def main():
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
-    p_classify = sub.add_parser("classify", help="Classify video frames using Ollama choice-question model")
+    p_classify = sub.add_parser("analyze", help="Analyze video frames using Ollama choice-question model")
     p_classify.add_argument("video_paths", nargs="+", help="One or more video files, directories, or glob patterns (e.g., video1.mp4 video2/*.mp4)")
 
     p_classify.add_argument("--questions", "-qs", type=str, default=None, help="JSON array of questions: [{\"name\":..., \"instructions\":..., \"criteria\":{...}}, ...]")
@@ -755,35 +952,31 @@ def main():
     p_classify.add_argument("--recursive", "-R", action="store_true", default=False, help="Recursively scan directories for video files")
     p_classify.add_argument("--cache", type=str, default=None, help="Path to SQLite cache file (default: ./.cache.db)")
     p_classify.add_argument("--ollama-state", "-s", type=str, default=None, help="State context string for Ollama (default: 'sample frame from a video')")
-    p_classify.set_defaults(func=cmd_classify)
+    p_classify.set_defaults(func=cmd_analyze)
 
-    # Cache management subcommand
-    p_cache = sub.add_parser("cache", help="Manage the classify result cache")
-    cache_parent = argparse.ArgumentParser(add_help=False)
-    cache_parent.add_argument("--cache", type=str, default=None, help="Path to SQLite cache file (default: ./.cache.db)")
-    cache_sub = p_cache.add_subparsers(dest="cache_action", required=True)
-    p_list = cache_sub.add_parser("list", parents=[cache_parent], help="List cached videos")
-    p_list.add_argument("--limit", type=int, default=50, help="Max number of videos to list (default: 50)")
-    p_list.set_defaults(func=cmd_cache, list=True, stats=False, prune=None, sql=None)
-    p_stats = cache_sub.add_parser("stats", parents=[cache_parent], help="Show cache statistics")
-    p_stats.set_defaults(func=cmd_cache, list=False, stats=True, prune=None, sql=None)
-    p_prune = cache_sub.add_parser("prune", parents=[cache_parent], help="Prune old cache entries")
-    p_prune.add_argument("prune", type=int, nargs="?", default=30, help="Delete entries older than N days (default: 30)")
-    p_prune.set_defaults(func=cmd_cache, list=False, stats=False, prune=None, sql=None)
-    p_sql = cache_sub.add_parser("sql", parents=[cache_parent], help="Execute custom SQL query against cache database")
-    p_sql.add_argument("sql", type=str, help="SQL query to execute (SELECT for read-only, others for modification)")
-    p_sql.set_defaults(func=cmd_cache, list=False, stats=False, prune=None)
-    p_extract = cache_sub.add_parser("extract-frames", parents=[cache_parent], help="Extract and save frame images from videos based on cached answer filters")
-    p_extract.add_argument("--output-dir", type=str, default="./extracted_frames", help="Directory to save extracted frames (default: ./extracted_frames)")
-    p_extract.add_argument("--question", type=str, help="Filter by specific question name")
-    p_extract.add_argument("--choice", type=str, help="Filter by specific top_choice answer")
-    p_extract.add_argument("--min-prob", type=float, help="Minimum probability threshold (0-1)")
-    p_extract.add_argument("--sql", type=str, help="Custom SQL query to execute")
-    p_extract.add_argument("--limit", type=int, default=1000, help="Maximum number of frames to extract (default: 1000)")
-    p_extract.add_argument("--format", choices=["jpg", "png"], default="jpg", help="Output image format (jpg or png)")
-    p_extract.set_defaults(func=cmd_cache_extract)
+    p_query = sub.add_parser("query", help="Query the cache or extract frames based on SQL")
+    p_query.add_argument("--cache", type=str, default=None, help="Path to SQLite cache file (default: ./.cache.db)")
+    p_query.add_argument("sql", type=str, nargs="?", default="SELECT video_id, frame_index, timestamp_seconds, question_name, top_choice, top_probability FROM frame_answers WHERE top_probability > 0.5", help="SQL query to execute")
+    p_query.add_argument("--save-frame", type=str, default=None, help="Directory to save extracted frames")
+    p_query.set_defaults(func=cmd_query)
+
+    p_search = sub.add_parser("search", help="Search cached frame answers by question")
+    p_search.add_argument("video", type=str, nargs="+", help="One or more video files/directories (e.g., video.mp4 video2/*.mp4)")
+    p_search.add_argument("--q", dest="q_values", action="append", default=[], help="Filter condition: 'question=choice:prob' (e.g., activity=yes:0.8). Multiple --q require ALL to match.")
+    p_search.add_argument("--top", type=int, default=None, help="Limit number of results by top_probability DESC")
+    p_search.add_argument("--save-frame", type=str, default=None, help="Directory to save extracted frames")
+    p_search.add_argument("--cache", type=str, default=None, help="Path to SQLite cache file (default: ./.cache.db)")
+    p_search.set_defaults(func=cmd_search)
 
     args = parser.parse_args()
+
+    def _global_sigint_handler(signum, frame):
+        print("\nInterrupted — saving partial progress before exit...", file=sys.stderr)
+        sys.exit(130)
+
+    signal.signal(signal.SIGINT, _global_sigint_handler)
+    signal.signal(signal.SIGTERM, _global_sigint_handler)
+
     args.func(args)
 
 

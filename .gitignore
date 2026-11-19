@@ -26,4 +26,4 @@ Thumbs.db
 *.jpg
 *.mp4
 *.png
-```
+```.cache.db
