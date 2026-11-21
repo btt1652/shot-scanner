@@ -186,6 +186,10 @@ def _normalize_questions(raw_questions):
             criteria = _parse_criteria(criteria)
         if not isinstance(criteria, dict) or not criteria:
             raise ValueError(f"question {name} criteria must be a dict")
+        # Check for duplicate question names
+        existing_names = [n['name'] for n in normalized]
+        if name in existing_names:
+            raise ValueError(f"duplicate question name '{name}'. Question names must be unique.")
         normalized.append({
             "name": name,
             "instructions": instructions or "",
@@ -792,6 +796,16 @@ def cmd_search(args):
 
     # Parse --q flags into list of (question_name, choice, min_probability)
     q_list = [q.strip() for q in (args.q_values or []) if q.strip()]
+
+    # Check for duplicate --q arguments
+    if len(q_list) != len(set(q_list)):
+        seen = {}
+        for q in q_list:
+            if q in seen:
+                print(f"Error: duplicate --q argument '{q}'. Each --q must be unique.", file=sys.stderr)
+                cache_db.close()
+                sys.exit(1)
+            seen[q] = True
 
     conditions = []
     for q in q_list:
