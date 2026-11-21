@@ -99,3 +99,24 @@ vsearch search video.mp4 \
 
 This will extract frames meeting all criteria, sorted by probability, capped at top N.
 
+## Cache Management (`vsearch cache`)
+
+For managing the SQLite cache directly.
+
+```bash
+# List all cached videos with answer counts
+vsearch cache list
+
+# Limit results
+vsearch cache list --limit 10
+
+# Delete a specific video and its answers
+vsearch cache delete "/path/to/video.mp4"
+
+# Prune videos older than N days (default 30)
+vsearch cache prune --days 30
+
+# Clear entire cache (requires --yes confirmation)
+vsearch cache clear --yes
+```
+
