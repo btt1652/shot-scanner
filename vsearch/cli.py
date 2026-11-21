@@ -47,10 +47,10 @@ def _cache_params(sample_rate, frame_scale, state, questions_json, model, same_s
 
 
 def _try_load_cache(cache, video_path, sample_rate, frame_scale, state, questions_json, model, same_scene_threshold=None, still_frame_threshold=None):
-    """Try to load cached results from SQLite cache.
+    """Try to load cached results for a video + params (via analysis run).
 
     Returns (answers, data) where:
-      - Cache hit (complete/partial): answers = frame answer rows, data includes video_id, cache_status, max_frame_index, max_batch_id
+      - Cache hit (complete/partial): answers = frame answer rows, data includes run_id, cache_status, max_frame_index, max_batch_id
       - Cache miss/incomplete: answers = None, data = None
     """
     if not cache:
@@ -68,23 +68,25 @@ def _try_load_cache(cache, video_path, sample_rate, frame_scale, state, question
             print(f"Cache miss: video {video_path} not in cache", file=sys.stderr)
             return None, None
 
-        if video.get("content_hash") != content_hash or video.get("params_hash") != params_hash:
-            print(f"Cache miss: params or video content changed for {video_path}", file=sys.stderr)
+        run = cache_db.get_run(video["id"], content_hash, params_hash)
+        if run is None:
+            print(f"Cache miss: no run for video {video_path} with content={content_hash} params={params_hash}", file=sys.stderr)
             return None, None
 
-        answers = cache_db.get_answers(video["id"])
+        answers = cache_db.get_answers(run["id"])
         if not answers:
             print(f"Cache miss: no answers for {video_path}", file=sys.stderr)
             return None, None
 
         # Determine cache status
-        cache_status = video.get("cache_status", "complete")
+        cache_status = run.get("cache_status", "complete")
 
         # Get resume metadata from stored answers
         max_frame = max(a["frame_index"] for a in answers)
         max_batch = max(a.get("batch_id", 0) for a in answers)
 
         resume_data = {
+            "run_id": run["id"],
             "video_id": video["id"],
             "video_path": video_path,
             "cache_status": cache_status,
@@ -92,7 +94,7 @@ def _try_load_cache(cache, video_path, sample_rate, frame_scale, state, question
             "max_batch_id": max_batch,
         }
 
-        print(f"Cache hit: {video_path} ({len(answers)} answer rows, status={cache_status})", file=sys.stderr)
+        print(f"Cache hit: {video_path} (run={run['id']}, {len(answers)} answer rows, status={cache_status})", file=sys.stderr)
         return answers, resume_data
     except Exception as e:
         print(f"Warning: Failed to read cache: {e}", file=sys.stderr)
@@ -120,20 +122,23 @@ def _save_cache(cache, video_path, sample_rate, frame_scale, state, questions_js
         video_id = cache_db.upsert_video(
             video_path=video_path,
             content_hash=content_hash,
-            params_hash=params_hash,
             fps=None,
             total_frames=total_sampled,
             stride=sample_rate,
         )
 
-        cache_db.upsert_frame_answers(video_id, all_results)
+        # Upsert analysis run for this param set
+        run_id = cache_db.upsert_run(
+            video_id=video_id,
+            content_hash=content_hash,
+            params_hash=params_hash,
+            model=model,
+        )
 
-        # Mark video status (complete vs partial for resumable checkpoints)
-        with cache_db.conn:
-            cache_db.conn.execute(
-                "UPDATE videos SET cache_status = ?, updated_at = datetime('now') WHERE id = ?",
-                (status, video_id),
-            )
+        cache_db.upsert_frame_answers(run_id, all_results)
+
+        # Mark run status (complete vs partial for resumable checkpoints)
+        cache_db.update_run_status(run_id, status)
 
         print(f"cache saved {video_path} ({len(all_results)} answer rows, status={status})", file=sys.stderr)
     except Exception as e:
@@ -198,9 +203,94 @@ def _normalize_questions(raw_questions):
     return normalized
 
 
+def _check_and_confirm_overwrite(cache, video_paths, questions, params_hash):
+    """Check if video already has cached answers for any of the questions.
+    If so, warn user and ask for confirmation before proceeding.
+    Only flags as duplicate if question name AND params_hash match (same model+config).
+    """
+    cache_db = CacheDB(cache)
+    question_names = [q["name"] for q in questions]
+    overlapping = []
+
+    for vp in video_paths:
+        video = cache_db.get_video(vp)
+        if video is None:
+            continue
+        # Get runs for this video
+        runs = cache_db.list_runs(vp)
+        for run in runs:
+            # Only consider runs with same params_hash (same model+config)
+            if run.get("params_hash") != params_hash:
+                continue
+            # Check if any answer matches our question names
+            for qname in question_names:
+                cur = cache_db.conn.execute(
+                    "SELECT COUNT(*) FROM frame_answers WHERE run_id = ? AND question_name = ?",
+                    (run["id"], qname)
+                )
+                count = cur.fetchone()[0]
+                if count > 0:
+                    overlapping.append((vp, qname, count, run.get("cache_status", "?")))
+                    break  # one per run is enough
+
+    cache_db.close()
+
+    if not overlapping:
+        return
+
+    print("Warning: Found existing cached answers that overlap with new analysis:", file=sys.stderr)
+    for vp, qname, count, status in overlapping[:10]:
+        print(f"  {vp}: question='{qname}' has {count} answers (status={status})", file=sys.stderr)
+
+    # Ask user for confirmation
+    while True:
+        try:
+            ans = input("Overwrite existing results? (y/n): ").strip().lower()
+        except EOFError:
+            ans = "n"
+        if ans in ("y", "yes"):
+            # Delete overlapping answers
+            cache_db = CacheDB(cache)
+            for vp, qname, count, status in overlapping:
+                video = cache_db.get_video(vp)
+                if video is None:
+                    continue
+                runs = cache_db.list_runs(vp)
+                for run in runs:
+                    cache_db.conn.execute(
+                        "DELETE FROM frame_answers WHERE run_id = ? AND question_name = ?",
+                        (run["id"], qname)
+                    )
+            cache_db.conn.commit()
+            cache_db.close()
+            print("Existing overlapping answers deleted. Proceeding with new analysis.", file=sys.stderr)
+            return
+        elif ans in ("n", "no"):
+            print("Aborted by user.", file=sys.stderr)
+            sys.exit(0)
+        else:
+            print("Please answer 'y' or 'n'.", file=sys.stderr)
+
+
 def _questions_json(questions):
     """Serialize normalized questions to a canonical JSON string (sorted)."""
     return json.dumps(questions, sort_keys=True, ensure_ascii=False)
+
+
+def _sql_with_params(sql: str, params: list) -> str:
+    """Replace ? placeholders with actual values for display purposes."""
+    result = sql
+    for param in params:
+        if param is None:
+            result = result.replace("?", "NULL", 1)
+        elif isinstance(param, str):
+            escaped = param.replace("'", "''")
+            result = result.replace("?", f"'{escaped}'", 1)
+        elif isinstance(param, bool):
+            result = result.replace("?", "TRUE" if param else "FALSE", 1)
+        else:
+            result = result.replace("?", str(param), 1)
+    return result
 
 
 def _validate_batch_classify(frames_batch, model, state_template, questions, ollama_timeout, ollama_endpoint, batch_id_counter=None):
@@ -431,6 +521,16 @@ def cmd_analyze(args):
 
     sample_rate = decision_model_sample_rate if decision_model_sample_rate else 1
     model = ollama_model if ollama_model else "typesafe/jev-1.14"
+
+    # Build params_hash for duplicate detection (includes model, thresholds, etc.)
+    params_hash = _params_hash(**_cache_params(
+        sample_rate, frame_scale, state_template, questions_json, model,
+        same_scene_threshold, still_frame_threshold,
+    ))
+
+    # Check for existing cached answers for these videos/questions
+    if cache:
+        _check_and_confirm_overwrite(cache, video_paths, questions, params_hash)
 
     batch = []
     all_results = []
@@ -707,17 +807,17 @@ def cmd_query(args):
         from collections import defaultdict
         by_video = defaultdict(list)
 
-        # Build mapping from video_id to video_path
-        video_paths = {}
-        for v in cache_db.execute_sql("SELECT id, video_path FROM videos"):
-            video_paths[v["id"]] = v["video_path"]
+        # Build mapping from run_id to video_path via analysis_runs
+        run_to_path = {}
+        for r in cache_db.execute_sql("SELECT ar.id AS run_id, v.video_path FROM analysis_runs ar JOIN videos v ON ar.video_id = v.id"):
+            run_to_path[r["run_id"]] = r["video_path"]
 
         # Add source_video_path to each row
         for row in rows:
-            video_id = row.get("video_id")
-            if video_id and video_id in video_paths:
-                row["source_video_path"] = video_paths[video_id]
-                by_video[video_paths[video_id]].append(row)
+            run_id = row.get("run_id")
+            if run_id and run_id in run_to_path:
+                row["source_video_path"] = run_to_path[run_id]
+                by_video[run_to_path[run_id]].append(row)
 
         if not by_video:
             print("No matching frames to extract.", file=sys.stderr)
@@ -779,7 +879,7 @@ def cmd_search(args):
     """Search cached frame answers by question name, choice, and probability.
 
     Usage:
-        vsearch search <video> [--q "question=choice:prob"]* [--top N] [--save-frame DIR]
+        vsearch search <video> [--q "question=choice:prob"]* [--top N] [--model MODEL --save-frame DIR]
 
     Each --q adds a filter: 'question_name=choice:min_probability'. All must match for a row to qualify.
     Example:
@@ -841,8 +941,8 @@ def cmd_search(args):
 
     # Build query with self-joins for multiple conditions
     # First condition uses fa (main frame_answers), subsequent use fa1, fa2, etc.
-    select_cols = "fa.video_id, fa.frame_index, fa.timestamp_seconds, fa.question_name, fa.top_choice, fa.top_probability"
-    from_clause = "frame_answers fa"
+    select_cols = "fa.run_id, fa.frame_index, fa.timestamp_seconds, fa.question_name, fa.top_choice, fa.top_probability"
+    from_clause = "frame_answers fa JOIN analysis_runs ar1 ON fa.run_id = ar1.id"
     where_clauses = []
     params = []
 
@@ -851,17 +951,34 @@ def cmd_search(args):
         where_clauses.append(f"{alias}.question_name = ? AND {alias}.top_choice = ? AND {alias}.top_probability >= ?")
         params.extend([qname, choice, prob])
         if i > 0:
-            from_clause += f" JOIN frame_answers {alias} ON fa.video_id = {alias}.video_id AND fa.frame_index = {alias}.frame_index"
+            from_clause += f" JOIN frame_answers {alias} ON fa.run_id = {alias}.run_id AND fa.frame_index = {alias}.frame_index"
 
-    # Add video path filter
-    # We need to join videos for the path
-    from_clause += " LEFT JOIN videos v ON fa.video_id = v.id"
+    # Add video path filter via analysis_runs → videos
+    from_clause += " LEFT JOIN videos v ON ar1.video_id = v.id"
 
     # Limit to specified video(s)
     video_paths = args.video if isinstance(args.video, list) else [args.video]
     video_placeholders = ','.join(['?'] * len(video_paths))
     where_clauses.append(f"v.video_path IN ({video_placeholders})")
     params.extend(video_paths)
+
+    # Filter by model name if specified
+    if getattr(args, "model", None):
+        cur = cache_db.conn.execute(
+            "SELECT DISTINCT id FROM analysis_runs WHERE model = ?", (args.model,)
+        )
+        model_run_ids = [r[0] for r in cur.fetchall()]
+        if not model_run_ids:
+            print(f"Error: no analysis runs found for model '{args.model}'", file=sys.stderr)
+            cache_db.close()
+            sys.exit(1)
+        where_clauses.append(f"fa.run_id IN ({','.join(['?'] * len(model_run_ids))})")
+        params.extend(model_run_ids)
+
+    # Filter by specific run_id if specified
+    if getattr(args, "run_id", None) is not None:
+        where_clauses.append("fa.run_id = ?")
+        params.append(args.run_id)
 
     limit_expr = f"LIMIT {top_n}" if top_n is not None else ""
 
@@ -872,6 +989,7 @@ def cmd_search(args):
         ORDER BY fa.top_probability DESC
         {limit_expr}
     """
+    print(f"SQL Query:\n{_sql_with_params(query_sql, params)}", file=sys.stderr)
 
     rows = cache_db.execute_sql(query_sql, params)
 
@@ -881,17 +999,17 @@ def cmd_search(args):
         from collections import defaultdict
         by_video = defaultdict(list)
 
-        # Build mapping from video_id to video_path
-        video_paths = {}
-        for v in cache_db.execute_sql("SELECT id, video_path FROM videos"):
-            video_paths[v["id"]] = v["video_path"]
+        # Build mapping from run_id to video_path via analysis_runs
+        run_to_path = {}
+        for r in cache_db.execute_sql("SELECT ar.id AS run_id, v.video_path FROM analysis_runs ar JOIN videos v ON ar.video_id = v.id"):
+            run_to_path[r["run_id"]] = r["video_path"]
 
         # Add source_video_path to each row
         for row in rows:
-            video_id = row.get("video_id")
-            if video_id and video_id in video_paths:
-                row["source_video_path"] = video_paths[video_id]
-                by_video[video_paths[video_id]].append(row)
+            run_id = row.get("run_id")
+            if run_id and run_id in run_to_path:
+                row["source_video_path"] = run_to_path[run_id]
+                by_video[run_to_path[run_id]].append(row)
 
         if not by_video:
             print("No matching frames found.", file=sys.stderr)
@@ -952,45 +1070,130 @@ def cmd_cache(args):
     cache_db = CacheDB(args.cache or "./.cache.db")
 
     if args.cache_cmd == "list":
-        videos = cache_db.list_videos(limit=args.limit)
-        if not videos:
-            print("(no cached videos)", file=sys.stderr)
+        # Build per-run list with optional video filter
+        video_filter_path = args.video
+
+        # If --video flag is given, find the video_id by path or content hash
+        video_filter_id = None
+        if video_filter_path:
+            # First try exact path match
+            video = cache_db.get_video(video_filter_path)
+            if video:
+                video_filter_id = video["id"]
+            else:
+                # Try content hash match - compute hash of the provided path efficiently
+                try:
+                    provided_hash = _content_hash(video_filter_path)
+                    cur = cache_db.conn.execute(
+                        "SELECT id FROM videos WHERE content_hash = ?",
+                        (provided_hash,)
+                    )
+                    row = cur.fetchone()
+                    if row:
+                        video_filter_id = row[0]
+                except (FileNotFoundError, IOError):
+                    print(f"Warning: cannot read file '{video_filter_path}' to compute hash", file=sys.stderr)
+
+        # If --video was given but could not be resolved to any cached video
+        if video_filter_path and video_filter_id is None:
+            print(f"Error: no cached video matches '{video_filter_path}'", file=sys.stderr)
+            cache_db.close()
+            sys.exit(1)
+
+        # Per-run SQL: list all runs with their details
+        # We need to filter by video_id if --video was provided
+        where_clause = ""
+        params = []
+        if video_filter_id is not None:
+            where_clause = "WHERE ar.video_id = ?"
+            params.append(video_filter_id)
+
+        query = f"""
+            SELECT ar.id as run_id, v.video_path, ar.model, ar.cache_status, ar.created_at,
+                   COUNT(fa.id) as answer_count
+            FROM analysis_runs ar
+            JOIN videos v ON ar.video_id = v.id
+            LEFT JOIN frame_answers fa ON ar.id = fa.run_id
+            {where_clause}
+            GROUP BY ar.id
+            ORDER BY ar.created_at DESC
+        """
+        cur = cache_db.conn.execute(query, params)
+        rows = [dict(r) for r in cur.fetchall()]
+
+        if not rows:
+            print("(no cached runs found)", file=sys.stderr)
             cache_db.close()
             sys.exit(0)
-        rows = []
-        for v in videos:
-            cur = cache_db.conn.execute(
-                "SELECT COUNT(*) FROM frame_answers WHERE video_id = ?", (v["id"],)
-            )
-            answer_count = cur.fetchone()[0]
-            rows.append({
-                "id": v["id"],
-                "video_path": v["video_path"],
-                "answers": answer_count,
-                "cache_status": v["cache_status"],
-                "created_at": v["created_at"],
-            })
+
+        # Format columns for per-run display
+        print(f"SQL Query:\n{_sql_with_params(query, params)}", file=sys.stderr)
         _print_table(rows)
+
         cache_db.close()
         sys.exit(0)
 
     elif args.cache_cmd == "delete":
         if args.video_path:
-            video = cache_db.get_video(args.video_path)
-            if not video:
-                print(f"Video not found: {args.video_path}", file=sys.stderr)
+            # Accept either run_id (integer) or video path (string)
+            str_input = str(args.video_path).strip()
+            if str_input.isdigit():
+                # Input is a run_id - delete the specific run
+                run_id = int(str_input)
+                with cache_db.conn:
+                    cache_db.conn.execute(
+                        "DELETE FROM frame_answers WHERE run_id = ?", (run_id,)
+                    )
+                    cache_db.conn.execute(
+                        "DELETE FROM analysis_runs WHERE id = ?", (run_id,)
+                    )
+                print(f"Deleted run: {run_id}", file=sys.stderr)
+                print(f"SQL Query:\n{_sql_with_params('DELETE FROM frame_answers WHERE run_id = ?', [run_id])}", file=sys.stderr)
+                print(f"SQL Query:\n{_sql_with_params('DELETE FROM analysis_runs WHERE id = ?', [run_id])}", file=sys.stderr)
                 cache_db.close()
-                sys.exit(1)
-            with cache_db.conn:
-                cache_db.conn.execute("DELETE FROM frame_answers WHERE video_id = ?", (video["id"],))
-                cache_db.conn.execute("DELETE FROM videos WHERE id = ?", (video["id"],))
-            print(f"Deleted: {args.video_path}", file=sys.stderr)
-            cache_db.close()
-            sys.exit(0)
+                sys.exit(0)
+            else:
+                # Input is a video path - resolve to video (by path or content hash) and delete all runs for that video
+                video = cache_db.get_video(args.video_path)
+                video_id_to_delete = None
+                if video:
+                    video_id_to_delete = video["id"]
+                else:
+                    # Try content hash match
+                    try:
+                        provided_hash = _content_hash(args.video_path)
+                        cur = cache_db.conn.execute(
+                            "SELECT id FROM videos WHERE content_hash = ?",
+                            (provided_hash,)
+                        )
+                        row = cur.fetchone()
+                        if row:
+                            video_id_to_delete = row[0]
+                    except (FileNotFoundError, IOError):
+                        print(f"Warning: cannot read file '{args.video_path}' to compute hash", file=sys.stderr)
+                if video_id_to_delete is None:
+                    print(f"Video not found: {args.video_path}", file=sys.stderr)
+                    cache_db.close()
+                    sys.exit(1)
+                with cache_db.conn:
+                    # Build the query to show what we are deleting
+                    sql = "DELETE FROM analysis_runs WHERE video_id = ?; DELETE FROM videos WHERE id = ?"
+                    print(f"SQL Query:\n{_sql_with_params(sql, [video_id_to_delete, video_id_to_delete])}", file=sys.stderr)
+                    cache_db.conn.execute(
+                        "DELETE FROM analysis_runs WHERE video_id = ?", (video_id_to_delete,)
+                    )
+                    cache_db.conn.execute(
+                        "DELETE FROM videos WHERE id = ?", (video_id_to_delete,)
+                    )
+                print(f"Deleted: {args.video_path}", file=sys.stderr)
+                cache_db.close()
+                sys.exit(0)
 
     elif args.cache_cmd == "prune":
         cutoff = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=args.days)).isoformat()
-        cur = cache_db.conn.execute("SELECT id, video_path FROM videos WHERE created_at < ?", (cutoff,))
+        cur = cache_db.conn.execute(
+            "SELECT id, video_path FROM videos WHERE created_at < ?", (cutoff,)
+        )
         to_delete = cur.fetchall()
         if not to_delete:
             print(f"No videos older than {args.days} days", file=sys.stderr)
@@ -999,7 +1202,10 @@ def cmd_cache(args):
         deleted = 0
         with cache_db.conn:
             for v in to_delete:
-                cache_db.conn.execute("DELETE FROM frame_answers WHERE video_id = ?", (v["id"],))
+                # Build query to show what we are deleting
+                sql_query = "DELETE FROM analysis_runs WHERE video_id = ?"
+                print(f"SQL Query:\n{_sql_with_params(sql_query, [v['id']])}", file=sys.stderr)
+                cache_db.conn.execute(sql_query, [v['id']])
                 cache_db.conn.execute("DELETE FROM videos WHERE id = ?", (v["id"],))
                 deleted += 1
         print(f"Pruned {deleted} video(s) older than {args.days} days", file=sys.stderr)
@@ -1012,9 +1218,15 @@ def cmd_cache(args):
             cache_db.close()
             sys.exit(1)
         with cache_db.conn:
-            cache_db.conn.execute("DELETE FROM frame_answers")
-            cache_db.conn.execute("DELETE FROM videos")
-            cache_db.conn.execute("DELETE FROM cache_stats")
+            clear_queries = [
+                ("DELETE FROM frame_answers", []),
+                ("DELETE FROM analysis_runs", []),
+                ("DELETE FROM videos", []),
+                ("DELETE FROM cache_stats", []),
+            ]
+            for sql, params in clear_queries:
+                print(f"SQL Query:\n{_sql_with_params(sql, params)}", file=sys.stderr)
+                cache_db.conn.execute(sql, params)
         print("Cache cleared", file=sys.stderr)
         cache_db.close()
         sys.exit(0)
@@ -1048,7 +1260,7 @@ def main():
 
     p_query = sub.add_parser("query", help="Query the cache or extract frames based on SQL")
     p_query.add_argument("--cache", type=str, default=None, help="Path to SQLite cache file (default: ./.cache.db)")
-    p_query.add_argument("sql", type=str, nargs="?", default="SELECT video_id, frame_index, timestamp_seconds, question_name, top_choice, top_probability FROM frame_answers WHERE top_probability > 0.5", help="SQL query to execute")
+    p_query.add_argument("sql", type=str, nargs="?", default="SELECT fa.frame_index, fa.timestamp_seconds, fa.question_name, fa.top_choice, fa.top_probability FROM frame_answers fa JOIN analysis_runs ar ON fa.run_id = ar.id WHERE top_probability > 0.5", help="SQL query to execute")
     p_query.add_argument("--save-frame", type=str, default=None, help="Directory to save extracted frames")
     p_query.set_defaults(func=cmd_query)
 
@@ -1058,12 +1270,15 @@ def main():
     p_search.add_argument("--top", type=int, default=None, help="Limit number of results by top_probability DESC")
     p_search.add_argument("--save-frame", type=str, default=None, help="Directory to save extracted frames")
     p_search.add_argument("--cache", type=str, default=None, help="Path to SQLite cache file (default: ./.cache.db)")
+    p_search.add_argument("--model", type=str, default=None, help="Filter results by Ollama model name (e.g., clef-flash:9b, d1:3b)")
+    p_search.add_argument("--run-id", type=int, default=None, help="Filter results to a specific analysis run ID")
     p_search.set_defaults(func=cmd_search)
 
     p_cache = sub.add_parser("cache", help="Cache management: list, delete, prune")
     p_cache.add_argument("--cache", type=str, default=None, help="Path to SQLite cache file (default: ./.cache.db)")
     p_cache.add_argument("cache_cmd", choices=["list", "delete", "prune", "clear"], help="Cache command")
     p_cache.add_argument("video_path", nargs="?", help="Video path (for delete)")
+    p_cache.add_argument("--video", type=str, default=None, help="Video path to filter list (matches by path or content hash)")
     p_cache.add_argument("--limit", type=int, default=1000, help="Limit for list (default: 1000)")
     p_cache.add_argument("--days", type=int, default=30, help="Days threshold for prune (default: 30)")
     p_cache.add_argument("--yes", action="store_true", help="Confirm clear")

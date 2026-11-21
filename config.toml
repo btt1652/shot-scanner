@@ -16,7 +16,7 @@ ollama_state_template = "sample frame from a video"
 [[classify.questions]]
 name = "activity"
 instructions = "What activity is happening in this frame?"
-criteria = { walking = "Person standing", running = "Person sitting", sitting = "Person laying down" }
+criteria = { standing = "Person standing", sitting = "Person sitting", laying-down = "Person laying down" }
 
 [[classify.questions]]
 name = "time_of_day"

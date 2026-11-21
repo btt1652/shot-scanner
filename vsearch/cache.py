@@ -6,8 +6,9 @@ Replaces JSON file cache with a proper relational database for:
 - Atomic writes (no corruption)
 - Custom SQL queries for advanced users
 - Cache statistics and management
+- Multiple analysis runs per video (via analysis_runs table)
 
-Cache schema version: 2
+Cache schema version: 3
 """
 
 import sqlite3
@@ -26,18 +27,30 @@ CREATE TABLE IF NOT EXISTS videos (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     video_path TEXT NOT NULL UNIQUE,
     content_hash TEXT NOT NULL,
-    params_hash TEXT NOT NULL,
     fps REAL,
     total_frames INTEGER,
     stride INTEGER DEFAULT 1,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
-    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
-    cache_status TEXT NOT NULL DEFAULT 'empty' -- empty, partial, complete
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
+
+CREATE TABLE IF NOT EXISTS analysis_runs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    video_id INTEGER NOT NULL REFERENCES videos(id) ON DELETE CASCADE,
+    content_hash TEXT NOT NULL,
+    params_hash TEXT NOT NULL,
+    model TEXT NOT NULL DEFAULT '',
+    cache_status TEXT NOT NULL DEFAULT 'empty', -- empty, partial, complete
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(video_id, content_hash, params_hash)
+);
+
+CREATE INDEX IF NOT EXISTS idx_analysis_runs_video ON analysis_runs(video_id);
 
 CREATE TABLE IF NOT EXISTS frame_answers (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    video_id INTEGER NOT NULL REFERENCES videos(id) ON DELETE CASCADE,
+    run_id INTEGER NOT NULL REFERENCES analysis_runs(id) ON DELETE CASCADE,
     frame_index INTEGER NOT NULL,
     timestamp_seconds REAL NOT NULL,
     question_name TEXT NOT NULL,
@@ -49,10 +62,10 @@ CREATE TABLE IF NOT EXISTS frame_answers (
     batch_id INTEGER,
     raw_response TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
-    UNIQUE(video_id, frame_index, question_name)
+    UNIQUE(run_id, frame_index, question_name)
 );
 
-CREATE INDEX IF NOT EXISTS idx_frame_answers_video ON frame_answers(video_id);
+CREATE INDEX IF NOT EXISTS idx_frame_answers_run ON frame_answers(run_id);
 CREATE INDEX IF NOT EXISTS idx_frame_answers_choice ON frame_answers(top_choice);
 CREATE INDEX IF NOT EXISTS idx_frame_answers_qname ON frame_answers(question_name);
 CREATE INDEX IF NOT EXISTS idx_frame_answers_qname_choice ON frame_answers(question_name, top_choice);
@@ -64,7 +77,7 @@ CREATE TABLE IF NOT EXISTS cache_stats (
 );
 """
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 # Keys for cache_stats
 STAT_TOTAL_VIDEOS = "total_videos"
@@ -80,7 +93,7 @@ class CacheDB:
         self.cache = Path(cache).resolve()
         self.cache.parent.mkdir(parents=True, exist_ok=True)
         self.db_path = self.cache
-        self._conn: Optional[sqli3.Connection] = None
+        self._conn: Optional[sqlite3.Connection] = None
 
     @property
     def conn(self) -> sqlite3.Connection:
@@ -91,8 +104,25 @@ class CacheDB:
         return self._conn
 
     def _execute_schema(self):
-        """Initialize schema if not exists."""
+        """Initialize schema if not exists, migrate if needed."""
+        # Drop old tables if schema is incompatible (version check)
+        cur = self.conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='frame_answers'")
+        if cur.fetchone():
+            # Check if frame_answers has run_id column (new schema)
+            cols = self.conn.execute("PRAGMA table_info(frame_answers)")
+            col_names = [row[1] for row in cols.fetchall()]
+            if "run_id" not in col_names:
+                # Old schema - drop and recreate
+                self.conn.executescript("""
+                    DROP TABLE IF EXISTS frame_answers;
+                    DROP TABLE IF EXISTS videos;
+                """)
         self.conn.executescript(SCHEMA_SQL)
+        # Ensure analysis_runs has model column (migration for existing DBs)
+        ar_cols = self.conn.execute("PRAGMA table_info(analysis_runs)")
+        ar_col_names = [row[1] for row in ar_cols.fetchall()]
+        if "model" not in ar_col_names:
+            self.conn.execute("ALTER TABLE analysis_runs ADD COLUMN model TEXT NOT NULL DEFAULT ''")
 
     def set_stat(self, key: str, value: str):
         """Set a cache statistics entry."""
@@ -116,7 +146,6 @@ class CacheDB:
         self,
         video_path: str,
         content_hash: str,
-        params_hash: str,
         fps: Optional[float] = None,
         total_frames: Optional[int] = None,
         stride: int = 1,
@@ -124,16 +153,15 @@ class CacheDB:
         """Insert or update video metadata. Returns video_id."""
         with self.conn:
             self.conn.execute(
-                """INSERT INTO videos (video_path, content_hash, params_hash, fps, total_frames, stride, updated_at)
-                   VALUES (?, ?, ?, ?, ?, ?, datetime('now'))
+                """INSERT INTO videos (video_path, content_hash, fps, total_frames, stride, updated_at)
+                   VALUES (?, ?, ?, ?, ?, datetime('now'))
                    ON CONFLICT(video_path) DO UPDATE SET
                        content_hash=excluded.content_hash,
-                       params_hash=excluded.params_hash,
                        fps=excluded.fps,
                        total_frames=excluded.total_frames,
                        stride=excluded.stride,
                        updated_at=datetime('now')""",
-                (video_path, content_hash, params_hash, fps, total_frames, stride),
+                (video_path, content_hash, fps, total_frames, stride),
             )
         # Return the video_id
         cur = self.conn.execute(
@@ -150,21 +178,96 @@ class CacheDB:
         return dict(row) if row else None
 
     def list_videos(self, limit: int = 1000) -> List[Dict]:
-        """List all cached videos."""
+        """List all cached videos with run info."""
         cur = self.conn.execute(
-            "SELECT id, video_path, content_hash, created_at, cache_status FROM videos ORDER BY created_at DESC LIMIT ?",
+            """SELECT v.id, v.video_path, v.content_hash, v.created_at, v.updated_at,
+                      COUNT(DISTINCT ar.id) AS run_count,
+                      SUM(CASE WHEN ar.cache_status = 'complete' THEN 1 ELSE 0 END) AS complete_runs
+               FROM videos v
+               LEFT JOIN analysis_runs ar ON v.id = ar.video_id
+               GROUP BY v.id
+               ORDER BY v.updated_at DESC
+               LIMIT ?""",
             (limit,),
         )
+        rows = [dict(r) for r in cur.fetchall()]
+        # Add latest run cache_status
+        for r in rows:
+            cur2 = self.conn.execute(
+                "SELECT cache_status FROM analysis_runs WHERE video_id = ? ORDER BY created_at DESC LIMIT 1",
+                (r["id"],)
+            )
+            rr = cur2.fetchone()
+            r["cache_status"] = rr["cache_status"] if rr else "empty"
+        return rows
+
+    def list_runs(self, video_path: str) -> List[Dict]:
+        """List all analysis runs for a specific video."""
+        video = self.get_video(video_path)
+        if not video:
+            return []
+        cur = self.conn.execute(
+            """SELECT ar.id, ar.content_hash, ar.params_hash, ar.model, ar.cache_status,
+                      ar.created_at, ar.updated_at,
+                      COUNT(fa.id) AS answer_count
+               FROM analysis_runs ar
+               LEFT JOIN frame_answers fa ON ar.id = fa.run_id
+               WHERE ar.video_id = ?
+               GROUP BY ar.id
+               ORDER BY ar.created_at DESC""",
+            (video["id"],),
+        )
         return [dict(r) for r in cur.fetchall()]
+
+    def upsert_run(
+        self,
+        video_id: int,
+        content_hash: str,
+        params_hash: str,
+        model: str = '',
+    ) -> int:
+        """Insert or update an analysis run. Returns run_id."""
+        with self.conn:
+            self.conn.execute(
+                """INSERT INTO analysis_runs (video_id, content_hash, params_hash, model, updated_at)
+                   VALUES (?, ?, ?, ?, datetime('now'))
+                   ON CONFLICT(video_id, content_hash, params_hash) DO UPDATE SET
+                       cache_status=excluded.cache_status,
+                       model=excluded.model,
+                       updated_at=datetime('now')""",
+                (video_id, content_hash, params_hash, model),
+            )
+        cur = self.conn.execute(
+            "SELECT id FROM analysis_runs WHERE video_id = ? AND content_hash = ? AND params_hash = ?",
+            (video_id, content_hash, params_hash),
+        )
+        return cur.fetchone()["id"]
+
+    def get_run(self, video_id: int, content_hash: str, params_hash: str) -> Optional[Dict]:
+        """Get analysis run by video and hash combination."""
+        cur = self.conn.execute(
+            "SELECT * FROM analysis_runs WHERE video_id = ? AND content_hash = ? AND params_hash = ?",
+            (video_id, content_hash, params_hash),
+        )
+        row = cur.fetchone()
+        return dict(row) if row else None
+
+    def update_run_status(self, run_id: int, status: str):
+        """Update analysis run cache_status."""
+        with self.conn:
+            self.conn.execute(
+                "UPDATE analysis_runs SET cache_status = ?, updated_at = datetime('now') WHERE id = ?",
+                (status, run_id),
+            )
 
     # --- Frame answer operations ---
 
     def upsert_frame_answers(
         self,
-        video_id: int,
+        run_id: int,
         answers: List[Dict],
     ) -> int:
-        """Insert or update per-question answers for a video.
+        """Insert or update per-question answers for an analysis run.
 
         Each item in answers should contain:
           frame_index, timestamp_seconds, question_name, top_choice,
@@ -177,11 +280,11 @@ class CacheDB:
             for a in answers:
                 self.conn.execute(
                     """INSERT INTO frame_answers (
-                           video_id, frame_index, timestamp_seconds, question_name,
+                           run_id, frame_index, timestamp_seconds, question_name,
                            question_instructions, criteria_json, top_choice, top_probability,
                            probabilities_json, batch_id, raw_response)
                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                       ON CONFLICT(video_id, frame_index, question_name) DO UPDATE SET
+                       ON CONFLICT(run_id, frame_index, question_name) DO UPDATE SET
                            timestamp_seconds=excluded.timestamp_seconds,
                            question_instructions=excluded.question_instructions,
                            criteria_json=excluded.criteria_json,
@@ -192,7 +295,7 @@ class CacheDB:
                            raw_response=excluded.raw_response,
                            created_at=datetime('now')""",
                     (
-                        video_id,
+                        run_id,
                         a.get("frame_index"),
                         a.get("timestamp_seconds"),
                         a.get("question_name"),
@@ -206,13 +309,13 @@ class CacheDB:
                     ),
                 )
         cur = self.conn.execute(
-            "SELECT COUNT(*) FROM frame_answers WHERE video_id = ?", (video_id,)
+            "SELECT COUNT(*) FROM frame_answers WHERE run_id = ?", (run_id,)
         )
         return cur.fetchone()[0]
 
     def get_answers(
         self,
-        video_id: int,
+        run_id: int,
         question_name: Optional[str] = None,
         top_choice: Optional[str] = None,
         min_probability: Optional[float] = None,
@@ -220,10 +323,13 @@ class CacheDB:
     ) -> List[Dict]:
         """Get frame answers with optional filters."""
         query = (
-            "SELECT fa.*, v.video_path AS source_video_path FROM frame_answers fa "
-            "JOIN videos v ON fa.video_id = v.id WHERE fa.video_id = ?"
+            "SELECT fa.*, v.video_path AS source_video_path "
+            "FROM frame_answers fa "
+            "JOIN analysis_runs ar ON fa.run_id = ar.id "
+            "JOIN videos v ON ar.video_id = v.id "
+            "WHERE fa.run_id = ?"
         )
-        params: List[Any] = [video_id]
+        params: List[Any] = [run_id]
 
         if question_name is not None:
             query += " AND fa.question_name = ?"
@@ -245,17 +351,39 @@ class CacheDB:
 
     def get_answer(
         self,
-        video_id: int,
+        run_id: int,
         frame_index: int,
         question_name: str,
     ) -> Optional[Dict]:
-        """Get a single answer by video, frame and question name."""
+        """Get a single answer by run, frame and question name."""
         cur = self.conn.execute(
-            "SELECT * FROM frame_answers WHERE video_id = ? AND frame_index = ? AND question_name = ?",
-            (video_id, frame_index, question_name),
+            "SELECT * FROM frame_answers WHERE run_id = ? AND frame_index = ? AND question_name = ?",
+            (run_id, frame_index, question_name),
         )
         row = cur.fetchone()
         return dict(row) if row else None
+
+    def get_all_answers_for_video(
+        self,
+        video_id: int,
+        run_id: Optional[int] = None,
+    ) -> List[Dict]:
+        """Get all frame answers for a video, optionally filtered by run."""
+        query = (
+            "SELECT fa.*, v.video_path AS source_video_path, ar.id as run_id, ar.params_hash "
+            "FROM frame_answers fa "
+            "JOIN analysis_runs ar ON fa.run_id = ar.id "
+            "JOIN videos v ON ar.video_id = v.id "
+            "WHERE ar.video_id = ?"
+        )
+        params: List[Any] = [video_id]
+        if run_id is not None:
+            query += " AND ar.id = ?"
+            params.append(run_id)
+
+        query += " ORDER BY fa.timestamp_seconds ASC"
+        cur = self.conn.execute(query, params)
+        return [dict(r) for r in cur.fetchall()]
 
     # --- Cache lookup ---
 
@@ -273,16 +401,13 @@ class CacheDB:
         if video is None:
             return None
 
-        # Check params match (content_hash + params_hash)
-        # ... simplified: we just check video exists and return what we have
-        # In a full impl, we'd compare params_hash against current params
-
-        # Return all frame answers for this video
-        answers = self.get_answers(video_id=video["id"])
+        # For backwards compatibility, find the run matching current params
+        # (caller should pass the params_hash to look up specifically)
+        answers = self.get_all_answers_for_video(video["id"])
         if not answers:
             return None, None
 
-        results = answers  # all answers stored in frame_answers
+        results = answers
         return results, {"video_id": video["id"], "video_path": video_path}
 
     # --- Custom SQL support ---
@@ -311,11 +436,13 @@ class CacheDB:
         """Delete cache entries older than max_age_days."""
         cutoff = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=max_age_days)).isoformat()
         with self.conn:
-            # Delete old frames first (CASCADE handles frames when video deleted)
+            # Delete old runs first (CASCADE handles frames when run deleted)
+            self.conn.execute(
+                "DELETE FROM analysis_runs WHERE updated_at < ?", (cutoff,)
+            )
             self.conn.execute(
                 "DELETE FROM cache_stats WHERE updated_at < ?", (cutoff,)
             )
-            # Could add more pruning logic here
 
     def close(self):
         """Close the database connection."""
