@@ -1064,9 +1064,9 @@ def cmd_search(args):
         from collections import defaultdict
 
         cfg = load_config()
-        threshold = args.stitch_merge_timestamp_threshold
+        threshold = args.stitch_merge_threshold
         if threshold is None:
-            default_threshold = float(get_config_value(cfg, "classify", "stitch_merge_timestamp_threshold", 1.0))
+            default_threshold = float(get_config_value(cfg, "classify", "stitch_merge_threshold", 1.0))
             threshold = default_threshold or 1.0
 
         # Build mapping run_id -> video_path and add source_video_path to each row
@@ -1387,7 +1387,7 @@ def main():
     p_search.add_argument("--model", type=str, default=None, help="Filter results by Ollama model name (e.g., clef-flash:9b, d1:3b)")
     p_search.add_argument("--run-id", type=int, default=None, help="Filter results to a specific analysis run ID")
     p_search.add_argument("--stitch", nargs="?", const=True, default=None, metavar="PATH", help="Stitch matched frames into a single video using ffmpeg. Optional: provide output path (auto-generates if omitted).")
-    p_search.add_argument("--stitch-merge-timestamp-threshold", type=float, default=None, help="Timestamp difference threshold (seconds) to merge adjacent frames (default: 1)")
+    p_search.add_argument("--stitch-merge-threshold", type=float, default=None, help="Timestamp difference threshold (seconds) to merge adjacent frames (default: 1)")
     p_search.set_defaults(func=cmd_search)
 
     p_cache = sub.add_parser("cache", help="Cache management: list, delete, prune")
@@ -1417,8 +1417,8 @@ def main():
     # Extract stitch args
     if hasattr(args, "stitch"):
         args.stitch = args.stitch
-    if hasattr(args, "stitch_merge_timestamp_threshold"):
-        args.stitch_merge_timestamp_threshold = args.stitch_merge_timestamp_threshold
+    if hasattr(args, "stitch_merge_threshold"):
+        args.stitch_merge_threshold = args.stitch_merge_threshold
 
     def _global_sigint_handler(signum, frame):
         print("\nInterrupted — saving partial progress before exit...", file=sys.stderr)

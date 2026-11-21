@@ -8,7 +8,7 @@ A lightweight CLI that analyzes video frames using an Ollama decision model as t
 |---------|-------------|
 | `scs analyze <video>` | Analyze video frames using Ollama choice-question model |
 | `scs query "<sql>" [--cache CACHE] [--save-frame DIR]` | Query the cache or extract matching frames |
-| `scs search <video> [--q "question=choice:prob"]* [--top N] [--model MODEL] [--run-id RUN_ID] [--save-frame DIR] [--stitch] [--stitch-merge-timestamp-threshold SEC]` | Human-friendly search without SQL |
+| `scs search <video> [--q "question=choice:prob"]* [--top N] [--model MODEL] [--run-id RUN_ID] [--save-frame DIR] [--stitch] [--stitch-merge-threshold SEC]` | Human-friendly search without SQL |
 | `scs cache <cmd>` | Cache management: list, delete, prune, clear |
 
 ### Query Subcommand (`scs query`)
@@ -185,7 +185,7 @@ scs search video.mp4 \
   --q "activity=sitting:0.95" \
   --top 3 \
   --stitch \
-  --stitch-merge-timestamp-threshold 2.0  # merge frames within 2 seconds
+  --stitch-merge-threshold 2.0  # merge frames within 2 seconds
 
 # Stitch to custom output path
 scs search video.mp4 \
