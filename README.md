@@ -9,7 +9,7 @@ A lightweight CLI that analyzes video frames using an Ollama decision model as t
 | `scs analyze <video>` | Analyze video frames using Ollama choice-question model |
 | `scs query "<sql>" [--cache CACHE] [--save-frame DIR]` | Query the cache or extract matching frames |
 | `scs search <video> [--q "question=choice:prob"]* [--top N] [--top-per-video N] [--merge-result-threshold SEC] [--model MODEL] [--run-id RUN_ID] [--save-frame DIR] [--stitch]` | Human-friendly search without SQL |
-| `scs cache <cmd>` | Cache management: list, delete, prune, clear |
+| `scs cache <cmd>` | Cache management: list, delete, prune, clear, clean |
 
 ### Query Subcommand (`scs query`)
 
@@ -173,6 +173,11 @@ scs cache delete 7  # Delete specific run_id (integer)
 scs cache prune --days 30
 
 # Clear entire cache (requires --yes confirmation)
+scs cache clear --yes
+
+# Remove cache entries for missing or changed videos
+scs cache clean
+```
 
 ## Stitching Extracted Frames
 

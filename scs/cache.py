@@ -431,12 +431,28 @@ class CacheDB:
             self.conn.execute(
                 "DELETE FROM cache_stats WHERE updated_at < ?", (cutoff,)
             )
+            
+    def get_invalid_videos(self) -> List[Tuple[str, str]]:
+        """Get list of (video_path, reason) for invalid entries."""
+        videos = self.conn.execute("SELECT video_path, content_hash FROM videos").fetchall()
+        invalid = []
+        for v in videos:
+            path = v["video_path"]
+            hash_val = v["content_hash"]
+            if not os.path.exists(path):
+                invalid.append((path, "File does not exist"))
+            else:
+                current_hash = _content_hash(path)
+                if current_hash != hash_val:
+                    invalid.append((path, f"Hash mismatch (expected {hash_val}, got {current_hash})"))
+        return invalid
 
     def close(self):
         """Close the database connection."""
         if self._conn:
             self._conn.close()
             self._conn = None
+
 
 
 def _content_hash(video_path: str, chunk_mb: int = 8) -> str:

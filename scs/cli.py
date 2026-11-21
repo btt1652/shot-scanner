@@ -1469,6 +1469,28 @@ def cmd_cache(args):
                 print(f"{_sql_with_params(sql, params)}", file=sys.stderr)
                 cache_db.conn.execute(sql, params)
         print("Cache cleared", file=sys.stderr)
+
+    elif args.cache_cmd == "clean":
+        invalid_videos = cache_db.get_invalid_videos()
+        if not invalid_videos:
+            print("No invalid cache entries found.", file=sys.stderr)
+            cache_db.close()
+            sys.exit(0)
+
+        print("The following video paths in the cache are invalid (don't exist or have changed content):", file=sys.stderr)
+        for path, reason in invalid_videos:
+            print(f"  {path} ({reason})", file=sys.stderr)
+
+        ans = input("Do you want to delete all cache entries for these invalid videos? (y/n): ").strip().lower()
+        if ans in ("y", "yes"):
+            deleted_count = 0
+            for path, reason in invalid_videos:
+                cache_db.delete_video_records(path)
+                deleted_count += 1
+            print(f"Deleted cache for {deleted_count} invalid video(s).", file=sys.stderr)
+        else:
+            print("Cleanup aborted.", file=sys.stderr)
+        
         cache_db.close()
         sys.exit(0)
 
@@ -1521,9 +1543,9 @@ def main():
     p_search.add_argument("--stitch", nargs="?", const=True, default=None, metavar="PATH", help="Stitch matched frames into a single video using ffmpeg. Uses --merge-result-threshold (default 1 sec) to group consecutive frames with the same score into ranges. Optional: provide output path (auto-generates if omitted).")
     p_search.set_defaults(func=cmd_search)
 
-    p_cache = sub.add_parser("cache", help="Cache management: list, delete, prune")
+    p_cache = sub.add_parser("cache", help="Cache management: list, delete, prune, clean")
     p_cache.add_argument("--cache", type=str, default=None, help="Path to SQLite cache file (default: ./.cache.db)")
-    p_cache.add_argument("cache_cmd", choices=["list", "delete", "prune", "clear"], help="Cache command")
+    p_cache.add_argument("cache_cmd", choices=["list", "delete", "prune", "clear", "clean"], help="Cache command")
     p_cache.add_argument("video_path", nargs="?", help="Video path (for delete)")
     p_cache.add_argument("--video", type=str, default=None, help="Video path to filter list (matches by path or content hash)")
     p_cache.add_argument("--limit", type=int, default=1000, help="Limit for list (default: 1000)")
