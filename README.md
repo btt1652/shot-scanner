@@ -8,7 +8,7 @@ A lightweight CLI that analyzes video frames using an Ollama decision model as t
 |---------|-------------|
 | `scs analyze <video>` | Analyze video frames using Ollama choice-question model |
 | `scs query "<sql>" [--cache CACHE] [--save-frame DIR]` | Query the cache or extract matching frames |
-| `scs search <video> [--q "question=choice:prob"]* [--top N] [--model MODEL] [--run-id RUN_ID] [--save-frame DIR] [--stitch] [--stitch-merge-threshold SEC]` | Human-friendly search without SQL |
+| `scs search <video> [--q "question=choice:prob"]* [--top N] [--top-per-video N] [--merge-result-threshold SEC] [--model MODEL] [--run-id RUN_ID] [--save-frame DIR] [--stitch]` | Human-friendly search without SQL |
 | `scs cache <cmd>` | Cache management: list, delete, prune, clear |
 
 ### Query Subcommand (`scs query`)
@@ -90,13 +90,14 @@ scs search video.mp4 \
 ### Parameters
 - `<video>`: Video path (or glob/directory pattern)
 - `--q "question=choice:prob"`: Filter condition (repeatable, AND logic)
-- `--top N`: Limit to top N frames by probability (default: all)
+- `--top N`: Limit to top N frames (or ranges with `--merge-result-threshold`) by highest probability, then results are re‑ordered chronologically.
+- `--top-per-video N`: Limit number of top results per video by highest probability, then results are re‑ordered chronologically per video. When both `--top` and `--top-per-video` are supplied, `--top-per-video` takes precedence.
+- `--merge-result-threshold SEC`: Merge consecutive frames with the same score within `SEC` seconds into a single range. When used with `--top` or `--top-per-video`, the limit counts ranges (not individual frames).
 - `--save-frame DIR`: Save extracted frames to directory (JPG only)
 - `--model MODEL`: Filter results by Ollama model name (e.g., clef-flash:9b, d1:3b)
 - `--run-id RUN_ID`: Filter results to a specific analysis run ID
 - `--cache CACHE`: Path to SQLite cache file (default: ./.cache.db)
-- `--stitch [PATH]`: Stitch matched frames into a single video using ffmpeg. Optional: provide output path (auto-generates `{video_name}_stitched.mp4` if omitted).
-- `--stitch-merge-threshold SEC`: Timestamp gap threshold (seconds) to merge adjacent frames (default: 1)
+- `--stitch [PATH]`: Stitch matched frames into a single video using ffmpeg. Uses `--merge-result-threshold` (default 1 sec) to group consecutive frames with the same score into ranges before stitching.
 
 ### Frame Extraction via Search
 ```bash
@@ -108,7 +109,7 @@ scs search video.mp4 \
   --save-frame ./walking_frames
 ```
 
-This will extract frames meeting all criteria, sorted by probability, capped at top N.
+This will extract frames meeting all criteria and return them **sorted by timestamp (ascending) by default**. If you also use `--top` or `--top-per-video`, the rows are first selected by highest probability and then re‑ordered chronologically.
 
 ## Cache Table Schema (Visual)
 
@@ -184,8 +185,7 @@ The `--stitch` flag uses ffmpeg to merge adjacent frames into a single video fil
 scs search video.mp4 \
   --q "activity=sitting:0.95" \
   --top 3 \
-  --stitch \
-  --stitch-merge-threshold 2.0  # merge frames within 2 seconds
+  --stitch
 
 # Stitch to custom output path
 scs search video.mp4 \

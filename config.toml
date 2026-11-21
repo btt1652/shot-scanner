@@ -11,7 +11,6 @@ ollama_timeout = 60
 cache = "./.cache.db"
 still_frame_threshold = 0.95
 same_scene_threshold = 0.80
-stitch_merge_threshold = 1
 ollama_state_template = "sample frame from a video"
 
 [[classify.questions]]

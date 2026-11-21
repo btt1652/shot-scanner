@@ -876,7 +876,7 @@ def cmd_search(args):
     """Search cached frame answers by question name, choice, and probability.
 
     Usage:
-        scs search <video> [--q "question=choice:prob"]* [--top N] [--model MODEL --save-frame DIR]
+        scs search <video> [--q "question=choice:prob"]* [--top N] [--top-per-video N] [--merge-result-threshold SEC] [--model MODEL --save-frame DIR] [--stitch [PATH]]
 
     Each --q adds a filter: 'question_name=choice:min_probability'. All must match for a row to qualify.
     Example:
@@ -977,18 +977,130 @@ def cmd_search(args):
         where_clauses.append("fa.run_id = ?")
         params.append(args.run_id)
 
-    limit_expr = f"LIMIT {top_n}" if top_n is not None else ""
+    top_per_video = getattr(args, "top_per_video", None)
+    merge_threshold = getattr(args, "merge_result_threshold", None)
 
-    query_sql = f"""
-        SELECT DISTINCT {select_cols}
-        FROM {from_clause}
-        WHERE {' AND '.join(where_clauses)}
-        ORDER BY fa.top_probability DESC
-        {limit_expr}
-    """
-    print(f"{_sql_with_params(query_sql, params)}", file=sys.stderr)
+    # --top-per-video overrides --top when both are supplied
+    if top_per_video is not None and top_n is not None:
+        top_n = None
 
-    rows = cache_db.execute_sql(query_sql, params)
+    use_merge = merge_threshold is not None
+
+    def _merge_frame_rows_into_ranges(rows, threshold):
+        """Merge consecutive rows with same score into ranges."""
+        from collections import defaultdict
+        groups = defaultdict(list)
+        for r in rows:
+            key = (r.get("run_id"), r.get("question_name"))
+            groups[key].append(r)
+
+        ranges = []
+        for (run_id, q_name), grp in groups.items():
+            grp_sorted = sorted(
+                grp,
+                key=lambda r: (r.get("timestamp_seconds") or 0, r.get("frame_index") or 0),
+            )
+            current = None
+            for r in grp_sorted:
+                prob = r.get("top_probability")
+                ts = r.get("timestamp_seconds") or 0
+                fid = r.get("frame_index") or 0
+                if (
+                    current is not None
+                    and prob == current.get("top_probability")
+                    and (ts - current.get("end_timestamp")) <= threshold
+                ):
+                    current["end_timestamp"] = ts
+                    current["frame_indices"].append(fid)
+                else:
+                    if current is not None:
+                        ranges.append(current)
+                    current = {
+                        "run_id": run_id,
+                        "question_name": q_name,
+                        "top_choice": r.get("top_choice"),
+                        "top_probability": prob,
+                        "start_timestamp": ts,
+                        "end_timestamp": ts,
+                        "frame_indices": [fid],
+                    }
+            if current is not None:
+                ranges.append(current)
+
+        ranges.sort(key=lambda x: (x.get("top_probability") or 0), reverse=True)
+        return ranges
+
+    if use_merge:
+        # Fetch all matching rows; limits are applied to merged ranges in Python.
+        query_sql = f"""
+            SELECT DISTINCT {select_cols}
+            FROM {from_clause}
+            WHERE {' AND '.join(where_clauses)}
+            ORDER BY fa.top_probability DESC
+        """
+        print(f"{_sql_with_params(query_sql, params)}", file=sys.stderr)
+        rows = cache_db.execute_sql(query_sql, params)
+
+        results = _merge_frame_rows_into_ranges(rows, merge_threshold)
+
+        if top_n is not None:
+            results = sorted(results, key=lambda r: (r.get("top_probability") or 0), reverse=True)[:top_n]
+
+        if top_per_video is not None:
+            from collections import defaultdict
+            by_run = defaultdict(list)
+            for r in results:
+                by_run[r.get("run_id")].append(r)
+            results = []
+            for rid, group in by_run.items():
+                group_sorted = sorted(group, key=lambda r: (r.get("top_probability") or 0), reverse=True)
+                results.extend(group_sorted[:top_per_video])
+
+        rows = results
+    else:
+        if top_per_video is not None:
+            # Use a window function to limit the top N frames per video.
+            query_sql = f"""
+                WITH ranked AS (
+                    SELECT
+                        fa.run_id,
+                        fa.frame_index,
+                        fa.timestamp_seconds,
+                        fa.question_name,
+                        fa.top_choice,
+                        fa.top_probability,
+                        v.id AS video_id,
+                        ROW_NUMBER() OVER (PARTITION BY v.id ORDER BY fa.top_probability DESC) AS rn
+                    FROM {from_clause}
+                    WHERE {' AND '.join(where_clauses)}
+                )
+                SELECT run_id, frame_index, timestamp_seconds, question_name, top_choice, top_probability
+                FROM ranked
+                WHERE rn <= ?
+                ORDER BY top_probability DESC
+            """
+            params.append(top_per_video)
+            print(f"{_sql_with_params(query_sql, params)}", file=sys.stderr)
+            rows = cache_db.execute_sql(query_sql, params)
+        else:
+            limit_expr = f"LIMIT {top_n}" if top_n is not None else ""
+
+            query_sql = f"""
+                SELECT DISTINCT {select_cols}
+                FROM {from_clause}
+                WHERE {' AND '.join(where_clauses)}
+                ORDER BY fa.top_probability DESC
+                {limit_expr}
+            """
+            print(f"{_sql_with_params(query_sql, params)}", file=sys.stderr)
+            rows = cache_db.execute_sql(query_sql, params)
+
+    # Sort final search results by timestamp ascending by default.
+    def _result_timestamp(r):
+        ts = r.get("start_timestamp") if r.get("start_timestamp") is not None else r.get("timestamp_seconds")
+        return ts if ts is not None else 0
+
+    rows = sorted(rows, key=lambda r: ( _result_timestamp(r), r.get("run_id") or 0 ))
 
     save_frame_dir = args.save_frame
     if save_frame_dir:
@@ -1029,10 +1141,15 @@ def cmd_search(args):
                 print(f"Warning: cannot open video: {video_path}", file=sys.stderr)
                 continue
 
-            frames_sorted = sorted(frames, key=lambda r: r.get("frame_index", 0))
+            def _frame_key(r):
+                return r.get("frame_index") or (r.get("frame_indices") or [0])[0]
+
+            frames_sorted = sorted(frames, key=_frame_key)
 
             for frame_info in frames_sorted:
-                fi = frame_info.get("frame_index", 0)
+                fi = frame_info.get("frame_index") or (frame_info.get("frame_indices") or [None])[0]
+                if fi is None:
+                    continue
                 cap.set(cv2.CAP_PROP_POS_FRAMES, fi)
                 ret, frame = cap.read()
                 if not ret:
@@ -1042,7 +1159,7 @@ def cmd_search(args):
                 video_name = os.path.splitext(os.path.basename(video_path))[0]
                 q_name = frame_info.get("question_name", "frame")
                 choice = frame_info.get("top_choice", "unknown")
-                ts = frame_info.get("timestamp_seconds", 0)
+                ts = frame_info.get("timestamp_seconds") or frame_info.get("start_timestamp") or 0
                 fname = f"{video_name}_f{fi:06d}_{ts:.1f}s_{q_name}_{choice}.jpg"
                 out_path = os.path.join(save_frame_dir, fname)
 
@@ -1064,10 +1181,10 @@ def cmd_search(args):
         from collections import defaultdict
 
         cfg = load_config()
-        threshold = args.stitch_merge_threshold
+        # --stitch now uses --merge-result-threshold (default 1.0 seconds)
+        threshold = getattr(args, "merge_result_threshold", None)
         if threshold is None:
-            default_threshold = float(get_config_value(cfg, "classify", "stitch_merge_threshold", 1.0))
-            threshold = default_threshold or 1.0
+            threshold = 1.0
 
         # Build mapping run_id -> video_path and add source_video_path to each row
         run_to_path = {}
@@ -1078,36 +1195,42 @@ def cmd_search(args):
             if run_id and run_id in run_to_path and "source_video_path" not in row:
                 row["source_video_path"] = run_to_path[run_id]
 
-        # Group rows by source video and sort by timestamp_seconds
+        # Group rows by source video and sort by timestamp (handle ranges)
         by_video = defaultdict(list)
         for row in rows:
             run_id = row.get("run_id")
             vid = row.get("source_video_path")
             if run_id and vid:
                 by_video[vid].append(row)
-        for v in by_video:
-            by_video[v].sort(key=lambda r: r.get("timestamp_seconds", 0))
+
+        # Sort rows: use timestamp_seconds if available, otherwise start_timestamp
+        for vid in by_video:
+            by_video[vid].sort(key=lambda r: r.get("timestamp_seconds") or r.get("start_timestamp") or 0)
 
         if not by_video:
             print("No matching frames to stitch.", file=sys.stderr)
             cache_db.close()
             sys.exit(0)
 
-        # Merge adjacent frames within threshold (timestamp gap <= threshold)
+        # Build sections from rows (handle ranges)
         all_sections_by_video = {}
         for vid, frames in by_video.items():
-            sections = []
-            cur = [frames[0]]
-            for i in range(1, len(frames)):
-                prev_ts = frames[i-1]["timestamp_seconds"]
-                curr_ts = frames[i]["timestamp_seconds"]
-                if curr_ts - prev_ts <= threshold:
-                    cur.append(frames[i])
-                else:
-                    sections.append(cur)
-                    cur = [frames[i]]
-            sections.append(cur)
-            all_sections_by_video[vid] = sections
+            # If frames are ranges (have frame_indices), each range is a section
+            if frames and "frame_indices" in frames[0]:
+                all_sections_by_video[vid] = [[r] for r in frames]
+            else:
+                sections = []
+                cur = [frames[0]]
+                for i in range(1, len(frames)):
+                    prev_ts = frames[i - 1]["timestamp_seconds"]
+                    curr_ts = frames[i]["timestamp_seconds"]
+                    if curr_ts - prev_ts <= threshold:
+                        cur.append(frames[i])
+                    else:
+                        sections.append(cur)
+                        cur = [frames[i]]
+                sections.append(cur)
+                all_sections_by_video[vid] = sections
 
         # Determine output paths
         if args.stitch and isinstance(args.stitch, str):
@@ -1131,7 +1254,11 @@ def cmd_search(args):
                 for sec_idx, section in enumerate(sections):
                     img_paths = []
                     for f_idx, row in enumerate(section):
-                        fi = int(row.get("frame_index", 0))
+                        if "frame_indices" in row:
+                            fi = int(row.get("frame_indices")[0])
+                        else:
+                            fi = int(row.get("frame_index", 0))
+
                         cap.set(cv2.CAP_PROP_POS_FRAMES, fi)
                         ret, frame = cap.read()
                         if ret:
@@ -1381,13 +1508,17 @@ def main():
     p_search = sub.add_parser("search", help="Search cached frame answers by question")
     p_search.add_argument("video", type=str, nargs="+", help="One or more video files/directories (e.g., video.mp4 video2/*.mp4)")
     p_search.add_argument("--q", dest="q_values", action="append", default=[], help="Filter condition: 'question=choice:prob' (e.g., activity=yes:0.8). Multiple --q require ALL to match.")
-    p_search.add_argument("--top", type=int, default=None, help="Limit number of results by top_probability DESC")
+    p_search.add_argument("--top", type=int, default=None, help="Limit to top N frames (or ranges) by probability; results are sorted by timestamp ascending.")
+    p_search.add_argument(
+        "--top-per-video", type=int, default=None,
+        help="Limit number of top results per video by probability; results are sorted by timestamp ascending per video (overrides --top if both given)",
+    )
+    p_search.add_argument("--merge-result-threshold", type=float, default=None, help="Timestamp difference threshold (seconds) to merge adjacent frames with the same score into a single range.")
     p_search.add_argument("--save-frame", type=str, default=None, help="Directory to save extracted frames")
     p_search.add_argument("--cache", type=str, default=None, help="Path to SQLite cache file (default: ./.cache.db)")
     p_search.add_argument("--model", type=str, default=None, help="Filter results by Ollama model name (e.g., clef-flash:9b, d1:3b)")
     p_search.add_argument("--run-id", type=int, default=None, help="Filter results to a specific analysis run ID")
-    p_search.add_argument("--stitch", nargs="?", const=True, default=None, metavar="PATH", help="Stitch matched frames into a single video using ffmpeg. Optional: provide output path (auto-generates if omitted).")
-    p_search.add_argument("--stitch-merge-threshold", type=float, default=None, help="Timestamp difference threshold (seconds) to merge adjacent frames (default: 1)")
+    p_search.add_argument("--stitch", nargs="?", const=True, default=None, metavar="PATH", help="Stitch matched frames into a single video using ffmpeg. Uses --merge-result-threshold (default 1 sec) to group consecutive frames with the same score into ranges. Optional: provide output path (auto-generates if omitted).")
     p_search.set_defaults(func=cmd_search)
 
     p_cache = sub.add_parser("cache", help="Cache management: list, delete, prune")
@@ -1417,8 +1548,6 @@ def main():
     # Extract stitch args
     if hasattr(args, "stitch"):
         args.stitch = args.stitch
-    if hasattr(args, "stitch_merge_threshold"):
-        args.stitch_merge_threshold = args.stitch_merge_threshold
 
     def _global_sigint_handler(signum, frame):
         print("\nInterrupted — saving partial progress before exit...", file=sys.stderr)
