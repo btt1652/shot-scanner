@@ -1058,6 +1058,123 @@ def cmd_search(args):
         cache_db.close()
         sys.exit(0)
 
+    if getattr(args, "stitch", False):
+        # Stitch feature: use ffmpeg to merge matched frames into a single video
+        import subprocess
+        import os
+        import shutil
+        import tempfile
+        from collections import defaultdict
+
+        cfg = load_config()
+        threshold = args.stitch_merge_timestamp_threshold
+        if threshold is None:
+            default_threshold = float(get_config_value(cfg, "classify", "stitch_merge_timestamp_threshold", 1.0))
+            threshold = default_threshold or 1.0
+
+        # Build mapping run_id -> video_path and add source_video_path to each row
+        run_to_path = {}
+        for r in cache_db.execute_sql("SELECT ar.id AS run_id, v.video_path FROM analysis_runs ar JOIN videos v ON ar.video_id = v.id"):
+            run_to_path[r["run_id"]] = r["video_path"]
+        for row in rows:
+            run_id = row.get("run_id")
+            if run_id and run_id in run_to_path and "source_video_path" not in row:
+                row["source_video_path"] = run_to_path[run_id]
+
+        # Group rows by source video and sort by timestamp_seconds
+        by_video = defaultdict(list)
+        for row in rows:
+            run_id = row.get("run_id")
+            vid = row.get("source_video_path")
+            if run_id and vid:
+                by_video[vid].append(row)
+        for v in by_video:
+            by_video[v].sort(key=lambda r: r.get("timestamp_seconds", 0))
+
+        if not by_video:
+            print("No matching frames to stitch.", file=sys.stderr)
+            cache_db.close()
+            sys.exit(0)
+
+        # Merge adjacent frames within threshold (timestamp gap <= threshold)
+        all_sections_by_video = {}
+        for vid, frames in by_video.items():
+            sections = []
+            cur = [frames[0]]
+            for i in range(1, len(frames)):
+                prev_ts = frames[i-1]["timestamp_seconds"]
+                curr_ts = frames[i]["timestamp_seconds"]
+                if curr_ts - prev_ts <= threshold:
+                    cur.append(frames[i])
+                else:
+                    sections.append(cur)
+                    cur = [frames[i]]
+            sections.append(cur)
+            all_sections_by_video[vid] = sections
+
+        # Determine output paths
+        if args.stitch_video_path:
+            output_paths = [args.stitch_video_path]
+        else:
+            output_paths = [f"{os.path.splitext(os.path.basename(vid))[0]}_stitched.mp4" for vid in by_video]
+
+        # Stitch each video
+        for vid_idx, (vid, sections) in enumerate(all_sections_by_video.items()):
+            if not os.path.exists(vid):
+                print(f"Warning: video not found: {vid}", file=sys.stderr)
+                continue
+            cap = cv2.VideoCapture(vid)
+            fps = cap.get(cv2.CAP_PROP_FPS)
+            if not fps or fps <= 0:
+                fps = 25.0
+            out_path = output_paths[min(vid_idx, len(output_paths)-1)]
+            tmpdir = tempfile.mkdtemp(prefix="vsearch_stitch_")
+            segment_files = []
+            try:
+                for sec_idx, section in enumerate(sections):
+                    img_paths = []
+                    for f_idx, row in enumerate(section):
+                        fi = int(row.get("frame_index", 0))
+                        cap.set(cv2.CAP_PROP_POS_FRAMES, fi)
+                        ret, frame = cap.read()
+                        if ret:
+                            img_path = os.path.join(tmpdir, f"seg_{f_idx:04d}.jpg")
+                            cv2.imwrite(img_path, frame)
+                            img_paths.append(img_path)
+                    if img_paths:
+                        seg_file = os.path.join(tmpdir, f"segment_{sec_idx:04d}.mp4")
+                        pattern = os.path.join(tmpdir, "seg_%04d.jpg")
+                        subprocess.run([
+                            "ffmpeg", "-y",
+                            "-framerate", str(fps),
+                            "-i", pattern,
+                            "-c:v", "libx264",
+                            "-pix_fmt", "yuv420p",
+                            "-r", str(fps),
+                            seg_file,
+                        ], capture_output=True)
+                        if os.path.exists(seg_file):
+                            segment_files.append(seg_file)
+                    cap.release()
+                    cap = cv2.VideoCapture(vid)
+                if segment_files:
+                    concat_file = os.path.join(tmpdir, "concat.txt")
+                    with open(concat_file, "w") as cf:
+                        for sf in segment_files:
+                            cf.write("file '" + sf + "'\n")
+                    subprocess.run([
+                        "ffmpeg", "-y",
+                        "-f", "concat", "-safe", "0", "-i", concat_file,
+                        "-c", "copy", out_path,
+                    ], capture_output=True)
+                    print(f"Stitched {vid} -> {out_path} ({len(segment_files)} section(s))", file=sys.stderr)
+                else:
+                    print(f"No frames could be extracted from {vid}", file=sys.stderr)
+            finally:
+                shutil.rmtree(tmpdir)
+        cache_db.close()
+        sys.exit(0)
+
     _print_table(rows)
     cache_db.close()
     sys.exit(0)
@@ -1272,6 +1389,9 @@ def main():
     p_search.add_argument("--cache", type=str, default=None, help="Path to SQLite cache file (default: ./.cache.db)")
     p_search.add_argument("--model", type=str, default=None, help="Filter results by Ollama model name (e.g., clef-flash:9b, d1:3b)")
     p_search.add_argument("--run-id", type=int, default=None, help="Filter results to a specific analysis run ID")
+    p_search.add_argument("--stitch", action="store_true", help="Stitch matched frames into a single video using ffmpeg")
+    p_search.add_argument("--stitch-video-path", type=str, default=None, help="Video path(s) to stitch (optional, auto-generates name if omitted)")
+    p_search.add_argument("--stitch-merge-timestamp-threshold", type=float, default=None, help="Timestamp difference threshold (seconds) to merge adjacent frames (default: 1)")
     p_search.set_defaults(func=cmd_search)
 
     p_cache = sub.add_parser("cache", help="Cache management: list, delete, prune")
@@ -1297,6 +1417,14 @@ def main():
         args.days = args.days
     if hasattr(args, 'yes'):
         args.yes = args.yes
+
+    # Extract stitch args
+    if hasattr(args, "stitch"):
+        args.stitch = args.stitch
+    if hasattr(args, "stitch_video_path"):
+        args.stitch_video_path = args.stitch_video_path
+    if hasattr(args, "stitch_merge_timestamp_threshold"):
+        args.stitch_merge_timestamp_threshold = args.stitch_merge_timestamp_threshold
 
     def _global_sigint_handler(signum, frame):
         print("\nInterrupted — saving partial progress before exit...", file=sys.stderr)

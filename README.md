@@ -8,7 +8,7 @@ A lightweight CLI that analyzes video frames using an Ollama decision model as t
 |---------|-------------|
 | `vsearch analyze <video>` | Analyze video frames using Ollama choice-question model |
 | `vsearch query "<sql>" [--cache CACHE] [--save-frame DIR]` | Query the cache or extract matching frames |
-| `vsearch search <video> [--q "question=choice:prob"]* [--top N] [--model MODEL] [--run-id RUN_ID] [--save-frame DIR]` | Human-friendly search without SQL |
+| `vsearch search <video> [--q "question=choice:prob"]* [--top N] [--model MODEL] [--run-id RUN_ID] [--save-frame DIR] [--stitch] [--stitch-video-path PATH] [--stitch-merge-timestamp-threshold SEC]` | Human-friendly search without SQL |
 | `vsearch cache <cmd>` | Cache management: list, delete, prune, clear |
 
 ### Query Subcommand (`vsearch query`)
@@ -95,6 +95,9 @@ vsearch search video.mp4 \
 - `--model MODEL`: Filter results by Ollama model name (e.g., clef-flash:9b, d1:3b)
 - `--run-id RUN_ID`: Filter results to a specific analysis run ID
 - `--cache CACHE`: Path to SQLite cache file (default: ./.cache.db)
+- `--stitch`: Stitch matched frames into a single video using ffmpeg
+- `--stitch-video-path PATH`: Output path for stitched video (auto-generates name if omitted)
+- `--stitch-merge-timestamp-threshold SEC`: Timestamp gap threshold (seconds) to merge adjacent frames (default: 1)
 
 ### Frame Extraction via Search
 ```bash
@@ -174,6 +177,27 @@ vsearch cache delete 7  # Delete specific run_id (integer)
 vsearch cache prune --days 30
 
 # Clear entire cache (requires --yes confirmation)
+
+## Stitching Extracted Frames
+
+The `stitch` flag uses ffmpeg to merge adjacent frames into a single video file.
+
+**Usage:**
+
+```bash
+# Extract and stitch frames with matching criteria
+vsearch search video.mp4 \
+  --q "activity=sitting:0.95" \
+  --top 3 \
+  --stitch \
+  --stitch-merge-timestamp-threshold 2.0  # merge frames within 2 seconds
+
+# Custom output path
+vsearch search video.mp4 \
+  --q "activity=sitting:0.95" \
+  --stitch \
+  --stitch-video-path custom_output.mp4
+```
 vsearch cache clear --yes
 ```
 
