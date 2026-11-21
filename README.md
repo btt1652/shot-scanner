@@ -97,6 +97,53 @@ vsearch search video.mp4 \
 
 This will extract frames meeting all criteria, sorted by probability, capped at top N.
 
+## Cache Table Schema (Visual)
+
+Understanding the table structure helps you write better custom SQL queries. Below is a visual representation of each table's columns and their purposes.
+
+### 📋 `videos` Table
+| Column | Type | Description |
+|--------|------|-------------|
+| `id` | INTEGER | Primary key |
+| `video_path` | TEXT | Full path to the video file |
+| `content_hash` | TEXT | SHA256 hash of file content (for dedup/symlink handling) |
+| `fps` | REAL | Frames per second of the video |
+| `total_frames` | INTEGER | Total number of frames in video |
+| `stride` | INTEGER | Frame extraction stride (default: 1) |
+| `created_at` | TEXT | Timestamp when video was first cached |
+
+### 📊 `analysis_runs` Table
+| Column | Type | Description |
+|--------|------|-------------|
+| `id` | INTEGER | Primary key (run ID) |
+| `video_id` | INTEGER | FK → videos.id |
+| `content_hash` | TEXT | Video content hash |
+| `params_hash` | TEXT | Hash of model+config params (question_name+params) |
+| `model` | TEXT | Ollama model name (e.g., `clef-flash:9b`) |
+| `cache_status` | TEXT | `empty`/`partial`/`complete` |
+| `created_at` | TEXT | Run creation timestamp |
+| `updated_at` | TEXT | Last update timestamp |
+
+### 🖼️ `frame_answers` Table
+| Column | Type | Description |
+|--------|------|-------------|
+| `run_id` | INTEGER | FK → analysis_runs.id |
+| `frame_index` | INTEGER | Frame index within video |
+| `timestamp_seconds` | REAL | Timestamp in seconds |
+| `question_name` | TEXT | Question key (e.g., `activity`, `time_of_day`) |
+| `top_choice` | TEXT | Best answer (e.g., `walking`, `sitting`) |
+| `top_probability` | REAL | Confidence score (0.0–1.0) |
+| `batch_id` | INTEGER | Batch group ID |
+| `raw_response` | TEXT | Raw Ollama response JSON |
+
+### 📈 `cache_stats` Table
+| Column | Type | Description |
+|--------|------|-------------|
+| `key` | TEXT | Statistic key |
+| `value` | TEXT | Statistic value |
+
+---
+
 ## Cache Management (`vsearch cache`)
 
 For managing the SQLite cache directly.
@@ -118,13 +165,5 @@ vsearch cache prune --days 30
 vsearch cache clear --yes
 ```
 
-## Cache Schema
 
-The cache is a SQLite database (`./.cache.db`) with the following schema:
 
-- **videos**: Video metadata (path, content hash, fps, total frames)
-- **analysis_runs**: Each analysis run for a video with different parameters (content_hash + params_hash unique constraint, model name)
-- **frame_answers**: Per-frame answers for each run (run_id, frame_index, question_name, top_choice, top_probability)
-- **cache_stats**: Key-value statistics
-
-Each `(video, content_hash, params_hash)` combination gets its own `analysis_runs` entry, so different analysis configurations for the same video can coexist.
