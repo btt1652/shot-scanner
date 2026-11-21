@@ -40,12 +40,23 @@ vsearch query "SELECT fa.run_id, fa.frame_index, fa.timestamp_seconds, fa.top_ch
 
 ## Configuration (`config.toml`)
 
+The `config.toml` file provides **default** configuration values. Command-line arguments **override** these defaults at runtime.
+
 ```toml
 decision_model_sample_rate = 1
 ollama_host = "localhost"
 ollama_decision_model = "d1:3b"  # or "clef-flash:9b"
 activity = { walking="Person standing", running="Person sitting", sitting="Person laying down" }
 ```
+
+### Override Precedence
+Command-line arguments take precedence over `config.toml`:
+- `--model MODEL` → overrides `ollama_decision_model` in config
+- `--q "question=choice:prob"` → adds filter criteria (not in config)
+- `--run-id RUN_ID` → targets specific analysis run (not in config)
+- `--cache PATH` → overrides default `.cache.db` location
+
+**Example**: If `config.toml` has `ollama_decision_model = "d1:3b"` but you run `vsearch search video.mp4 --model clef-flash:9b`, the search uses `clef-flash:9b`.
 
 ## Working Examples
 
