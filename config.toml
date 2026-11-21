@@ -1,4 +1,4 @@
-# vsearch - Default configuration
+# scs - Default configuration
 # Uses an Ollama decision model as the sole judge for classification.
 # Multiple questions are defined in the [[classify.questions]] array.
 
@@ -25,14 +25,14 @@ instructions = "What time of day is it?"
 criteria = { morning = "Morning light", afternoon = "Afternoon light", evening = "Evening light" }
 
 # Example: yes/no (search-equivalent) question
-# This replicates the old vsearch search mode exactly:
+# This replicates the old scs search mode exactly:
 # [[classify.questions]]
 # name = "is_valid"
 # instructions = "Does the image match the query?"
 # criteria = { yes = "the frame matches the query", no = "the frame does not match" }
 
 # To override questions from CLI, pass a JSON array:
-# vsearch classify video.mp4 --questions '[{"name":"activity","instructions":"What activity?","criteria":{"walking":"Person walking","running":"Person running"}}]'
+# scs classify video.mp4 --questions '[{"name":"activity","instructions":"What activity?","criteria":{"walking":"Person walking","running":"Person running"}}]'
 
 # Example Ollama request JSON body (built from the above config):
 # {

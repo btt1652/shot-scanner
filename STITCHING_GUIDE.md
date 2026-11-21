@@ -2,7 +2,7 @@
 
 ## Overview
 
-Turn a list of timestamps (from `vsearch` or any source) into a single video by extracting a fixed-length clip (e.g. 3 seconds) from each source video and concatenating them in order.
+Turn a list of timestamps (from `scs` or any source) into a single video by extracting a fixed-length clip (e.g. 3 seconds) from each source video and concatenating them in order.
 
 ---
 
@@ -23,12 +23,12 @@ sudo apt-get update && sudo apt-get install -y ffmpeg jq
 
 ---
 
-## 2. Get Timestamps from `vsearch`
+## 2. Get Timestamps from `scs`
 
 Example: search for an image across all caches and emit JSON:
 
 ```bash
-python3 -m vsearch search ./cache/ \
+python3 -m scs search ./cache/ \
   -i ./fffs003_spycam_01:34:20_0.2847.jpg \
   -k 2 --json > /tmp/search_results.json
 ```

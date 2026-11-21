@@ -1,4 +1,4 @@
-# vsearch — Semantic Video Frame Analysis
+# scs — Semantic Video Frame Analysis
 
 A lightweight CLI that analyzes video frames using an Ollama decision model as the sole judge.
 
@@ -6,34 +6,34 @@ A lightweight CLI that analyzes video frames using an Ollama decision model as t
 
 | Command | Description |
 |---------|-------------|
-| `vsearch analyze <video>` | Analyze video frames using Ollama choice-question model |
-| `vsearch query "<sql>" [--cache CACHE] [--save-frame DIR]` | Query the cache or extract matching frames |
-| `vsearch search <video> [--q "question=choice:prob"]* [--top N] [--model MODEL] [--run-id RUN_ID] [--save-frame DIR] [--stitch] [--stitch-merge-timestamp-threshold SEC]` | Human-friendly search without SQL |
-| `vsearch cache <cmd>` | Cache management: list, delete, prune, clear |
+| `scs analyze <video>` | Analyze video frames using Ollama choice-question model |
+| `scs query "<sql>" [--cache CACHE] [--save-frame DIR]` | Query the cache or extract matching frames |
+| `scs search <video> [--q "question=choice:prob"]* [--top N] [--model MODEL] [--run-id RUN_ID] [--save-frame DIR] [--stitch] [--stitch-merge-timestamp-threshold SEC]` | Human-friendly search without SQL |
+| `scs cache <cmd>` | Cache management: list, delete, prune, clear |
 
-### Query Subcommand (`vsearch query`)
+### Query Subcommand (`scs query`)
 
 ```bash
 # List all cached videos (by id and path)
-vsearch query "SELECT id, video_path FROM videos" --cache ./.cache.db
+scs query "SELECT id, video_path FROM videos" --cache ./.cache.db
 
 # Show cache statistics
-vsearch query "SELECT COUNT(*) AS total_videos, SUM(answer_count) AS total_frames FROM (SELECT v.id, COUNT(fa.id) AS answer_count FROM videos v LEFT JOIN analysis_runs ar ON v.id = ar.video_id LEFT JOIN frame_answers fa ON ar.id = fa.run_id GROUP BY v.id)" --cache ./.cache.db
+scs query "SELECT COUNT(*) AS total_videos, SUM(answer_count) AS total_frames FROM (SELECT v.id, COUNT(fa.id) AS answer_count FROM videos v LEFT JOIN analysis_runs ar ON v.id = ar.video_id LEFT JOIN frame_answers fa ON ar.id = fa.run_id GROUP BY v.id)" --cache ./.cache.db
 
 # Prune entries older than N days (default 30)
-vsearch query "DELETE FROM analysis_runs WHERE updated_at < datetime('now', '-30 day')" --cache ./.cache.db
+scs query "DELETE FROM analysis_runs WHERE updated_at < datetime('now', '-30 day')" --cache ./.cache.db
 
 # Execute custom SQL query
-vsearch query "SELECT * FROM frame_answers WHERE question_name='activity'" --cache ./.cache.db
+scs query "SELECT * FROM frame_answers WHERE question_name='activity'" --cache ./.cache.db
 
 # Extract and save frame images from videos based on cached answer filters
-vsearch query "SELECT fa.run_id, fa.frame_index, fa.timestamp_seconds, fa.top_choice FROM frame_answers fa JOIN analysis_runs ar ON fa.run_id = ar.id WHERE fa.question_name='activity'" --save-frame ./activity_frames
+scs query "SELECT fa.run_id, fa.frame_index, fa.timestamp_seconds, fa.top_choice FROM frame_answers fa JOIN analysis_runs ar ON fa.run_id = ar.id WHERE fa.question_name='activity'" --save-frame ./activity_frames
 
 # Filter by question + choice
-vsearch query "SELECT fa.run_id, fa.frame_index, fa.timestamp_seconds, fa.top_choice FROM frame_answers fa JOIN analysis_runs ar ON fa.run_id = ar.id WHERE fa.question_name='activity' AND fa.top_choice='walking'" --save-frame ./walking_frames
+scs query "SELECT fa.run_id, fa.frame_index, fa.timestamp_seconds, fa.top_choice FROM frame_answers fa JOIN analysis_runs ar ON fa.run_id = ar.id WHERE fa.question_name='activity' AND fa.top_choice='walking'" --save-frame ./walking_frames
 
 # Only high-confidence frames
-vsearch query "SELECT fa.run_id, fa.frame_index, fa.timestamp_seconds, fa.top_choice FROM frame_answers fa JOIN analysis_runs ar ON fa.run_id = ar.id WHERE fa.question_name='activity' AND fa.top_probability > 0.8" --save-frame ./high_conf_activity
+scs query "SELECT fa.run_id, fa.frame_index, fa.timestamp_seconds, fa.top_choice FROM frame_answers fa JOIN analysis_runs ar ON fa.run_id = ar.id WHERE fa.question_name='activity' AND fa.top_probability > 0.8" --save-frame ./high_conf_activity
 
 # Filename format: video_name_f000001_12.3s_activity_walking.jpg
 ```
@@ -56,12 +56,12 @@ Command-line arguments take precedence over `config.toml`:
 - `--run-id RUN_ID` → targets specific analysis run (not in config)
 - `--cache PATH` → overrides default `.cache.db` location
 
-**Example**: If `config.toml` has `ollama_decision_model = "d1:3b"` but you run `vsearch search video.mp4 --model clef-flash:9b`, the search uses `clef-flash:9b`.
+**Example**: If `config.toml` has `ollama_decision_model = "d1:3b"` but you run `scs search video.mp4 --model clef-flash:9b`, the search uses `clef-flash:9b`.
 
 ## Working Examples
 
-- `python3 -m vsearch query "SELECT frame_index, timestamp_seconds, top_choice, top_probability FROM frame_answers WHERE top_probability > 0.9"`
-- `python3 -m vsearch query "SELECT fa.frame_index, fa.timestamp_seconds, fa.top_choice FROM frame_answers fa WHERE fa.top_choice='walking' AND fa.top_probability > 0.8" --save-frame ./walking_frames`
+- `python3 -m scs query "SELECT frame_index, timestamp_seconds, top_choice, top_probability FROM frame_answers WHERE top_probability > 0.9"`
+- `python3 -m scs query "SELECT fa.frame_index, fa.timestamp_seconds, fa.top_choice FROM frame_answers fa WHERE fa.top_choice='walking' AND fa.top_probability > 0.8" --save-frame ./walking_frames`
 
 ## Frame Filenames
 
@@ -74,13 +74,13 @@ For interactive use, use the `search` command with simple key-value filters inst
 ### Basic Search
 ```bash
 # Find frames where activity is "yes" with probability >= 0.8
-vsearch search video.mp4 --q "activity=yes:0.8"
+scs search video.mp4 --q "activity=yes:0.8"
 
 # Find frames where time_of_day is "evening" with probability >= 0.9
-vsearch search video.mp4 --q "time_of_day=evening:0.9"
+scs search video.mp4 --q "time_of_day=evening:0.9"
 
 # Multiple filters (AND logic - all must match)
-vsearch search video.mp4 \
+scs search video.mp4 \
   --q "activity=yes:0.8" \
   --q "time_of_day=evening:0.9" \
   --top 10 \
@@ -101,7 +101,7 @@ vsearch search video.mp4 \
 ### Frame Extraction via Search
 ```bash
 # Search and save frames
-vsearch search video.mp4 \
+scs search video.mp4 \
   --q "activity=walking:0.8" \
   --q "time_of_day=morning:0.9" \
   --top 5 \
@@ -157,23 +157,23 @@ Understanding the table structure helps you write better custom SQL queries. Bel
 
 ---
 
-## Cache Management (`vsearch cache`)
+## Cache Management (`scs cache`)
 
 For managing the SQLite cache directly.
 
 ```bash
 # List all cached videos with answer counts
-vsearch cache list
+scs cache list
 
 # Limit results
-vsearch cache list --limit 10
+scs cache list --limit 10
 
 # Delete a specific video or run_id
-vsearch cache delete "/path/to/video.mp4"
-vsearch cache delete 7  # Delete specific run_id (integer)
+scs cache delete "/path/to/video.mp4"
+scs cache delete 7  # Delete specific run_id (integer)
 
 # Prune videos older than N days (default 30)
-vsearch cache prune --days 30
+scs cache prune --days 30
 
 # Clear entire cache (requires --yes confirmation)
 
@@ -185,18 +185,18 @@ The `--stitch` flag uses ffmpeg to merge adjacent frames into a single video fil
 
 ```bash
 # Stitch matched frames (auto-generates output: {video_name}_stitched.mp4)
-vsearch search video.mp4 \
+scs search video.mp4 \
   --q "activity=sitting:0.95" \
   --top 3 \
   --stitch \
   --stitch-merge-timestamp-threshold 2.0  # merge frames within 2 seconds
 
 # Stitch to custom output path
-vsearch search video.mp4 \
+scs search video.mp4 \
   --q "activity=sitting:0.95" \
   --stitch custom_output.mp4
 ```
-vsearch cache clear --yes
+scs cache clear --yes
 ```
 
 
