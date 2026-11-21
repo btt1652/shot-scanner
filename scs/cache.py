@@ -27,9 +27,6 @@ CREATE TABLE IF NOT EXISTS videos (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     video_path TEXT NOT NULL UNIQUE,
     content_hash TEXT NOT NULL,
-    fps REAL,
-    total_frames INTEGER,
-    stride INTEGER DEFAULT 1,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
@@ -59,7 +56,6 @@ CREATE TABLE IF NOT EXISTS frame_answers (
     top_choice TEXT,
     top_probability REAL,
     probabilities_json TEXT,
-    batch_id INTEGER,
     raw_response TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     UNIQUE(run_id, frame_index, question_name)
@@ -146,22 +142,16 @@ class CacheDB:
         self,
         video_path: str,
         content_hash: str,
-        fps: Optional[float] = None,
-        total_frames: Optional[int] = None,
-        stride: int = 1,
     ) -> int:
         """Insert or update video metadata. Returns video_id."""
         with self.conn:
             self.conn.execute(
-                """INSERT INTO videos (video_path, content_hash, fps, total_frames, stride, updated_at)
-                   VALUES (?, ?, ?, ?, ?, datetime('now'))
+                """INSERT INTO videos (video_path, content_hash, updated_at)
+                   VALUES (?, ?, datetime('now'))
                    ON CONFLICT(video_path) DO UPDATE SET
                        content_hash=excluded.content_hash,
-                       fps=excluded.fps,
-                       total_frames=excluded.total_frames,
-                       stride=excluded.stride,
                        updated_at=datetime('now')""",
-                (video_path, content_hash, fps, total_frames, stride),
+                (video_path, content_hash),
             )
         # Return the video_id
         cur = self.conn.execute(
@@ -271,7 +261,7 @@ class CacheDB:
 
         Each item in answers should contain:
           frame_index, timestamp_seconds, question_name, top_choice,
-          top_probability, probabilities_json, batch_id
+          top_probability, probabilities_json
         plus optional question_instructions, criteria_json, raw_response.
         """
         if not answers:
@@ -282,8 +272,8 @@ class CacheDB:
                     """INSERT INTO frame_answers (
                            run_id, frame_index, timestamp_seconds, question_name,
                            question_instructions, criteria_json, top_choice, top_probability,
-                           probabilities_json, batch_id, raw_response)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                           probabilities_json, raw_response)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                        ON CONFLICT(run_id, frame_index, question_name) DO UPDATE SET
                            timestamp_seconds=excluded.timestamp_seconds,
                            question_instructions=excluded.question_instructions,
@@ -291,7 +281,6 @@ class CacheDB:
                            top_choice=excluded.top_choice,
                            top_probability=excluded.top_probability,
                            probabilities_json=excluded.probabilities_json,
-                           batch_id=excluded.batch_id,
                            raw_response=excluded.raw_response,
                            created_at=datetime('now')""",
                     (
@@ -304,7 +293,6 @@ class CacheDB:
                         a.get("top_choice"),
                         a.get("top_probability"),
                         a.get("probabilities_json"),
-                        a.get("batch_id"),
                         a.get("raw_response"),
                     ),
                 )

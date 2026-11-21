@@ -122,9 +122,6 @@ def _save_cache(cache, video_path, sample_rate, frame_scale, state, questions_js
         video_id = cache_db.upsert_video(
             video_path=video_path,
             content_hash=content_hash,
-            fps=None,
-            total_frames=total_sampled,
-            stride=sample_rate,
         )
 
         # Upsert analysis run for this param set

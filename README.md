@@ -1,4 +1,4 @@
-# scs — Semantic Video Frame Analysis
+# scs — SCeneScan — Semantic Video Frame Analysis
 
 A lightweight CLI that analyzes video frames using an Ollama decision model as the sole judge.
 
@@ -96,7 +96,7 @@ scs search video.mp4 \
 - `--run-id RUN_ID`: Filter results to a specific analysis run ID
 - `--cache CACHE`: Path to SQLite cache file (default: ./.cache.db)
 - `--stitch [PATH]`: Stitch matched frames into a single video using ffmpeg. Optional: provide output path (auto-generates `{video_name}_stitched.mp4` if omitted).
-- `--stitch-merge-timestamp-threshold SEC`: Timestamp gap threshold (seconds) to merge adjacent frames (default: 1)
+- `--stitch-merge-threshold SEC`: Timestamp gap threshold (seconds) to merge adjacent frames (default: 1)
 
 ### Frame Extraction via Search
 ```bash
@@ -120,9 +120,6 @@ Understanding the table structure helps you write better custom SQL queries. Bel
 | `id` | INTEGER | Primary key |
 | `video_path` | TEXT | Full path to the video file |
 | `content_hash` | TEXT | SHA256 hash of file content (for dedup/symlink handling) |
-| `fps` | REAL | Frames per second of the video |
-| `total_frames` | INTEGER | Total number of frames in video |
-| `stride` | INTEGER | Frame extraction stride (default: 1) |
 | `created_at` | TEXT | Timestamp when video was first cached |
 
 ### 📊 `analysis_runs` Table
@@ -146,7 +143,6 @@ Understanding the table structure helps you write better custom SQL queries. Bel
 | `question_name` | TEXT | Question key (e.g., `activity`, `time_of_day`) |
 | `top_choice` | TEXT | Best answer (e.g., `walking`, `sitting`) |
 | `top_probability` | REAL | Confidence score (0.0–1.0) |
-| `batch_id` | INTEGER | Batch group ID |
 | `raw_response` | TEXT | Raw Ollama response JSON |
 
 ### 📈 `cache_stats` Table
@@ -198,6 +194,3 @@ scs search video.mp4 \
 ```
 scs cache clear --yes
 ```
-
-
-
