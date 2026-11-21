@@ -155,14 +155,13 @@ vsearch cache list
 # Limit results
 vsearch cache list --limit 10
 
-# Delete a specific video and its answers
+# Delete a specific video or run_id
+
 vsearch cache delete "/path/to/video.mp4"
 
-# Prune videos older than N days (default 30)
-vsearch cache prune --days 30
+vsearch cache delete 7  # Delete specific run_id (integer)
 
-# Clear entire cache (requires --yes confirmation)
-vsearch cache clear --yes
+
 ```
 
 
