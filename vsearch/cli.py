@@ -945,6 +945,84 @@ def cmd_search(args):
     sys.exit(0)
 
 
+def cmd_cache(args):
+    """Cache management: list, delete, prune."""
+    import datetime
+
+    cache_db = CacheDB(args.cache or "./.cache.db")
+
+    if args.cache_cmd == "list":
+        videos = cache_db.list_videos(limit=args.limit)
+        if not videos:
+            print("(no cached videos)", file=sys.stderr)
+            cache_db.close()
+            sys.exit(0)
+        rows = []
+        for v in videos:
+            cur = cache_db.conn.execute(
+                "SELECT COUNT(*) FROM frame_answers WHERE video_id = ?", (v["id"],)
+            )
+            answer_count = cur.fetchone()[0]
+            rows.append({
+                "id": v["id"],
+                "video_path": v["video_path"],
+                "answers": answer_count,
+                "cache_status": v["cache_status"],
+                "created_at": v["created_at"],
+            })
+        _print_table(rows)
+        cache_db.close()
+        sys.exit(0)
+
+    elif args.cache_cmd == "delete":
+        if args.video_path:
+            video = cache_db.get_video(args.video_path)
+            if not video:
+                print(f"Video not found: {args.video_path}", file=sys.stderr)
+                cache_db.close()
+                sys.exit(1)
+            with cache_db.conn:
+                cache_db.conn.execute("DELETE FROM frame_answers WHERE video_id = ?", (video["id"],))
+                cache_db.conn.execute("DELETE FROM videos WHERE id = ?", (video["id"],))
+            print(f"Deleted: {args.video_path}", file=sys.stderr)
+            cache_db.close()
+            sys.exit(0)
+
+    elif args.cache_cmd == "prune":
+        cutoff = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=args.days)).isoformat()
+        cur = cache_db.conn.execute("SELECT id, video_path FROM videos WHERE created_at < ?", (cutoff,))
+        to_delete = cur.fetchall()
+        if not to_delete:
+            print(f"No videos older than {args.days} days", file=sys.stderr)
+            cache_db.close()
+            sys.exit(0)
+        deleted = 0
+        with cache_db.conn:
+            for v in to_delete:
+                cache_db.conn.execute("DELETE FROM frame_answers WHERE video_id = ?", (v["id"],))
+                cache_db.conn.execute("DELETE FROM videos WHERE id = ?", (v["id"],))
+                deleted += 1
+        print(f"Pruned {deleted} video(s) older than {args.days} days", file=sys.stderr)
+        cache_db.close()
+        sys.exit(0)
+
+    elif args.cache_cmd == "clear":
+        if not args.yes:
+            print("Error: --yes required to confirm full cache clear", file=sys.stderr)
+            cache_db.close()
+            sys.exit(1)
+        with cache_db.conn:
+            cache_db.conn.execute("DELETE FROM frame_answers")
+            cache_db.conn.execute("DELETE FROM videos")
+            cache_db.conn.execute("DELETE FROM cache_stats")
+        print("Cache cleared", file=sys.stderr)
+        cache_db.close()
+        sys.exit(0)
+
+    cache_db.close()
+    sys.exit(1)
+
+
 def main():
     parser = argparse.ArgumentParser(
         prog="vsearch",
@@ -982,7 +1060,28 @@ def main():
     p_search.add_argument("--cache", type=str, default=None, help="Path to SQLite cache file (default: ./.cache.db)")
     p_search.set_defaults(func=cmd_search)
 
+    p_cache = sub.add_parser("cache", help="Cache management: list, delete, prune")
+    p_cache.add_argument("--cache", type=str, default=None, help="Path to SQLite cache file (default: ./.cache.db)")
+    p_cache.add_argument("cache_cmd", choices=["list", "delete", "prune", "clear"], help="Cache command")
+    p_cache.add_argument("video_path", nargs="?", help="Video path (for delete)")
+    p_cache.add_argument("--limit", type=int, default=1000, help="Limit for list (default: 1000)")
+    p_cache.add_argument("--days", type=int, default=30, help="Days threshold for prune (default: 30)")
+    p_cache.add_argument("--yes", action="store_true", help="Confirm clear")
+    p_cache.set_defaults(func=cmd_cache)
+
     args = parser.parse_args()
+
+    # Extract cache command args for cmd_cache
+    if hasattr(args, 'cache_cmd'):
+        args.cache_cmd = args.cache_cmd
+    if hasattr(args, 'video_path'):
+        args.video_path = args.video_path
+    if hasattr(args, 'limit'):
+        args.limit = args.limit
+    if hasattr(args, 'days'):
+        args.days = args.days
+    if hasattr(args, 'yes'):
+        args.yes = args.yes
 
     def _global_sigint_handler(signum, frame):
         print("\nInterrupted — saving partial progress before exit...", file=sys.stderr)
