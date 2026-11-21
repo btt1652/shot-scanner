@@ -1113,8 +1113,8 @@ def cmd_search(args):
             all_sections_by_video[vid] = sections
 
         # Determine output paths
-        if args.stitch_video_path:
-            output_paths = [args.stitch_video_path]
+        if args.stitch and isinstance(args.stitch, str):
+            output_paths = [args.stitch]
         else:
             output_paths = [f"{os.path.splitext(os.path.basename(vid))[0]}_stitched.mp4" for vid in by_video]
 
@@ -1389,8 +1389,7 @@ def main():
     p_search.add_argument("--cache", type=str, default=None, help="Path to SQLite cache file (default: ./.cache.db)")
     p_search.add_argument("--model", type=str, default=None, help="Filter results by Ollama model name (e.g., clef-flash:9b, d1:3b)")
     p_search.add_argument("--run-id", type=int, default=None, help="Filter results to a specific analysis run ID")
-    p_search.add_argument("--stitch", action="store_true", help="Stitch matched frames into a single video using ffmpeg")
-    p_search.add_argument("--stitch-video-path", type=str, default=None, help="Video path(s) to stitch (optional, auto-generates name if omitted)")
+    p_search.add_argument("--stitch", nargs="?", const=True, default=None, metavar="PATH", help="Stitch matched frames into a single video using ffmpeg. Optional: provide output path (auto-generates if omitted).")
     p_search.add_argument("--stitch-merge-timestamp-threshold", type=float, default=None, help="Timestamp difference threshold (seconds) to merge adjacent frames (default: 1)")
     p_search.set_defaults(func=cmd_search)
 
@@ -1421,8 +1420,6 @@ def main():
     # Extract stitch args
     if hasattr(args, "stitch"):
         args.stitch = args.stitch
-    if hasattr(args, "stitch_video_path"):
-        args.stitch_video_path = args.stitch_video_path
     if hasattr(args, "stitch_merge_timestamp_threshold"):
         args.stitch_merge_timestamp_threshold = args.stitch_merge_timestamp_threshold
 
