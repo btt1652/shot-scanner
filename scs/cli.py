@@ -1615,17 +1615,51 @@ def cmd_isearch(args):
     if args.video:
         video_set = _resolve_paths(args.video)
 
-    # Classify the reference image to get a probability threshold
-    threshold = _classify_image_with_ollama(args.image, args.question, cfg)
-
-    # Open cache DB
+    # Open cache DB early to resolve question-ref if needed
     cache_db = CacheDB(args.cache or cfg.get("cache", "./.cache.db"))
+
+    # Resolve question name
+    question_name = args.question
+    if args.question_ref:
+        ref = args.question_ref
+        if ref.isdigit():
+            row = cache_db.conn.execute(
+                "SELECT fa.question_name FROM frame_answers fa WHERE fa.run_id = ? LIMIT 1",
+                (int(ref),),
+            ).fetchone()
+            if row:
+                question_name = row["question_name"]
+            else:
+                print(f"Warning: no answers found for run_id {ref}", file=sys.stderr)
+        else:
+            # treat as video path – find latest run for that video
+            vid_path = str(Path(ref).resolve())
+            video = cache_db.get_video(vid_path)
+            if video:
+                run_row = cache_db.conn.execute(
+                    "SELECT ar.id FROM analysis_runs ar WHERE ar.video_id = ? ORDER BY ar.created_at DESC LIMIT 1",
+                    (video["id"],),
+                ).fetchone()
+                if run_row:
+                    row = cache_db.conn.execute(
+                        "SELECT fa.question_name FROM frame_answers fa WHERE fa.run_id = ? LIMIT 1",
+                        (run_row["id"],),
+                    ).fetchone()
+                    if row:
+                        question_name = row["question_name"]
+                else:
+                    print(f"Warning: no runs found for video {ref}", file=sys.stderr)
+            else:
+                print(f"Warning: video not found in cache: {ref}", file=sys.stderr)
+
+    # Classify the reference image to get a probability threshold
+    threshold = _classify_image_with_ollama(args.image, question_name, cfg)
 
     # Build SQL for image search (similar to cmd_search but simpler)
     select_cols = "fa.run_id, fa.frame_index, fa.timestamp_seconds, fa.question_name, fa.top_choice, fa.top_probability"
     from_clause = "frame_answers fa JOIN analysis_runs ar1 ON fa.run_id = ar1.id"
     where_clauses = ["fa.question_name = ?", "fa.top_probability >= ?"]
-    params = [args.question, threshold]
+    params = [question_name, threshold]
 
     # video filter (new --video flag)
     if video_set:
@@ -1753,9 +1787,9 @@ def main():
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
+    # ---- analyze ----
     p_classify = sub.add_parser("analyze", help="Analyze video frames using Ollama choice-question model")
     p_classify.add_argument("video_paths", nargs="+", help="One or more video files, directories, or glob patterns (e.g., video1.mp4 video2/*.mp4)")
-
     p_classify.add_argument("--questions", "-qs", type=str, default=None, help="JSON array of questions: [{\"name\":..., \"instructions\":..., \"criteria\":{...}}, ...]")
     p_classify.add_argument("--decision-model-sample-rate", "-dmsr", type=int, default=None, help="Frame sampling interval in seconds (default: 3)")
     p_classify.add_argument("--ollama-host", "-oh", default=None, help="Ollama server address (default: 192.168.1.190). Falls back to localhost if unreachable")
@@ -1769,12 +1803,14 @@ def main():
     p_classify.add_argument("--ollama-state", "-s", type=str, default=None, help="State context string for Ollama (default: 'sample frame from a video')")
     p_classify.set_defaults(func=cmd_analyze)
 
+    # ---- query ----
     p_query = sub.add_parser("query", help="Query the cache or extract frames based on SQL")
     p_query.add_argument("--cache", type=str, default=None, help="Path to SQLite cache file (default: ./.cache.db)")
     p_query.add_argument("sql", type=str, nargs="?", default="SELECT fa.frame_index, fa.timestamp_seconds, fa.question_name, fa.top_choice, fa.top_probability FROM frame_answers fa JOIN analysis_runs ar ON fa.run_id = ar.id WHERE top_probability > 0.5", help="SQL query to execute")
     p_query.add_argument("--save-frame", type=str, default=None, help="Directory to save extracted frames")
     p_query.set_defaults(func=cmd_query)
 
+    # ---- search ----
     p_search = sub.add_parser("search", help="Search cached frame answers by question")
     p_search.add_argument("video", type=str, nargs="+", help="One or more video files/directories (e.g., video.mp4 video2/*.mp4)")
     p_search.add_argument("--q", dest="q_values", action="append", default=[], help="Filter condition: 'question=choice:prob' (e.g., activity=yes:0.8). Multiple --q require ALL to match.")
@@ -1791,6 +1827,23 @@ def main():
     p_search.add_argument("--stitch", nargs="?", const=True, default=None, metavar="PATH", help="Stitch matched frames into a single video using ffmpeg. Uses --merge-result-threshold (default 1 sec) to group consecutive frames with the same score into ranges. Optional: provide output path (auto-generates if omitted).")
     p_search.set_defaults(func=cmd_search)
 
+    # ---- isearch ----
+    p_isearch = sub.add_parser("isearch", help="Search cached frame answers by reference image (single image).")
+    p_isearch.add_argument("image", type=Path, help="Path to reference image (jpg, png, webp, bmp …).")
+    p_isearch.add_argument("--question", "-Q", type=str, default=None, help="Question name to score the reference image against (optional if --question-ref is given).")
+    p_isearch.add_argument("-qr", "--question-ref", type=str, default=None, help="Use the question set from a run_id (integer) or latest run of a video path (string).")
+    p_isearch.add_argument("--video", nargs="+", type=Path, default=None, help="One or more video paths to filter results by (space-separated).")
+    p_isearch.add_argument("--top", type=int, default=None, help="Limit to top N frames by probability.")
+    p_isearch.add_argument("--top-per-video", type=int, default=None, help="Limit number of top results per video by probability.")
+    p_isearch.add_argument("--merge-result-threshold", type=float, default=None, help="Timestamp difference threshold (seconds) to merge adjacent frames with same score.")
+    p_isearch.add_argument("--save-frame", type=str, default=None, help="Directory to save extracted frames (JPG only).")
+    p_isearch.add_argument("--cache", type=str, default=None, help="Path to SQLite cache file (default: ./.cache.db)")
+    p_isearch.add_argument("--model", type=str, default=None, help="Filter results by Ollama model name (e.g., clef-flash:9b, d1:3b)")
+    p_isearch.add_argument("--run-id", type=int, default=None, help="Filter results to a specific analysis run ID")
+    p_isearch.add_argument("--stitch", nargs="?", const=True, default=None, metavar="PATH", help="Stitch matched frames into a single video using ffmpeg.")
+    p_isearch.set_defaults(func=cmd_isearch)
+
+    # ---- cache ----
     p_cache = sub.add_parser("cache", help="Cache management: list, delete, prune, clean")
     p_cache.add_argument("--cache", type=str, default=None, help="Path to SQLite cache file (default: ./.cache.db)")
     p_cache.add_argument("cache_cmd", choices=["list", "delete", "prune", "clear", "clean"], help="Cache command")
@@ -1800,62 +1853,6 @@ def main():
     p_cache.add_argument("--days", type=int, default=30, help="Days threshold for prune (default: 30)")
     p_cache.add_argument("--yes", action="store_true", help="Confirm clear")
     p_cache.set_defaults(func=cmd_cache)
-
-    p_isearch = sub.add_parser(
-        "isearch",
-        help="Search cached frame answers by reference image (single image)."
-    )
-    p_isearch.add_argument(
-        "image",
-        type=Path,
-        help="Path to reference image (jpg, png, webp, bmp …)."
-    )
-    p_isearch.add_argument(
-        "--question",
-        "-Q",
-        type=str,
-        required=True,
-        help="Question name to score the reference image against (required)."
-    )
-    p_isearch.add_argument(
-        "--video",
-        nargs="+",
-        type=Path,
-        default=None,
-        help="One or more video paths to filter results by (space-separated)."
-    )
-    p_isearch.add_argument(
-        "--top", type=int, default=None, help="Limit to top N frames by probability."
-    )
-    p_isearch.add_argument(
-        "--top-per-video", type=int, default=None,
-        help="Limit number of top results per video by probability."
-    )
-    p_isearch.add_argument(
-        "--merge-result-threshold", type=float, default=None,
-        help="Timestamp difference threshold (seconds) to merge adjacent frames with same score."
-    )
-    p_isearch.add_argument(
-        "--save-frame", type=str, default=None,
-        help="Directory to save extracted frames (JPG only)."
-    )
-    p_isearch.add_argument(
-        "--cache", type=str, default=None,
-        help="Path to SQLite cache file (default: ./.cache.db)"
-    )
-    p_isearch.add_argument(
-        "--model", type=str, default=None,
-        help="Filter results by Ollama model name (e.g., clef-flash:9b, d1:3b)"
-    )
-    p_isearch.add_argument(
-        "--run-id", type=int, default=None,
-        help="Filter results to a specific analysis run ID"
-    )
-    p_isearch.add_argument(
-        "--stitch", nargs="?", const=True, default=None, metavar="PATH",
-        help="Stitch matched frames into a single video using ffmpeg."
-    )
-    p_isearch.set_defaults(func=cmd_isearch)
 
     args = parser.parse_args()
 
