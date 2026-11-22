@@ -55,6 +55,7 @@ CREATE TABLE IF NOT EXISTS frame_answers (
     criteria_json TEXT,
     top_choice TEXT,
     top_probability REAL,
+    confidence REAL,  -- confidence from Ollama response (e.g., model certainty)
     probabilities_json TEXT,
     raw_response TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
@@ -73,7 +74,7 @@ CREATE TABLE IF NOT EXISTS cache_stats (
 );
 """
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 # Keys for cache_stats
 STAT_TOTAL_VIDEOS = "total_videos"
@@ -122,6 +123,11 @@ class CacheDB:
         # Ensure analysis_runs has questions_json column (migration for schema v5)
         if "questions_json" not in ar_col_names:
             self.conn.execute("ALTER TABLE analysis_runs ADD COLUMN questions_json TEXT NOT NULL DEFAULT '[]'")
+        # Ensure frame_answers has confidence column (migration for schema v6)
+        fa_cols = self.conn.execute("PRAGMA table_info(frame_answers)")
+        fa_col_names = [row[1] for row in fa_cols.fetchall()]
+        if "confidence" not in fa_col_names:
+            self.conn.execute("ALTER TABLE frame_answers ADD COLUMN confidence REAL")
 
     def set_stat(self, key: str, value: str):
         """Set a cache statistics entry."""
@@ -265,7 +271,7 @@ class CacheDB:
 
         Each item in answers should contain:
           frame_index, timestamp_seconds, question_name, top_choice,
-          top_probability, probabilities_json
+          top_probability, probabilities_json, confidence (optional)
         plus optional question_instructions, criteria_json, raw_response.
         """
         if not answers:
@@ -276,14 +282,15 @@ class CacheDB:
                     """INSERT INTO frame_answers (
                            run_id, frame_index, timestamp_seconds, question_name,
                            question_instructions, criteria_json, top_choice, top_probability,
-                           probabilities_json, raw_response)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                           confidence, probabilities_json, raw_response)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                        ON CONFLICT(run_id, frame_index, question_name) DO UPDATE SET
                            timestamp_seconds=excluded.timestamp_seconds,
                            question_instructions=excluded.question_instructions,
                            criteria_json=excluded.criteria_json,
                            top_choice=excluded.top_choice,
                            top_probability=excluded.top_probability,
+                           confidence=excluded.confidence,
                            probabilities_json=excluded.probabilities_json,
                            raw_response=excluded.raw_response,
                            created_at=datetime('now')""",
@@ -296,6 +303,7 @@ class CacheDB:
                         a.get("criteria_json"),
                         a.get("top_choice"),
                         a.get("top_probability"),
+                        a.get("confidence"),
                         a.get("probabilities_json"),
                         a.get("raw_response"),
                     ),

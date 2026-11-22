@@ -359,6 +359,19 @@ def _validate_batch_classify(frames_batch, model, state_template, questions, oll
                 if top_choice is None or pv > top_prob:
                     top_prob = pv
                     top_choice = ch
+            # Extract confidence from Ollama response (if provided)
+            # Expected format: {"choice": "value", "probability": 0.9, "confidence": 0.85}
+            confidence = None
+            if isinstance(q_ans, dict):
+                # Try different possible keys for confidence
+                for conf_key in ["confidence", "certainty", "score", "model_confidence"]:
+                    if conf_key in q_ans:
+                        try:
+                            confidence = float(q_ans[conf_key])
+                            break
+                        except (TypeError, ValueError):
+                            pass
+            
             answer_rows.append({
                 "frame_index": frame_index,
                 "timestamp_seconds": ts,
@@ -370,6 +383,7 @@ def _validate_batch_classify(frames_batch, model, state_template, questions, oll
                 "criteria_json": json.dumps(q["criteria"], sort_keys=True, ensure_ascii=False),
                 "top_choice": top_choice,
                 "top_probability": top_prob,
+                "confidence": confidence,
                 "probabilities_json": json.dumps(probs, sort_keys=True, ensure_ascii=False),
                 "raw_response": json.dumps(q_ans, ensure_ascii=False) if isinstance(q_ans, dict) else None,
             })
@@ -930,24 +944,26 @@ def cmd_search(args):
     for q in q_list:
         parts = q.split('=')
         if len(parts) < 2:
-            print(f"Error: invalid --q format '{q}'. Expected 'question=choice:prob'.", file=sys.stderr)
+            print(f"Error: invalid --q format '{q}'. Expected 'question=choice:prob[:confidence]'.", file=sys.stderr)
             cache_db.close()
             sys.exit(1)
         qname = parts[0].strip()
-        rest = parts[1]  # e.g., "yes:0.8"
-        if ':' not in rest:
-            print(f"Error: invalid --q format '{q}'. Expected 'question=choice:prob'.", file=sys.stderr)
+        rest = parts[1]  # e.g., "yes:0.8" or "yes:0.8:0.7"
+        # Split by ':' - can have 2 or 3 parts
+        rest_parts = rest.split(':')
+        if len(rest_parts) < 2 or len(rest_parts) > 3:
+            print(f"Error: invalid --q format '{q}'. Expected 'question=choice:prob' or 'question=choice:prob:confidence'.", file=sys.stderr)
             cache_db.close()
             sys.exit(1)
-        choice_part, prob_part = rest.rsplit(':', 1)
-        choice = choice_part.strip().lower()
+        choice = rest_parts[0].strip().lower()
         try:
-            prob = float(prob_part.strip())
+            prob = float(rest_parts[1].strip())
+            confidence = float(rest_parts[2].strip()) if len(rest_parts) == 3 else None
         except ValueError:
-            print(f"Error: invalid probability '{prob_part}' in '--q'. Use numeric value.", file=sys.stderr)
+            print(f"Error: invalid probability/confidence in '{q}'. Use numeric values.", file=sys.stderr)
             cache_db.close()
             sys.exit(1)
-        conditions.append((qname, choice, prob))
+        conditions.append((qname, choice, prob, confidence))
 
     top_n = int(args.top) if args.top is not None else None
 
@@ -960,15 +976,20 @@ def cmd_search(args):
 
     # Build query with self-joins for multiple conditions
     # First condition uses fa (main frame_answers), subsequent use fa1, fa2, etc.
-    select_cols = "fa.run_id, fa.frame_index, fa.timestamp_seconds, fa.question_name, fa.top_choice, fa.top_probability, v.id AS video_id"
+    select_cols = "fa.run_id, fa.frame_index, fa.timestamp_seconds, fa.question_name, fa.top_choice, fa.top_probability, fa.confidence, v.id AS video_id"
     from_clause = "frame_answers fa JOIN analysis_runs ar1 ON fa.run_id = ar1.id"
     where_clauses = []
     params = []
 
-    for i, (qname, choice, prob) in enumerate(conditions):
+    for i, (qname, choice, prob, confidence) in enumerate(conditions):
         alias = f"fa{i}" if i > 0 else "fa"
-        where_clauses.append(f"{alias}.question_name = ? AND {alias}.top_choice = ? AND {alias}.top_probability >= ?")
-        params.extend([qname, choice, prob])
+        clause = f"{alias}.question_name = ? AND {alias}.top_choice = ? AND {alias}.top_probability >= ?"
+        params_clause = [qname, choice, prob]
+        if confidence is not None:
+            clause += f" AND {alias}.confidence >= ?"
+            params_clause.append(confidence)
+        where_clauses.append(clause)
+        params.extend(params_clause)
         if i > 0:
             from_clause += f" JOIN frame_answers {alias} ON fa.run_id = {alias}.run_id AND fa.frame_index = {alias}.frame_index"
 
@@ -1085,6 +1106,7 @@ def cmd_search(args):
                         "question_name": q_name,
                         "top_choice": r.get("top_choice"),
                         "top_probability": prob,
+                        "confidence": r.get("confidence"),
                         "start_timestamp": ts,
                         "end_timestamp": ts,
                         "frame_indices": [fid],
@@ -1938,7 +1960,7 @@ def main():
     # ---- search ----
     p_search = sub.add_parser("search", help="Search cached frame answers by question")
     p_search.add_argument("video", type=str, nargs="+", help="One or more video files/directories (e.g., video.mp4 video2/*.mp4)")
-    p_search.add_argument("--q", dest="q_values", action="append", default=[], help="Filter condition: 'question=choice:prob' (e.g., activity=yes:0.8). Multiple --q require ALL to match.")
+    p_search.add_argument("--q", dest="q_values", action="append", default=[], help="Filter condition: 'question=choice:prob[:confidence]' (e.g., activity=yes:0.8 or activity=yes:0.8:0.7). Multiple --q require ALL to match.")
     p_search.add_argument("--top", type=int, default=None, help="Limit to top N frames (or ranges) by probability; results are sorted by timestamp ascending.")
     p_search.add_argument(
         "--top-per-video", type=int, default=None,
