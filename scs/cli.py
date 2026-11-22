@@ -471,7 +471,7 @@ def cmd_analyze(args):
     cfg = load_config()
 
     def cfg_val(key, cli_arg):
-        return get_config_value(cfg, "classify", key, getattr(args, cli_arg, None))
+        return get_config_value(cfg, key, getattr(args, cli_arg, None))
 
     # Read config values (removed: top_k, global_k, json_output, decision_model_floor, merge_range, top_choice)
     decision_model_sample_rate = cfg_val("decision_model_sample_rate", "decision_model_sample_rate")

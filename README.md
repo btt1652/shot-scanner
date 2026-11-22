@@ -40,23 +40,42 @@ scs query "SELECT fa.run_id, fa.frame_index, fa.timestamp_seconds, fa.top_choice
 
 ## Configuration (`config.toml`)
 
-The `config.toml` file provides **default** configuration values. Command-line arguments **override** these defaults at runtime.
+The `config.toml` file uses a **flat** structure — no section headers. It provides default values; command-line arguments always override them at runtime.
 
 ```toml
+# Global defaults
 decision_model_sample_rate = 1
-ollama_host = "localhost"
-ollama_decision_model = "d1:3b"  # or "clef-flash:9b"
-activity = { walking="Person standing", running="Person sitting", sitting="Person laying down" }
+ollama_host = "192.168.1.190"
+ollama_frame_scale = 0.1
+ollama_decision_model = "d1:3b"
+ollama_timeout = 60
+ollama_state_template = "sample frame from a video"
+cache = "./.cache.db"
+still_frame_threshold = 0.95
+same_scene_threshold = 0.80
+recursive = false
+
+# Question definitions (one [[questions]] entry per question)
+[[questions]]
+name = "activity"
+instructions = "What activity is happening in this frame?"
+criteria = { walking = "Person walking", running = "Person running", sitting = "Person sitting" }
+
+[[questions]]
+name = "time_of_day"
+instructions = "What time of day is it?"
+criteria = { morning = "Morning light", afternoon = "Afternoon light", evening = "Evening light" }
 ```
 
 ### Override Precedence
 Command-line arguments take precedence over `config.toml`:
-- `--model MODEL` → overrides `ollama_decision_model` in config
-- `--q "question=choice:prob"` → adds filter criteria (not in config)
-- `--run-id RUN_ID` → targets specific analysis run (not in config)
-- `--cache PATH` → overrides default `.cache.db` location
+- `--ollama-model MODEL` → overrides `ollama_decision_model` used for new analysis runs (analyze only)
+- `--model MODEL` → filters results by model name when querying cache (search only)
+- `--q "question=choice:prob"` → adds filter criteria (search only)
+- `--run-id RUN_ID` → targets a specific analysis run ID (search only)
+- `--cache PATH` → overrides the default `.cache.db` location
 
-**Example**: If `config.toml` has `ollama_decision_model = "d1:3b"` but you run `scs search video.mp4 --model clef-flash:9b`, the search uses `clef-flash:9b`.
+**Example**: Running `scs analyze video.mp4 --ollama-model clef-flash:9b` uses `clef-flash:9b` for new frames; running `scs search video.mp4 --model clef-flash:9b` filters existing cached answers to that model.
 
 ## Working Examples
 
