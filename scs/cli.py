@@ -17,6 +17,7 @@ import sys
 import tempfile
 import urllib.error
 import urllib.request
+from pathlib import Path
 import cv2
 import numpy as np
 from PIL import Image
@@ -1498,6 +1499,253 @@ def cmd_cache(args):
     sys.exit(1)
 
 
+def _resolve_paths(paths: list[Path]) -> set[Path]:
+    """Normalize a list of paths to a set of absolute, resolved Path objects."""
+    return {Path(p).resolve() for p in paths}
+
+
+def _image_to_b64(image_path: Path, frame_scale: float) -> str:
+    """Read an image file, scale it, and return a base-64 encoded JPEG string."""
+    try:
+        img = Image.open(str(image_path)).convert("RGB")
+        scale = frame_scale if frame_scale else 0.1
+        new_w = max(1, int(img.width * scale))
+        new_h = max(1, int(img.height * scale))
+        img = img.resize((new_w, new_h), Image.LANCZOS)
+        buffered = io.BytesIO()
+        img.save(buffered, format="JPEG", quality=80)
+        return base64.b64encode(buffered.getvalue()).decode("utf-8")
+    except Exception as e:
+        print(f"Error reading image {image_path}: {e}", file=sys.stderr)
+        sys.exit(1)
+
+
+def _get_question_def(cfg: dict, question_name: str):
+    """Return the question definition dict for the given name, or None."""
+    for q in cfg.get("questions", []):
+        if q.get("name") == question_name:
+            return q
+    return None
+
+
+def _classify_image_with_ollama(image_path: Path, question_name: str, cfg: dict) -> float:
+    """
+    Send a single image to Ollama and return the top probability for the given question.
+    """
+    question_def = _get_question_def(cfg, question_name)
+    if question_def is None:
+        print(f"Error: question '{question_name}' not found in config.", file=sys.stderr)
+        sys.exit(1)
+
+    # build questions payload (same as in cmd_analyze)
+    questions_payload = {}
+    for q in cfg.get("questions", []):
+        questions_payload[q["name"]] = {
+            "type": "choice",
+            "instructions": q.get("instructions", ""),
+            "criteria": q.get("criteria", {}),
+        }
+
+    # determine model and state
+    model = cfg.get("ollama_decision_model", "typesafe/jev-1.14")
+    state = cfg.get("ollama_state_template", "")
+    if not state:
+        state = ""
+
+    # resolve Ollama endpoint
+    endpoint = resolve_ollama_endpoint(cfg.get("ollama_host", "localhost"))
+
+    # encode image
+    b64 = _image_to_b64(image_path, cfg.get("ollama_frame_scale", 0.1))
+
+    # build payload
+    payload = {
+        "model": model,
+        "state": state,
+        "images": [b64],
+        "questions": questions_payload,
+    }
+
+    # send request
+    try:
+        req = urllib.request.Request(
+            endpoint,
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(req, timeout=cfg.get("ollama_timeout", 60)) as response:
+            res_json = json.loads(response.read().decode("utf-8"))
+    except Exception as e:
+        print(f"Error calling Ollama: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    # extract top probability for the requested question
+    answers = res_json.get("answers", {})
+    q_ans = answers.get(question_name, {})
+    probs = q_ans.get("probabilities", {}) if isinstance(q_ans, dict) else {}
+    if not isinstance(probs, dict):
+        probs = {}
+    top_prob = 0.0
+    for ch, p in probs.items():
+        try:
+            pv = float(p)
+        except (TypeError, ValueError):
+            pv = 0.0
+        if pv > top_prob:
+            top_prob = pv
+    return top_prob
+
+
+def cmd_isearch(args):
+    """
+    Image-search command.
+    * args.image  – Path to reference image
+    * args.question – required question name
+    * args.video – optional list of video paths to filter results
+    * all other args are the same as in cmd_search
+    """
+    import cv2
+    import os
+    from collections import defaultdict
+
+    cfg = load_config()
+
+    # Resolve video set if provided
+    video_set = None
+    if args.video:
+        video_set = _resolve_paths(args.video)
+
+    # Classify the reference image to get a probability threshold
+    threshold = _classify_image_with_ollama(args.image, args.question, cfg)
+
+    # Open cache DB
+    cache_db = CacheDB(args.cache or cfg.get("cache", "./.cache.db"))
+
+    # Build SQL for image search (similar to cmd_search but simpler)
+    select_cols = "fa.run_id, fa.frame_index, fa.timestamp_seconds, fa.question_name, fa.top_choice, fa.top_probability"
+    from_clause = "frame_answers fa JOIN analysis_runs ar1 ON fa.run_id = ar1.id"
+    where_clauses = ["fa.question_name = ?", "fa.top_probability >= ?"]
+    params = [args.question, threshold]
+
+    # video filter (new --video flag)
+    if video_set:
+        # Build placeholder list
+        video_placeholders = ','.join(['?'] * len(video_set))
+        from_clause += " JOIN videos v ON ar1.video_id = v.id"
+        where_clauses.append(f"v.video_path IN ({video_placeholders})")
+        params.extend(str(p) for p in video_set)
+
+    # model filter
+    if getattr(args, "model", None):
+        cur = cache_db.conn.execute(
+            "SELECT DISTINCT id FROM analysis_runs WHERE model = ?", (args.model,)
+        )
+        model_run_ids = [r[0] for r in cur.fetchall()]
+        if not model_run_ids:
+            print(f"Error: no analysis runs found for model '{args.model}'", file=sys.stderr)
+            cache_db.close()
+            sys.exit(1)
+        where_clauses.append(f"fa.run_id IN ({','.join(['?'] * len(model_run_ids))})")
+        params.extend(model_run_ids)
+
+    # run_id filter
+    if getattr(args, "run_id", None) is not None:
+        where_clauses.append("fa.run_id = ?")
+        params.append(args.run_id)
+
+    # top / top-per-video logic (reuse simplified)
+    top_n = args.top
+    top_per_video = args.top_per_video
+    merge_threshold = args.merge_result_threshold
+
+    # If top-per-video given, use a window function (similar to search)
+    if top_per_video is not None:
+        query_sql = f"""
+            WITH ranked AS (
+                SELECT fa.run_id, fa.frame_index, fa.timestamp_seconds, fa.question_name, fa.top_choice, fa.top_probability, v.id AS video_id
+                FROM {from_clause}
+                WHERE {' AND '.join(where_clauses)}
+                ROW_NUMBER() OVER (PARTITION BY v.id ORDER BY fa.top_probability DESC) AS rn
+            )
+            SELECT run_id, frame_index, timestamp_seconds, question_name, top_choice, top_probability
+            FROM ranked
+            WHERE rn <= ?
+            ORDER BY top_probability DESC
+        """
+        params.append(top_per_video)
+        rows = cache_db.execute_sql(query_sql, params)
+    else:
+        limit_expr = f"LIMIT {top_n}" if top_n is not None else ""
+        query_sql = f"""
+            SELECT DISTINCT {select_cols}
+            FROM {from_clause}
+            WHERE {' AND '.join(where_clauses)}
+            ORDER BY fa.top_probability DESC
+            {limit_expr}
+        """
+        rows = cache_db.execute_sql(query_sql, params)
+
+    # sort by timestamp ascending
+    def _result_timestamp(r):
+        ts = r.get("start_timestamp") if r.get("start_timestamp") is not None else r.get("timestamp_seconds")
+        return ts if ts is not None else 0
+
+    rows = sorted(rows, key=lambda r: (_result_timestamp(r), r.get("run_id") or 0))
+
+    # optional save-frame
+    if args.save_frame:
+        from collections import defaultdict
+        run_to_path = {}
+        for r in cache_db.execute_sql("SELECT ar.id AS run_id, v.video_path FROM analysis_runs ar JOIN videos v ON ar.video_id = v.id"):
+            run_to_path[r["run_id"]] = r["video_path"]
+        by_video = defaultdict(list)
+        for row in rows:
+            run_id = row.get("run_id")
+            if run_id and run_id in run_to_path:
+                by_video[run_to_path[run_id]].append(row)
+        os.makedirs(args.save_frame, exist_ok=True)
+        saved = 0
+        fmt = "jpg"
+        quality = 90
+        for video_path, frames in by_video.items():
+            if not os.path.exists(video_path):
+                print(f"Warning: video not found: {video_path}", file=sys.stderr)
+                continue
+            cap = cv2.VideoCapture(video_path)
+            if not cap.isOpened():
+                print(f"Warning: cannot open video: {video_path}", file=sys.stderr)
+                continue
+            frames_sorted = sorted(frames, key=lambda r: r.get("frame_index", 0))
+            for frame_info in frames_sorted:
+                fi = frame_info.get("frame_index", 0)
+                cap.set(cv2.CAP_PROP_POS_FRAMES, fi)
+                ret, frame = cap.read()
+                if not ret:
+                    continue
+                video_name = os.path.splitext(os.path.basename(video_path))[0]
+                q_name = frame_info.get("question_name", "frame")
+                choice = frame_info.get("top_choice", "unknown")
+                ts = frame_info.get("timestamp_seconds") or frame_info.get("start_timestamp") or 0
+                fname = f"{video_name}_f{fi:06d}_{ts:.1f}s_{q_name}_{choice}.{fmt}"
+                out_path = os.path.join(args.save_frame, fname)
+                if fmt == "jpg":
+                    cv2.imwrite(out_path, frame, [int(cv2.IMWRITE_JPEG_QUALITY), quality])
+                else:
+                    cv2.imwrite(out_path, frame)
+                saved += 1
+            cap.release()
+        print(f"Extracted {saved} frame(s) to {args.save_frame}", file=sys.stderr)
+
+    # print table
+    if rows:
+        _print_table(rows)
+    else:
+        print("(no rows)")
+
+    cache_db.close()
+    sys.exit(0)
+
+
 def main():
     parser = argparse.ArgumentParser(
         prog="scs",
@@ -1552,6 +1800,62 @@ def main():
     p_cache.add_argument("--days", type=int, default=30, help="Days threshold for prune (default: 30)")
     p_cache.add_argument("--yes", action="store_true", help="Confirm clear")
     p_cache.set_defaults(func=cmd_cache)
+
+    p_isearch = sub.add_parser(
+        "isearch",
+        help="Search cached frame answers by reference image (single image)."
+    )
+    p_isearch.add_argument(
+        "image",
+        type=Path,
+        help="Path to reference image (jpg, png, webp, bmp …)."
+    )
+    p_isearch.add_argument(
+        "--question",
+        "-Q",
+        type=str,
+        required=True,
+        help="Question name to score the reference image against (required)."
+    )
+    p_isearch.add_argument(
+        "--video",
+        nargs="+",
+        type=Path,
+        default=None,
+        help="One or more video paths to filter results by (space-separated)."
+    )
+    p_isearch.add_argument(
+        "--top", type=int, default=None, help="Limit to top N frames by probability."
+    )
+    p_isearch.add_argument(
+        "--top-per-video", type=int, default=None,
+        help="Limit number of top results per video by probability."
+    )
+    p_isearch.add_argument(
+        "--merge-result-threshold", type=float, default=None,
+        help="Timestamp difference threshold (seconds) to merge adjacent frames with same score."
+    )
+    p_isearch.add_argument(
+        "--save-frame", type=str, default=None,
+        help="Directory to save extracted frames (JPG only)."
+    )
+    p_isearch.add_argument(
+        "--cache", type=str, default=None,
+        help="Path to SQLite cache file (default: ./.cache.db)"
+    )
+    p_isearch.add_argument(
+        "--model", type=str, default=None,
+        help="Filter results by Ollama model name (e.g., clef-flash:9b, d1:3b)"
+    )
+    p_isearch.add_argument(
+        "--run-id", type=int, default=None,
+        help="Filter results to a specific analysis run ID"
+    )
+    p_isearch.add_argument(
+        "--stitch", nargs="?", const=True, default=None, metavar="PATH",
+        help="Stitch matched frames into a single video using ffmpeg."
+    )
+    p_isearch.set_defaults(func=cmd_isearch)
 
     args = parser.parse_args()
 
