@@ -34,13 +34,13 @@ CREATE TABLE IF NOT EXISTS videos (
 CREATE TABLE IF NOT EXISTS analysis_runs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     video_id INTEGER NOT NULL REFERENCES videos(id) ON DELETE CASCADE,
-    content_hash TEXT NOT NULL,
     params_hash TEXT NOT NULL,
     model TEXT NOT NULL DEFAULT '',
+    questions_json TEXT NOT NULL DEFAULT '[]',
     cache_status TEXT NOT NULL DEFAULT 'empty', -- empty, partial, complete
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now')),
-    UNIQUE(video_id, content_hash, params_hash)
+    UNIQUE(video_id, params_hash)
 );
 
 CREATE INDEX IF NOT EXISTS idx_analysis_runs_video ON analysis_runs(video_id);
@@ -73,7 +73,7 @@ CREATE TABLE IF NOT EXISTS cache_stats (
 );
 """
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 5
 
 # Keys for cache_stats
 STAT_TOTAL_VIDEOS = "total_videos"
@@ -119,6 +119,9 @@ class CacheDB:
         ar_col_names = [row[1] for row in ar_cols.fetchall()]
         if "model" not in ar_col_names:
             self.conn.execute("ALTER TABLE analysis_runs ADD COLUMN model TEXT NOT NULL DEFAULT ''")
+        # Ensure analysis_runs has questions_json column (migration for schema v5)
+        if "questions_json" not in ar_col_names:
+            self.conn.execute("ALTER TABLE analysis_runs ADD COLUMN questions_json TEXT NOT NULL DEFAULT '[]'")
 
     def set_stat(self, key: str, value: str):
         """Set a cache statistics entry."""
@@ -212,32 +215,33 @@ class CacheDB:
     def upsert_run(
         self,
         video_id: int,
-        content_hash: str,
         params_hash: str,
         model: str = '',
+        questions_json: str = '[]',
     ) -> int:
         """Insert or update an analysis run. Returns run_id."""
         with self.conn:
             self.conn.execute(
-                """INSERT INTO analysis_runs (video_id, content_hash, params_hash, model, updated_at)
+                """INSERT INTO analysis_runs (video_id, params_hash, model, questions_json, updated_at)
                    VALUES (?, ?, ?, ?, datetime('now'))
-                   ON CONFLICT(video_id, content_hash, params_hash) DO UPDATE SET
+                   ON CONFLICT(video_id, params_hash) DO UPDATE SET
                        cache_status=excluded.cache_status,
                        model=excluded.model,
+                       questions_json=excluded.questions_json,
                        updated_at=datetime('now')""",
-                (video_id, content_hash, params_hash, model),
+                (video_id, params_hash, model, questions_json),
             )
         cur = self.conn.execute(
-            "SELECT id FROM analysis_runs WHERE video_id = ? AND content_hash = ? AND params_hash = ?",
-            (video_id, content_hash, params_hash),
+            "SELECT id FROM analysis_runs WHERE video_id = ? AND params_hash = ?",
+            (video_id, params_hash),
         )
         return cur.fetchone()["id"]
 
-    def get_run(self, video_id: int, content_hash: str, params_hash: str) -> Optional[Dict]:
-        """Get analysis run by video and hash combination."""
+    def get_run(self, video_id: int, params_hash: str) -> Optional[Dict]:
+        """Get analysis run by video and params hash."""
         cur = self.conn.execute(
-            "SELECT * FROM analysis_runs WHERE video_id = ? AND content_hash = ? AND params_hash = ?",
-            (video_id, content_hash, params_hash),
+            "SELECT * FROM analysis_runs WHERE video_id = ? AND params_hash = ?",
+            (video_id, params_hash),
         )
         row = cur.fetchone()
         return dict(row) if row else None

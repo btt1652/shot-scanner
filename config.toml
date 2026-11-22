@@ -5,20 +5,55 @@
 decision_model_sample_rate = 1
 ollama_host = "192.168.1.190"
 ollama_frame_scale = 0.1
-ollama_decision_model = "d1:3b" # or "clef-flash:9b"
+ollama_decision_model = "clef-flash:9b"
 ollama_timeout = 60
-ollama_state_template = "sample frame from a video"
+ollama_state_template = "sample frame from an adult video"
 cache = "./.cache.db"
 still_frame_threshold = 0.95
 same_scene_threshold = 0.80
 recursive = false
 
 [[questions]]
-name = "activity"
-instructions = "What activity is happening in this frame?"
-criteria = { walking = "Person walking", running = "Person running", sitting = "Person sitting" }
+name = "sex_position"
+instructions = "What sexual position is depicted in this frame? Choose the best match."
+criteria = { "missionary" = "Missionary position (man on top, face-to-face)", "doggy_style" = "Doggy style / rear entry", "cowgirl" = "Cowgirl / woman on top facing man", "reverse_cowgirl" = "Reverse cowgirl / woman on top facing away", "spooning" = "Spooning / side-by-side rear entry", "standing" = "Standing position", "sixty_nine" = "69 / mutual oral", "blowjob" = "Fellatio / blowjob (primary focus)", "cunnilingus" = "Cunnilingus / oral on female", "handjob" = "Handjob / manual stimulation", "fingering" = "Fingering / manual stimulation of female", "anal" = "Anal penetration", "double_penetration" = "Double penetration (DP)", "tribbing" = "Tribbing / scissoring", "other" = "Other position not listed", "none" = "No sexual position visible" }
 
 [[questions]]
-name = "time_of_day"
-instructions = "What time of day is it?"
-criteria = { morning = "Morning light", afternoon = "Afternoon light", evening = "Evening light" }
+name = "scene_type"
+instructions = "How many people are actively engaged and what is the group dynamic?"
+criteria = { "solo" = "Solo / masturbation (one person)", "couple" = "Couple / two people", "threesome" = "Threesome (three people)", "foursome" = "Foursome (four people)", "gangbang" = "Gangbang (one person with multiple partners sequentially/simultaneously)", "orgy" = "Orgy (multiple people, 5+, group sex)", "not_applicable" = "No sexual activity / non-sexual scene" }
+
+[[questions]]
+name = "nudity_level"
+instructions = "What level of nudity is visible in this frame?"
+criteria = { "fully_clothed" = "Fully clothed, no skin exposure beyond face/hands", "partially_clothed" = "Partially clothed (lingerie, underwear, partial undress)", "topless" = "Topless (breasts exposed, bottom covered)", "bottomless" = "Bottomless (genitals/buttocks exposed, top covered)", "fully_nude" = "Fully nude (full body exposed)", "implied_nude" = "Implied nude (strategically covered/framed)" }
+
+[[questions]]
+name = "clothing_detail"
+instructions = "What clothing/attire is visible, if any?"
+criteria = { "none" = "No clothing visible", "lingerie" = "Lingerie / bra & panties / stockings", "underwear" = "Basic underwear only", "dress_skirt" = "Dress or skirt (partially on)", "shirt_top" = "Shirt / top only", "pants_shorts" = "Pants / shorts only", "cosplay_costume" = "Cosplay / costume / roleplay outfit", "uniform" = "Uniform (nurse, maid, police, etc.)", "shoes_only" = "Only shoes/heels worn", "accessories_only" = "Jewelry, collars, cuffs, glasses only" }
+
+[[questions]]
+name = "camera_framing"
+instructions = "What body parts are visible in the frame? (Framing/shot type)"
+criteria = { "close_up_face" = "Close-up: face only (expression, oral)", "close_up_genitals" = "Close-up: genitals / penetration detail", "close_up_body_part" = "Close-up: specific body part (breasts, buttocks, etc.)", "medium_shot" = "Medium shot: torso up (head to waist)", "medium_wide" = "Medium-wide: upper body + some context", "full_body" = "Full body visible (head to toe)", "wide_shot" = "Wide shot: full body + room/environment", "pov" = "POV (first-person perspective)", "over_shoulder" = "Over-the-shoulder angle" }
+
+[[questions]]
+name = "environment"
+instructions = "What is the setting/location of the scene?"
+criteria = { "bedroom" = "Bedroom (bed, nightstands, residential)", "living_room" = "Living room / sofa / couch setting", "kitchen" = "Kitchen / dining area", "bathroom" = "Bathroom / shower / tub", "outdoor" = "Outdoor (yard, beach, pool, public, nature)", "hotel" = "Hotel / motel room", "office" = "Office / workplace setting", "dungeon" = "Dungeon / BDSM room / play space", "vehicle" = "Car / van / vehicle interior", "studio" = "Professional studio (backdrop, lighting rig visible)", "other_indoor" = "Other indoor location" }
+
+[[questions]]
+name = "lighting_quality"
+instructions = "What is the lighting style/quality?"
+criteria = { "natural_daylight" = "Natural daylight / window light", "warm_indoor" = "Warm indoor / lamps / practical lighting", "professional_studio" = "Professional studio lighting (key/fill/rim)", "neon_colorful" = "Neon / colorful / RGB lighting", "dim_moody" = "Dim / moody / low-key lighting", "harsh_flash" = "Harsh direct flash / on-camera light", "candle_firelight" = "Candlelight / firelight / warm glow" }
+
+[[questions]]
+name = "act_category"
+instructions = "What is the primary sexual act/category in this frame?"
+criteria = { "vaginal_sex" = "Vaginal penetration (PIV)", "anal_sex" = "Anal penetration", "oral_on_male" = "Oral on male (blowjob, deepthroat)", "oral_on_female" = "Oral on female (cunnilingus, rimming)", "manual_stimulation" = "Handjob / fingering / manual", "toy_play" = "Sex toy usage (vibrator, dildo, butt plug, etc.)", "bdsm_kink" = "BDSM / kink (bondage, impact, domination, submission)", "roleplay" = "Roleplay / scenario (step-family, uniform, etc.)", "squirting" = "Squirting / female ejaculation visible", "creampie" = "Creampie / internal cumshot visible", "facial" = "Facial / cum on face", "cum_on_body" = "Cum on body (tits, ass, stomach, etc.)", "swallowing" = "Swallowing cum", "footjob" = "Footjob / foot fetish", "titjob" = "Titjob / mammary intercourse", "non_sexual" = "Non-sexual (dialogue, setup, clothed, transition)" }
+
+[[questions]]
+name = "camera_angle"
+instructions = "Camera perspective relative to the action."
+criteria = { "front" = "Front view (facing performers)", "side" = "Side profile view", "back" = "Rear view (from behind)", "top_down" = "Top-down / bird's eye", "bottom_up" = "Low angle / worm's eye", "pov_male" = "POV from male perspective", "pov_female" = "POV from female perspective", "pov_third" = "POV third person (over shoulder)", "dutch_angle" = "Dutch angle / tilted", "drone_aerial" = "Drone / aerial (outdoor)" }

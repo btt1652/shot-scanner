@@ -30,6 +30,16 @@ DEFAULT_VIDEO_EXTENSIONS = [".mp4", ".avi", ".mov", ".mkv", ".webm", ".flv", ".w
 # Ollama supports at most 4 images per multi-image request, so scene batches are fixed at 4.
 MAX_SCENE_BATCH_SIZE = 4
 
+_COLORS = {
+    "reset": "\033[0m",
+    "red": "\033[31m",
+    "green": "\033[32m",
+    "yellow": "\033[33m",
+    "blue": "\033[34m",
+    "cyan": "\033[36m",
+    "gray": "\033[90m",
+    "bold": "\033[1m",
+}
 
 def _cache_params(sample_rate, frame_scale, state, questions_json, model, same_scene_threshold=None, still_frame_threshold=None):
     """Build the parameter dict used for the cache key."""
@@ -69,7 +79,7 @@ def _try_load_cache(cache, video_path, sample_rate, frame_scale, state, question
             print(f"Cache miss: video {video_path} not in cache", file=sys.stderr)
             return None, None
 
-        run = cache_db.get_run(video["id"], content_hash, params_hash)
+        run = cache_db.get_run(video["id"], params_hash)
         if run is None:
             print(f"Cache miss: no run for video {video_path} with content={content_hash} params={params_hash}", file=sys.stderr)
             return None, None
@@ -128,9 +138,9 @@ def _save_cache(cache, video_path, sample_rate, frame_scale, state, questions_js
         # Upsert analysis run for this param set
         run_id = cache_db.upsert_run(
             video_id=video_id,
-            content_hash=content_hash,
             params_hash=params_hash,
             model=model,
+            questions_json=questions_json,
         )
 
         cache_db.upsert_frame_answers(run_id, all_results)
@@ -208,7 +218,7 @@ def _check_and_confirm_overwrite(cache, video_paths, questions, params_hash):
     """
     cache_db = CacheDB(cache)
     question_names = [q["name"] for q in questions]
-    overlapping = []
+    overlapping = []  # (vp, qname, count, status, run_id)
 
     for vp in video_paths:
         video = cache_db.get_video(vp)
@@ -220,6 +230,11 @@ def _check_and_confirm_overwrite(cache, video_paths, questions, params_hash):
             # Only consider runs with same params_hash (same model+config)
             if run.get("params_hash") != params_hash:
                 continue
+            status = run.get("cache_status", "empty")
+            # If status is 'partial', we should RESUME, not prompt for overwrite.
+            # Only prompt if status is 'complete' (or 'empty' but has answers).
+            if status == "partial":
+                continue
             # Check if any answer matches our question names
             for qname in question_names:
                 cur = cache_db.conn.execute(
@@ -228,8 +243,7 @@ def _check_and_confirm_overwrite(cache, video_paths, questions, params_hash):
                 )
                 count = cur.fetchone()[0]
                 if count > 0:
-                    overlapping.append((vp, qname, count, run.get("cache_status", "?")))
-                    break  # one per run is enough
+                    overlapping.append((vp, qname, count, status, run["id"]))
 
     cache_db.close()
 
@@ -237,7 +251,7 @@ def _check_and_confirm_overwrite(cache, video_paths, questions, params_hash):
         return
 
     print("Warning: Found existing cached answers that overlap with new analysis:", file=sys.stderr)
-    for vp, qname, count, status in overlapping[:10]:
+    for vp, qname, count, status, _ in overlapping[:10]:
         print(f"  {vp}: question='{qname}' has {count} answers (status={status})", file=sys.stderr)
 
     # Ask user for confirmation
@@ -249,16 +263,11 @@ def _check_and_confirm_overwrite(cache, video_paths, questions, params_hash):
         if ans in ("y", "yes"):
             # Delete overlapping answers
             cache_db = CacheDB(cache)
-            for vp, qname, count, status in overlapping:
-                video = cache_db.get_video(vp)
-                if video is None:
-                    continue
-                runs = cache_db.list_runs(vp)
-                for run in runs:
-                    cache_db.conn.execute(
-                        "DELETE FROM frame_answers WHERE run_id = ? AND question_name = ?",
-                        (run["id"], qname)
-                    )
+            for vp, qname, count, status, run_id in overlapping:
+                cache_db.conn.execute(
+                    "DELETE FROM frame_answers WHERE run_id = ? AND question_name = ?",
+                    (run_id, qname)
+                )
             cache_db.conn.commit()
             cache_db.close()
             print("Existing overlapping answers deleted. Proceeding with new analysis.", file=sys.stderr)
@@ -277,7 +286,9 @@ def _questions_json(questions):
 
 def _sql_with_params(sql: str, params: list) -> str:
     """Replace ? placeholders with actual values for display purposes."""
-    result = sql
+    # Collapse whitespace: newlines/tabs -> single space
+    compact = ' '.join(sql.split())
+    result = compact
     for param in params:
         if param is None:
             result = result.replace("?", "NULL", 1)
@@ -301,7 +312,7 @@ def _validate_batch_classify(frames_batch, model, state_template, questions, oll
         return [], 0
     batch_id = (batch_id_counter or 0) + 1
     ts_list = ", ".join(f"{int(ts)//3600:02d}:{int(ts)%3600//60:02d}:{int(ts)%60:02d}" for _, ts, _, _ in frames_batch)
-    print(f"send request [{ts_list}]", file=sys.stderr)
+    print(f"{_COLORS.get("yellow")}send request [{ts_list}]{_COLORS.get("reset")}", file=sys.stderr)
 
     images = [b64 for _, _, b64, _ in frames_batch]
     questions_payload = {}
@@ -362,7 +373,7 @@ def _validate_batch_classify(frames_batch, model, state_template, questions, oll
                 "probabilities_json": json.dumps(probs, sort_keys=True, ensure_ascii=False),
                 "raw_response": json.dumps(q_ans, ensure_ascii=False) if isinstance(q_ans, dict) else None,
             })
-    print(f"response [{ts_list}] batch_id={batch_id} questions={[q['name'] for q in questions]}", file=sys.stderr)
+    print(f"{_COLORS.get("yellow")}response [{ts_list}] batch_id={batch_id} questions={[q['name'] for q in questions]}{_COLORS.get("reset")}", file=sys.stderr)
     return answer_rows, batch_id
 def _resolve_video_paths(inputs, recursive=False, extensions=None):
     """Resolve a list of inputs (files, directories, glob patterns) into concrete video file paths."""
@@ -601,6 +612,12 @@ def cmd_analyze(args):
 
     # Process each video: check cache first, then classify if miss
     for vp in video_paths:
+        # Per-video counters (reset for each video)
+        total_extracted = 0
+        total_validated = 0
+        batch_id_counter = 0
+        total_sent = 0
+        
         frame_index = 0
         if cache:
             cache_results, cache_data = _try_load_cache(
@@ -659,6 +676,8 @@ def cmd_analyze(args):
         if frame_index > 0:
             cap.set(cv2.CAP_PROP_POS_FRAMES, frame_index)
 
+        total_skipped = 0  # still frames skipped
+
         while True:
             ret, frame_bgr = cap.read()
             if not ret:
@@ -683,6 +702,7 @@ def cmd_analyze(args):
                         skip_frame = True
                         print(f"sim check {ts_cur_formatted} <-> {ts_prev_formatted} sim={similarity:.2f} (still frame, skipped)", file=sys.stderr)
                         total_extracted += 1
+                        total_skipped += 1
                     elif similarity >= same_scene_threshold and len(batch) < MAX_SCENE_BATCH_SIZE:
                         print(f"sim check {ts_cur_formatted} <-> {ts_prev_formatted} sim={similarity:.2f} (same scene)", file=sys.stderr)
                         batch.append((frame_index, ts, b64, vp))
@@ -710,7 +730,7 @@ def cmd_analyze(args):
                     prev_ts = ts
 
                 if total_extracted % 10 == 0:
-                    print(f"{vp} (extracted={total_extracted}/{total_sampled}, validated={total_validated})", file=sys.stderr)
+                    print(f"{_COLORS.get("green")}{vp} (sampled={total_extracted}/{total_sampled}, skipped={total_skipped}, validated={total_validated}){_COLORS.get("reset")}", file=sys.stderr)
 
                 # Periodic checkpoint save every 100 extracted frames
                 if total_extracted % 100 == 0 and save_cache:
@@ -862,6 +882,7 @@ def cmd_query(args):
                 else:
                     cv2.imwrite(out_path, frame)
                 saved += 1
+                print(f"Saved frame: {out_path}", file=sys.stderr)
 
             cap.release()
 
@@ -939,7 +960,7 @@ def cmd_search(args):
 
     # Build query with self-joins for multiple conditions
     # First condition uses fa (main frame_answers), subsequent use fa1, fa2, etc.
-    select_cols = "fa.run_id, fa.frame_index, fa.timestamp_seconds, fa.question_name, fa.top_choice, fa.top_probability"
+    select_cols = "fa.run_id, fa.frame_index, fa.timestamp_seconds, fa.question_name, fa.top_choice, fa.top_probability, v.id AS video_id"
     from_clause = "frame_answers fa JOIN analysis_runs ar1 ON fa.run_id = ar1.id"
     where_clauses = []
     params = []
@@ -954,11 +975,54 @@ def cmd_search(args):
     # Add video path filter via analysis_runs → videos
     from_clause += " LEFT JOIN videos v ON ar1.video_id = v.id"
 
-    # Limit to specified video(s)
+    # Limit to specified video(s) - support hash-based lookup
+    # For each input, try exact path match first, then fall back to content_hash match
+    # If hash matches but path differs, update the video_path in DB to the new path
     video_paths = args.video if isinstance(args.video, list) else [args.video]
-    video_placeholders = ','.join(['?'] * len(video_paths))
-    where_clauses.append(f"v.video_path IN ({video_placeholders})")
-    params.extend(video_paths)
+    matched_video_ids = []
+    for vp in video_paths:
+        # Try exact path match first
+        cur = cache_db.conn.execute(
+            "SELECT id, content_hash FROM videos WHERE video_path = ?", (vp,)
+        )
+        row = cur.fetchone()
+        if row:
+            matched_video_ids.append(row["id"])
+            print(f"Matched by path: '{vp}' -> video_id={row['id']}", file=sys.stderr)
+            continue
+        # Fallback: compute hash of input and match by content_hash
+        try:
+            input_hash = _content_hash(vp)
+            cur = cache_db.conn.execute(
+                "SELECT id, video_path FROM videos WHERE content_hash = ?", (input_hash,)
+            )
+            row = cur.fetchone()
+            if row:
+                # Hash matches but path differs - update to new path
+                if row["video_path"] != vp:
+                    print(f"Hash match: updating video path '{row['video_path']}' -> '{vp}'", file=sys.stderr)
+                    cache_db.conn.execute(
+                        "UPDATE videos SET video_path = ?, updated_at = datetime('now') WHERE id = ?",
+                        (vp, row["id"])
+                    )
+                    cache_db.conn.commit()
+                matched_video_ids.append(row["id"])
+                print(f"Matched by hash: '{vp}' -> video_id={row['id']} (cached path: '{row['video_path']}')", file=sys.stderr)
+                continue
+        except (FileNotFoundError, IOError):
+            pass
+        # No match found
+        print(f"Warning: no cached video matches '{vp}'", file=sys.stderr)
+
+    print("", file=sys.stderr)  # blank line between cache check and SQL
+
+    if matched_video_ids:
+        video_id_placeholders = ','.join(['?'] * len(matched_video_ids))
+        where_clauses.append(f"v.id IN ({video_id_placeholders})")
+        params.extend(matched_video_ids)
+    else:
+        # No valid videos - add impossible condition to return empty
+        where_clauses.append("1=0")
 
     # Filter by model name if specified
     if getattr(args, "model", None):
@@ -1024,6 +1088,7 @@ def cmd_search(args):
                         "start_timestamp": ts,
                         "end_timestamp": ts,
                         "frame_indices": [fid],
+                        "video_id": r.get("video_id"),
                     }
             if current is not None:
                 ranges.append(current)
@@ -1039,7 +1104,7 @@ def cmd_search(args):
             WHERE {' AND '.join(where_clauses)}
             ORDER BY fa.top_probability DESC
         """
-        print(f"{_sql_with_params(query_sql, params)}", file=sys.stderr)
+        print(f"{_sql_with_params(query_sql, params)}\n", file=sys.stderr)
         rows = cache_db.execute_sql(query_sql, params)
 
         results = _merge_frame_rows_into_ranges(rows, merge_threshold)
@@ -1081,7 +1146,7 @@ def cmd_search(args):
                 ORDER BY top_probability DESC
             """
             params.append(top_per_video)
-            print(f"{_sql_with_params(query_sql, params)}", file=sys.stderr)
+            print(f"{_sql_with_params(query_sql, params)}\n", file=sys.stderr)
             rows = cache_db.execute_sql(query_sql, params)
         else:
             limit_expr = f"LIMIT {top_n}" if top_n is not None else ""
@@ -1093,7 +1158,7 @@ def cmd_search(args):
                 ORDER BY fa.top_probability DESC
                 {limit_expr}
             """
-            print(f"{_sql_with_params(query_sql, params)}", file=sys.stderr)
+            print(f"{_sql_with_params(query_sql, params)}\n", file=sys.stderr)
             rows = cache_db.execute_sql(query_sql, params)
 
     # Sort final search results by timestamp ascending by default.
@@ -1166,6 +1231,7 @@ def cmd_search(args):
 
                 cv2.imwrite(out_path, frame, [int(cv2.IMWRITE_JPEG_QUALITY), quality])
                 saved += 1
+                print(f"Saved frame: {out_path}", file=sys.stderr)
 
             cap.release()
 
@@ -1322,17 +1388,27 @@ def cmd_cache(args):
             video = cache_db.get_video(video_filter_path)
             if video:
                 video_filter_id = video["id"]
+                print(f"Matched by path: '{video_filter_path}' -> video_id={video['id']}", file=sys.stderr)
             else:
                 # Try content hash match - compute hash of the provided path efficiently
                 try:
                     provided_hash = _content_hash(video_filter_path)
                     cur = cache_db.conn.execute(
-                        "SELECT id FROM videos WHERE content_hash = ?",
+                        "SELECT id, video_path FROM videos WHERE content_hash = ?",
                         (provided_hash,)
                     )
                     row = cur.fetchone()
                     if row:
                         video_filter_id = row[0]
+                        print(f"Matched by hash: '{video_filter_path}' -> video_id={row[0]} (cached path: '{row['video_path']}')", file=sys.stderr)
+                        # Hash matches but path differs - update to new path
+                        if row["video_path"] != video_filter_path:
+                            print(f"Hash match: updating video path '{row['video_path']}' -> '{video_filter_path}'", file=sys.stderr)
+                            cache_db.conn.execute(
+                                "UPDATE videos SET video_path = ?, updated_at = datetime('now') WHERE id = ?",
+                                (video_filter_path, row[0])
+                            )
+                            cache_db.conn.commit()
                 except (FileNotFoundError, IOError):
                     print(f"Warning: cannot read file '{video_filter_path}' to compute hash", file=sys.stderr)
 
@@ -1369,7 +1445,7 @@ def cmd_cache(args):
             sys.exit(0)
 
         # Format columns for per-run display
-        print(f"{_sql_with_params(query, params)}", file=sys.stderr)
+        print(f"{_sql_with_params(query, params)}\n", file=sys.stderr)
         _print_table(rows)
 
         cache_db.close()
@@ -1390,8 +1466,8 @@ def cmd_cache(args):
                         "DELETE FROM analysis_runs WHERE id = ?", (run_id,)
                     )
                 print(f"Deleted run: {run_id}", file=sys.stderr)
-                print(f"{_sql_with_params('DELETE FROM frame_answers WHERE run_id = ?', [run_id])}", file=sys.stderr)
-                print(f"{_sql_with_params('DELETE FROM analysis_runs WHERE id = ?', [run_id])}", file=sys.stderr)
+                print(f"{_sql_with_params('DELETE FROM frame_answers WHERE run_id = ?', [run_id])}\n", file=sys.stderr)
+                print(f"{_sql_with_params('DELETE FROM analysis_runs WHERE id = ?', [run_id])}\n", file=sys.stderr)
                 cache_db.close()
                 sys.exit(0)
             else:
@@ -1400,17 +1476,27 @@ def cmd_cache(args):
                 video_id_to_delete = None
                 if video:
                     video_id_to_delete = video["id"]
+                    print(f"Matched by path: '{args.video_path}' -> video_id={video['id']}", file=sys.stderr)
                 else:
                     # Try content hash match
                     try:
                         provided_hash = _content_hash(args.video_path)
                         cur = cache_db.conn.execute(
-                            "SELECT id FROM videos WHERE content_hash = ?",
+                            "SELECT id, video_path FROM videos WHERE content_hash = ?",
                             (provided_hash,)
                         )
                         row = cur.fetchone()
                         if row:
                             video_id_to_delete = row[0]
+                            print(f"Matched by hash: '{args.video_path}' -> video_id={row[0]} (cached path: '{row['video_path']}')", file=sys.stderr)
+                            # Hash matches but path differs - update to new path before delete
+                            if row["video_path"] != args.video_path:
+                                print(f"Hash match: updating video path '{row['video_path']}' -> '{args.video_path}'", file=sys.stderr)
+                                cache_db.conn.execute(
+                                    "UPDATE videos SET video_path = ?, updated_at = datetime('now') WHERE id = ?",
+                                    (args.video_path, row[0])
+                                )
+                                cache_db.conn.commit()
                     except (FileNotFoundError, IOError):
                         print(f"Warning: cannot read file '{args.video_path}' to compute hash", file=sys.stderr)
                 if video_id_to_delete is None:
@@ -1420,7 +1506,8 @@ def cmd_cache(args):
                 with cache_db.conn:
                     # Build the query to show what we are deleting
                     sql = "DELETE FROM analysis_runs WHERE video_id = ?; DELETE FROM videos WHERE id = ?"
-                    print(f"{_sql_with_params(sql, [video_id_to_delete, video_id_to_delete])}", file=sys.stderr)
+                    print(f"{_sql_with_params(sql, [video_id_to_delete, video_id_to_delete])
+}", file=sys.stderr)
                     cache_db.conn.execute(
                         "DELETE FROM analysis_runs WHERE video_id = ?", (video_id_to_delete,)
                     )
@@ -1446,7 +1533,8 @@ def cmd_cache(args):
             for v in to_delete:
                 # Build query to show what we are deleting
                 sql_query = "DELETE FROM analysis_runs WHERE video_id = ?"
-                print(f"{_sql_with_params(sql_query, [v['id']])}", file=sys.stderr)
+                print(f"{_sql_with_params(sql_query, [v['id']])
+}", file=sys.stderr)
                 cache_db.conn.execute(sql_query, [v['id']])
                 cache_db.conn.execute("DELETE FROM videos WHERE id = ?", (v["id"],))
                 deleted += 1
@@ -1467,7 +1555,7 @@ def cmd_cache(args):
                 ("DELETE FROM cache_stats", []),
             ]
             for sql, params in clear_queries:
-                print(f"{_sql_with_params(sql, params)}", file=sys.stderr)
+                print(f"{_sql_with_params(sql, params)}\n", file=sys.stderr)
                 cache_db.conn.execute(sql, params)
         print("Cache cleared", file=sys.stderr)
 
@@ -1661,13 +1749,50 @@ def cmd_isearch(args):
     where_clauses = ["fa.question_name = ?", "fa.top_probability >= ?"]
     params = [question_name, threshold]
 
-    # video filter (new --video flag)
+    # video filter (new --video flag) - with hash-based lookup
     if video_set:
-        # Build placeholder list
-        video_placeholders = ','.join(['?'] * len(video_set))
         from_clause += " JOIN videos v ON ar1.video_id = v.id"
-        where_clauses.append(f"v.video_path IN ({video_placeholders})")
-        params.extend(str(p) for p in video_set)
+        matched_video_ids = []
+        for vp in video_set:
+            # Try exact path match first
+            cur = cache_db.conn.execute(
+                "SELECT id, content_hash FROM videos WHERE video_path = ?", (vp,)
+            )
+            row = cur.fetchone()
+            if row:
+                matched_video_ids.append(row["id"])
+                print(f"Matched by path: '{vp}' -> video_id={row['id']}", file=sys.stderr)
+                continue
+            # Fallback: compute hash of input and match by content_hash
+            try:
+                input_hash = _content_hash(vp)
+                cur = cache_db.conn.execute(
+                    "SELECT id, video_path FROM videos WHERE content_hash = ?", (input_hash,)
+                )
+                row = cur.fetchone()
+                if row:
+                    # Hash matches but path differs - update to new path
+                    if row["video_path"] != vp:
+                        print(f"Hash match: updating video path '{row['video_path']}' -> '{vp}'", file=sys.stderr)
+                        cache_db.conn.execute(
+                            "UPDATE videos SET video_path = ?, updated_at = datetime('now') WHERE id = ?",
+                            (vp, row["id"])
+                        )
+                        cache_db.conn.commit()
+                    matched_video_ids.append(row["id"])
+                    continue
+            except (FileNotFoundError, IOError):
+                pass
+            # No match found
+            print(f"Warning: no cached video matches '{vp}'", file=sys.stderr)
+
+        if matched_video_ids:
+            video_id_placeholders = ','.join(['?'] * len(matched_video_ids))
+            where_clauses.append(f"v.id IN ({video_id_placeholders})")
+            params.extend(matched_video_ids)
+        else:
+            # No valid videos - add impossible condition to return empty
+            where_clauses.append("1=0")
 
     # model filter
     if getattr(args, "model", None):

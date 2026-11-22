@@ -180,9 +180,9 @@ Understanding the table structure helps you write better custom SQL queries. Bel
 |--------|------|-------------|
 | `id` | INTEGER | Primary key (run ID) |
 | `video_id` | INTEGER | FK → videos.id |
-| `content_hash` | TEXT | Video content hash |
 | `params_hash` | TEXT | Hash of model+config params (question_name+params) |
 | `model` | TEXT | Ollama model name (e.g., `clef-flash:9b`) |
+| `questions_json` | TEXT | Full questions array as JSON (for reproducibility) |
 | `cache_status` | TEXT | `empty`/`partial`/`complete` |
 | `created_at` | TEXT | Run creation timestamp |
 | `updated_at` | TEXT | Last update timestamp |
@@ -248,6 +248,4 @@ scs search video.mp4 \
 scs search video.mp4 \
   --q "activity=sitting:0.95" \
   --stitch custom_output.mp4
-```
-scs cache clear --yes
 ```
