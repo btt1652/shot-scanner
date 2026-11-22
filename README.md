@@ -11,6 +11,39 @@ A lightweight CLI that analyzes video frames using an Ollama decision model as t
 | `scs search <video> [--q "question=choice:prob"]* [--top N] [--top-per-video N] [--merge-result-threshold SEC] [--model MODEL] [--run-id RUN_ID] [--save-frame DIR] [--stitch]` | Human-friendly search without SQL |
 | `scs cache <cmd>` | Cache management: list, delete, prune, clear, clean |
 
+## isearch - Experimental Image-Based Search
+
+Search cached frame answers by reference image (single image). Uses a single reference image to find semantically similar frames across cached analysis runs.
+
+### Usage
+```bash
+scs isearch <image> [--question Q] [-qr RUN_ID|VIDEO] [--top N] [--top-per-video N] [--merge-result-threshold SEC] [--model MODEL] [--run-id RUN_ID] [--save-frame DIR] [--stitch] [--cache PATH]
+```
+
+### Parameters
+- `image`: Path to reference image (jpg, png, webp, bmp …)
+- `--question Q` or `-Q`: Question name to score the reference image against (optional if `--question-ref` is given)
+- `-qr RUN_ID|VIDEO` or `--question-ref`: Use the question set from a run_id (integer) or latest run of a video path (string)
+- `--top N`: Limit to top N frames by probability
+- `--top-per-video N`: Limit number of top results per video by probability
+- `--merge-result-threshold SEC`: Timestamp difference threshold (seconds) to merge adjacent frames with same score
+- `--model MODEL`: Filter results by Ollama model name (e.g., clef-flash:9b, d1:3b)
+- `--run-id RUN_ID`: Filter results to a specific analysis run ID
+- `--save-frame DIR`: Directory to save extracted frames (JPG only)
+- `--stitch [PATH]`: Stitch matched frames into a single video using ffmpeg. Uses --merge-result-threshold (default 1 sec) to group consecutive frames with same score into ranges before stitching
+- `--cache PATH`: Path to SQLite cache file (default: ./.cache.db)
+
+### Example
+```bash
+# Search using run_id (integer)
+scs isearch frames/hddJUR-091_cut_f020677_689.9s_activity_standing.jpg --question-ref 1 --top 1
+
+# Search using video path (string)
+scs isearch frames/hddJUR-091_cut_f020677_689.9s_activity_standing.jpg -qr /mnt/hdd/hddJUR-091_cut.mp4 --top 1
+
+# Search with explicit question name
+scs isearch frames/hddJUR-091_cut_f020677_689.9s_activity_standing.jpg --question activity --top 1
+```
 ### Query Subcommand (`scs query`)
 
 ```bash
