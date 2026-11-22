@@ -141,7 +141,7 @@ scs search video.mp4 \
 
 ### Parameters
 - `<video>`: Video path (or glob/directory pattern)
-- `--q "question=choice:prob"`: Filter condition (repeatable, AND logic)
+- `--q "question=choice:prob[:confidence]"`: Filter condition (repeatable, AND logic). Add optional confidence threshold (e.g., `activity=yes:0.8:0.7` requires top_probability≥0.8 AND confidence≥0.7).
 - `--top N`: Limit to top N frames (or ranges with `--merge-result-threshold`) by highest probability, then results are re‑ordered chronologically.
 - `--top-per-video N`: Limit number of top results per video by highest probability, then results are re‑ordered chronologically per video. When both `--top` and `--top-per-video` are supplied, `--top-per-video` takes precedence.
 - `--merge-result-threshold SEC`: Merge consecutive frames with the same score within `SEC` seconds into a single range. When used with `--top` or `--top-per-video`, the limit counts ranges (not individual frames).
@@ -195,7 +195,8 @@ Understanding the table structure helps you write better custom SQL queries. Bel
 | `timestamp_seconds` | REAL | Timestamp in seconds |
 | `question_name` | TEXT | Question key (e.g., `activity`, `time_of_day`) |
 | `top_choice` | TEXT | Best answer (e.g., `walking`, `sitting`) |
-| `top_probability` | REAL | Confidence score (0.0–1.0) |
+| `top_probability` | REAL | Top choice probability (0.0–1.0) |
+| `confidence` | REAL | Model confidence/certainty (0.0–1.0, from Ollama) |
 | `raw_response` | TEXT | Raw Ollama response JSON |
 
 ### 📈 `cache_stats` Table
