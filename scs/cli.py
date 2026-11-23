@@ -940,30 +940,33 @@ def cmd_search(args):
                 sys.exit(1)
             seen[q] = True
 
-    # Parse conditions with field-OR support
-    # Syntax per condition: question=choice:prob[:confidence]  (AND between prob and confidence)
-    # OR between prob and confidence: question=choice:prob|conf  (e.g., activity=yes:0.8|0.7)
+    # Parse conditions with field operators
+    # Syntax per condition:
+    #   question=choice:prob&&conf    -> AND between prob and confidence (both must meet threshold)
+    #   question=choice:prob||conf    -> OR between prob and confidence (either meets threshold)
+    #   question=choice:prob          -> only prob threshold
+    #   question=choice:prob:conf     -> same as && (AND)
     # Multiple --q flags are AND'd together
-    # Example: --q "activity=yes:0.8|0.7" --q "scene_type=couple:0.9"
-    #   => (activity=yes AND (prob>=0.8 OR confidence>=0.7)) AND scene_type=couple
+    # Example: --q "activity=yes:0.8||0.7" --q "scene_type=couple:0.9&&0.8"
+    #   => (activity=yes AND (prob>=0.8 OR confidence>=0.7)) AND (scene_type=couple AND prob>=0.9 AND confidence>=0.8)
     conditions = []  # list of (qname, choice, prob, confidence, use_or)
     for q in q_list:
         parts = q.split('=')
         if len(parts) < 2:
-            print(f"Error: invalid --q format '{q}'. Expected 'question=choice:prob[:confidence]' or 'question=choice:prob|conf'.", file=sys.stderr)
+            print(f"Error: invalid --q format '{q}'. Expected 'question=choice:prob[&&conf] or question=choice:prob||conf'.", file=sys.stderr)
             cache_db.close()
             sys.exit(1)
         qname = parts[0].strip()
-        rest = parts[1]  # e.g., "yes:0.8|0.7" or "yes:0.8:0.7"
+        rest = parts[1]  # e.g., "yes:0.8||0.7" or "yes:0.8&&0.7" or "yes:0.8:0.7"
         
-        # Check for field-OR syntax (prob|conf)
-        if '|' in rest:
-            # Format: choice:prob|conf
+        # Check for field operators
+        if '||' in rest:
+            # OR between prob and confidence
             choice_part, rest_part = rest.split(':', 1)
             choice = choice_part.strip().lower()
-            prob_conf = rest_part.split('|')
+            prob_conf = rest_part.split('||')
             if len(prob_conf) != 2:
-                print(f"Error: invalid --q format '{q}'. Expected 'choice:prob|conf' for field-OR.", file=sys.stderr)
+                print(f"Error: invalid --q format '{q}'. Expected 'choice:prob||conf' for field-OR.", file=sys.stderr)
                 cache_db.close()
                 sys.exit(1)
             try:
@@ -974,11 +977,28 @@ def cmd_search(args):
                 cache_db.close()
                 sys.exit(1)
             conditions.append((qname, choice, prob, confidence, True))  # use_or = True
+        elif '&&' in rest:
+            # AND between prob and confidence (explicit)
+            choice_part, rest_part = rest.split(':', 1)
+            choice = choice_part.strip().lower()
+            prob_conf = rest_part.split('&&')
+            if len(prob_conf) != 2:
+                print(f"Error: invalid --q format '{q}'. Expected 'choice:prob&&conf' for field-AND.", file=sys.stderr)
+                cache_db.close()
+                sys.exit(1)
+            try:
+                prob = float(prob_conf[0].strip())
+                confidence = float(prob_conf[1].strip())
+            except ValueError:
+                print(f"Error: invalid probability/confidence in '{q}'. Use numeric values.", file=sys.stderr)
+                cache_db.close()
+                sys.exit(1)
+            conditions.append((qname, choice, prob, confidence, False))  # use_or = False (AND)
         else:
             # Standard format: choice:prob[:confidence] (AND between prob and confidence)
             rest_parts = rest.split(':')
             if len(rest_parts) < 2 or len(rest_parts) > 3:
-                print(f"Error: invalid --q format '{q}'. Expected 'choice:prob' or 'choice:prob:confidence' or 'choice:prob|conf'.", file=sys.stderr)
+                print(f"Error: invalid --q format '{q}'. Expected 'choice:prob' or 'choice:prob:confidence' or 'choice:prob&&conf' or 'choice:prob||conf'.", file=sys.stderr)
                 cache_db.close()
                 sys.exit(1)
             choice = rest_parts[0].strip().lower()
@@ -989,7 +1009,7 @@ def cmd_search(args):
                 print(f"Error: invalid probability/confidence in '{q}'. Use numeric values.", file=sys.stderr)
                 cache_db.close()
                 sys.exit(1)
-            conditions.append((qname, choice, prob, confidence, False))  # use_or = False
+            conditions.append((qname, choice, prob, confidence, False))  # use_or = False (AND)
 
     top_n = int(args.top) if args.top is not None else None
 
@@ -1992,7 +2012,7 @@ def main():
     # ---- search ----
     p_search = sub.add_parser("search", help="Search cached frame answers by question")
     p_search.add_argument("video", type=str, nargs="+", help="One or more video files/directories (e.g., video.mp4 video2/*.mp4)")
-    p_search.add_argument("--q", dest="q_values", action="append", default=[], help="Filter condition: 'question=choice:prob[:confidence]' (AND) or 'question=choice:prob|conf' (OR between prob/confidence). E.g., activity=yes:0.8:0.7 (prob>=0.8 AND conf>=0.7) or activity=yes:0.8|0.7 (prob>=0.8 OR conf>=0.7). Multiple --q are AND'd.")
+    p_search.add_argument("--q", dest="q_values", action="append", default=[], help="Filter condition: 'question=choice:prob&&conf' (AND) or 'question=choice:prob||conf' (OR). E.g., activity=yes:0.8&&0.7 (prob>=0.8 AND conf>=0.7) or activity=yes:0.8||0.7 (prob>=0.8 OR conf>=0.7). Also supports 'question=choice:prob:conf' (same as &&). Multiple --q are AND'd.")
     p_search.add_argument("--top", type=int, default=None, help="Limit to top N frames (or ranges) by probability; results are sorted by timestamp ascending.")
     p_search.add_argument(
         "--top-per-video", type=int, default=None,

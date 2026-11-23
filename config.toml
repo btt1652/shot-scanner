@@ -63,30 +63,13 @@ criteria = { "front" = "Front view (facing performers)", "side" = "Side profile 
 
 
 
-# {
-#   "model": "clef-flash:9b",
-#   "state": "frame from an adult video",
-#   "questions": {
-#     "female_nudity": {
-#       "type": "choice",
-#       "instructions": "nudity level of female actress body",
-#       "criteria": {
-#         "fully nude": "not wearing anything at all",
-#         "partial nude": "almost nude but wearing some lingerie or swimsuit or bikini or small clothe and may sometimes showing nipples",
-#         "no nudity": "wearing regular outfit",
-#         "unidentified": "cannot identified the nudity level because not enough female body information showing in frame"
-#       }
-#     },
-#     "camera_framing": {
-#       "type": "choice",
-#       "instructions": "camera framing of female actress body part in the scene",
-#       "criteria": {
-#         "close up head": "seeing mostly head and face in the frame",
-#         "close up genitals": "seeing mostly genital parts of the female in the frame",
-#         "close up breasts": "mostly seeing torso and breasts in the frame",
-#         "body side": "seeing side view of female body with torso and butt ",
-#         "body front": "seeing front view of female body with torso and butt ",
-#         "body back": "seeing back view of female body with torso and butt "
-#       }
-#     }
-#   },
+# "questions": {
+#   "female_nudity": {
+#     "type": "choice",
+#     "instructions": "nudity level of female actress body",
+#     "criteria": {
+#       "fully nude": "The actress is completely naked, wearing no clothing that covers her body. This includes visible breasts, nipples, buttocks, and genital areas.",
+#       "partial nude": "The actress is partially naked or wearing revealing clothing that exposes intimate body parts or significant portions of her body. Examples include exposed breasts, nipples, buttocks, cleavage, thighs, legs, or stomach. This category also includes topless or bottomless appearances",
+#       "no nudity": "The actress is wearing regular clothing that fully covers her breasts, nipples, and genital area, without exposing her stomach",
+#       "unidentified": "There is insufficient visual information to determine the actress's nudity level. For example, the body is out of frame, obscured, too distant, or only partially visible"
+# 
