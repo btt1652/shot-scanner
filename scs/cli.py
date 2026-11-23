@@ -940,36 +940,45 @@ def cmd_search(args):
                 sys.exit(1)
             seen[q] = True
 
-    conditions = []
+    # Parse conditions with OR group support
+    # Each --q can contain multiple "question=choice:prob[:confidence]" joined by " | " (OR)
+    # Multiple --q flags are AND'd together
+    # Example: --q "a=yes:0.8 | b=yes:0.9" --q "c=yes:0.7"  =>  (a=yes OR b=yes) AND c=yes
+    or_groups = []  # list of list of (qname, choice, prob, confidence)
     for q in q_list:
-        parts = q.split('=')
-        if len(parts) < 2:
-            print(f"Error: invalid --q format '{q}'. Expected 'question=choice:prob[:confidence]'.", file=sys.stderr)
-            cache_db.close()
-            sys.exit(1)
-        qname = parts[0].strip()
-        rest = parts[1]  # e.g., "yes:0.8" or "yes:0.8:0.7"
-        # Split by ':' - can have 2 or 3 parts
-        rest_parts = rest.split(':')
-        if len(rest_parts) < 2 or len(rest_parts) > 3:
-            print(f"Error: invalid --q format '{q}'. Expected 'question=choice:prob' or 'question=choice:prob:confidence'.", file=sys.stderr)
-            cache_db.close()
-            sys.exit(1)
-        choice = rest_parts[0].strip().lower()
-        try:
-            prob = float(rest_parts[1].strip())
-            confidence = float(rest_parts[2].strip()) if len(rest_parts) == 3 else None
-        except ValueError:
-            print(f"Error: invalid probability/confidence in '{q}'. Use numeric values.", file=sys.stderr)
-            cache_db.close()
-            sys.exit(1)
-        conditions.append((qname, choice, prob, confidence))
+        # Split by " | " for OR conditions
+        or_parts = [p.strip() for p in q.split('|')]
+        group = []
+        for or_part in or_parts:
+            parts = or_part.split('=')
+            if len(parts) < 2:
+                print(f"Error: invalid --q format '{or_part}'. Expected 'question=choice:prob[:confidence]'.", file=sys.stderr)
+                cache_db.close()
+                sys.exit(1)
+            qname = parts[0].strip()
+            rest = parts[1]
+            rest_parts = rest.split(':')
+            if len(rest_parts) < 2 or len(rest_parts) > 3:
+                print(f"Error: invalid --q format '{or_part}'. Expected 'question=choice:prob' or 'question=choice:prob:confidence'.", file=sys.stderr)
+                cache_db.close()
+                sys.exit(1)
+            choice = rest_parts[0].strip().lower()
+            try:
+                prob = float(rest_parts[1].strip())
+                confidence = float(rest_parts[2].strip()) if len(rest_parts) == 3 else None
+            except ValueError:
+                print(f"Error: invalid probability/confidence in '{or_part}'. Use numeric values.", file=sys.stderr)
+                cache_db.close()
+                sys.exit(1)
+            group.append((qname, choice, prob, confidence))
+        if group:
+            or_groups.append(group)
 
     top_n = int(args.top) if args.top is not None else None
 
     # Build SQL - we need self-join for multiple question conditions on same frame
     # Use frame_answers joined against itself for each condition
-    if not conditions:
+    if not or_groups:
         print("Error: at least one --q filter required", file=sys.stderr)
         cache_db.close()
         sys.exit(1)
@@ -981,20 +990,40 @@ def cmd_search(args):
     where_clauses = []
     params = []
 
-    for i, (qname, choice, prob, confidence) in enumerate(conditions):
-        alias = f"fa{i}" if i > 0 else "fa"
-        clause = f"{alias}.question_name = ? AND {alias}.top_choice = ? AND {alias}.top_probability >= ?"
-        params_clause = [qname, choice, prob]
-        if confidence is not None:
-            clause += f" AND {alias}.confidence >= ?"
-            params_clause.append(confidence)
-        where_clauses.append(clause)
-        params.extend(params_clause)
-        if i > 0:
-            from_clause += f" JOIN frame_answers {alias} ON fa.run_id = {alias}.run_id AND fa.frame_index = {alias}.frame_index"
-
-    # Add video path filter via analysis_runs → videos
-    from_clause += " LEFT JOIN videos v ON ar1.video_id = v.id"
+    # Build SQL with OR groups
+    # Each OR group becomes: (cond1 OR cond2 OR ...) for same frame
+    # Multiple OR groups are AND'd together
+    # We use a different approach: collect all conditions, then build SQL with OR logic
+    
+    # First, collect all unique question conditions across all OR groups
+    # We'll use a single frame_answers table with OR conditions in WHERE
+    # This avoids complex self-joins for OR logic
+    
+    # Build a single WHERE clause with OR groups
+    or_group_clauses = []
+    all_params = []
+    
+    for group in or_groups:
+        # Each condition in the group: (question_name = ? AND top_choice = ? AND top_probability >= ? [AND confidence >= ?])
+        cond_clauses = []
+        for (qname, choice, prob, confidence) in group:
+            clause = "fa.question_name = ? AND fa.top_choice = ? AND fa.top_probability >= ?"
+            all_params.extend([qname, choice, prob])
+            if confidence is not None:
+                clause += " AND fa.confidence >= ?"
+                all_params.append(confidence)
+            cond_clauses.append(clause)
+        # Join conditions in this group with OR
+        if cond_clauses:
+            or_group_clauses.append("(" + " OR ".join(cond_clauses) + ")")
+    
+    # All OR groups are AND'd together
+    if or_group_clauses:
+        where_clauses.append("(" + " AND ".join(or_group_clauses) + ")")
+        params.extend(all_params)
+    
+    # Simple join: frame_answers -> analysis_runs -> videos
+    from_clause = "frame_answers fa JOIN analysis_runs ar1 ON fa.run_id = ar1.id LEFT JOIN videos v ON ar1.video_id = v.id"
 
     # Limit to specified video(s) - support hash-based lookup
     # For each input, try exact path match first, then fall back to content_hash match
@@ -1960,7 +1989,7 @@ def main():
     # ---- search ----
     p_search = sub.add_parser("search", help="Search cached frame answers by question")
     p_search.add_argument("video", type=str, nargs="+", help="One or more video files/directories (e.g., video.mp4 video2/*.mp4)")
-    p_search.add_argument("--q", dest="q_values", action="append", default=[], help="Filter condition: 'question=choice:prob[:confidence]' (e.g., activity=yes:0.8 or activity=yes:0.8:0.7). Multiple --q require ALL to match.")
+    p_search.add_argument("--q", dest="q_values", action="append", default=[], help="Filter condition: 'question=choice:prob[:confidence]' (e.g., activity=yes:0.8). Use \" | \" for OR within a --q (e.g., activity=yes:0.8 | activity=no:0.7). Multiple --q are AND'd together.")
     p_search.add_argument("--top", type=int, default=None, help="Limit to top N frames (or ranges) by probability; results are sorted by timestamp ascending.")
     p_search.add_argument(
         "--top-per-video", type=int, default=None,

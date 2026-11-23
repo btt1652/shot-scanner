@@ -141,7 +141,8 @@ scs search video.mp4 \
 
 ### Parameters
 - `<video>`: Video path (or glob/directory pattern)
-- `--q "question=choice:prob[:confidence]"`: Filter condition (repeatable, AND logic). Add optional confidence threshold (e.g., `activity=yes:0.8:0.7` requires top_probability≥0.8 AND confidence≥0.7).
+- `--q "question=choice:prob[:confidence]"`: Filter condition (repeatable). Add optional confidence threshold (e.g., `activity=yes:0.8:0.7`). **Within a single `--q`, use ` | ` for OR logic** (e.g., `activity=yes:0.8 | activity=no:0.7`). **Multiple `--q` flags are AND'd together**.
+  - Example: `--q "activity=yes:0.8 | activity=no:0.7" --q "scene_type=couple:0.9"` means `(activity=yes OR activity=no) AND scene_type=couple`.
 - `--top N`: Limit to top N frames (or ranges with `--merge-result-threshold`) by highest probability, then results are re‑ordered chronologically.
 - `--top-per-video N`: Limit number of top results per video by highest probability, then results are re‑ordered chronologically per video. When both `--top` and `--top-per-video` are supplied, `--top-per-video` takes precedence.
 - `--merge-result-threshold SEC`: Merge consecutive frames with the same score within `SEC` seconds into a single range. When used with `--top` or `--top-per-video`, the limit counts ranges (not individual frames).

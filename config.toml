@@ -1,6 +1,9 @@
 # scs - Default configuration
 # Uses an Ollama decision model as the sole judge for classification.
 # Multiple questions are defined in the [[questions]] array.
+# 
+# feed prob score of last N request into the current request context
+# prob >= 75 or confident >= 75
 
 decision_model_sample_rate = 1
 ollama_host = "192.168.1.190"
@@ -57,3 +60,33 @@ criteria = { "vaginal_sex" = "Vaginal penetration (PIV)", "anal_sex" = "Anal pen
 name = "camera_angle"
 instructions = "Camera perspective relative to the action."
 criteria = { "front" = "Front view (facing performers)", "side" = "Side profile view", "back" = "Rear view (from behind)", "top_down" = "Top-down / bird's eye", "bottom_up" = "Low angle / worm's eye", "pov_male" = "POV from male perspective", "pov_female" = "POV from female perspective", "pov_third" = "POV third person (over shoulder)", "dutch_angle" = "Dutch angle / tilted", "drone_aerial" = "Drone / aerial (outdoor)" }
+
+
+
+# {
+#   "model": "clef-flash:9b",
+#   "state": "frame from an adult video",
+#   "questions": {
+#     "female_nudity": {
+#       "type": "choice",
+#       "instructions": "nudity level of female actress body",
+#       "criteria": {
+#         "fully nude": "not wearing anything at all",
+#         "partial nude": "almost nude but wearing some lingerie or swimsuit or bikini or small clothe and may sometimes showing nipples",
+#         "no nudity": "wearing regular outfit",
+#         "unidentified": "cannot identified the nudity level because not enough female body information showing in frame"
+#       }
+#     },
+#     "camera_framing": {
+#       "type": "choice",
+#       "instructions": "camera framing of female actress body part in the scene",
+#       "criteria": {
+#         "close up head": "seeing mostly head and face in the frame",
+#         "close up genitals": "seeing mostly genital parts of the female in the frame",
+#         "close up breasts": "mostly seeing torso and breasts in the frame",
+#         "body side": "seeing side view of female body with torso and butt ",
+#         "body front": "seeing front view of female body with torso and butt ",
+#         "body back": "seeing back view of female body with torso and butt "
+#       }
+#     }
+#   },
