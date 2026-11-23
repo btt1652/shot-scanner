@@ -940,26 +940,45 @@ def cmd_search(args):
                 sys.exit(1)
             seen[q] = True
 
-    # Parse conditions with OR group support
-    # Each --q can contain multiple "question=choice:prob[:confidence]" joined by " | " (OR)
+    # Parse conditions with field-OR support
+    # Syntax per condition: question=choice:prob[:confidence]  (AND between prob and confidence)
+    # OR between prob and confidence: question=choice:prob|conf  (e.g., activity=yes:0.8|0.7)
     # Multiple --q flags are AND'd together
-    # Example: --q "a=yes:0.8 | b=yes:0.9" --q "c=yes:0.7"  =>  (a=yes OR b=yes) AND c=yes
-    or_groups = []  # list of list of (qname, choice, prob, confidence)
+    # Example: --q "activity=yes:0.8|0.7" --q "scene_type=couple:0.9"
+    #   => (activity=yes AND (prob>=0.8 OR confidence>=0.7)) AND scene_type=couple
+    conditions = []  # list of (qname, choice, prob, confidence, use_or)
     for q in q_list:
-        # Split by " | " for OR conditions
-        or_parts = [p.strip() for p in q.split('|')]
-        group = []
-        for or_part in or_parts:
-            parts = or_part.split('=')
-            if len(parts) < 2:
-                print(f"Error: invalid --q format '{or_part}'. Expected 'question=choice:prob[:confidence]'.", file=sys.stderr)
+        parts = q.split('=')
+        if len(parts) < 2:
+            print(f"Error: invalid --q format '{q}'. Expected 'question=choice:prob[:confidence]' or 'question=choice:prob|conf'.", file=sys.stderr)
+            cache_db.close()
+            sys.exit(1)
+        qname = parts[0].strip()
+        rest = parts[1]  # e.g., "yes:0.8|0.7" or "yes:0.8:0.7"
+        
+        # Check for field-OR syntax (prob|conf)
+        if '|' in rest:
+            # Format: choice:prob|conf
+            choice_part, rest_part = rest.split(':', 1)
+            choice = choice_part.strip().lower()
+            prob_conf = rest_part.split('|')
+            if len(prob_conf) != 2:
+                print(f"Error: invalid --q format '{q}'. Expected 'choice:prob|conf' for field-OR.", file=sys.stderr)
                 cache_db.close()
                 sys.exit(1)
-            qname = parts[0].strip()
-            rest = parts[1]
+            try:
+                prob = float(prob_conf[0].strip())
+                confidence = float(prob_conf[1].strip())
+            except ValueError:
+                print(f"Error: invalid probability/confidence in '{q}'. Use numeric values.", file=sys.stderr)
+                cache_db.close()
+                sys.exit(1)
+            conditions.append((qname, choice, prob, confidence, True))  # use_or = True
+        else:
+            # Standard format: choice:prob[:confidence] (AND between prob and confidence)
             rest_parts = rest.split(':')
             if len(rest_parts) < 2 or len(rest_parts) > 3:
-                print(f"Error: invalid --q format '{or_part}'. Expected 'question=choice:prob' or 'question=choice:prob:confidence'.", file=sys.stderr)
+                print(f"Error: invalid --q format '{q}'. Expected 'choice:prob' or 'choice:prob:confidence' or 'choice:prob|conf'.", file=sys.stderr)
                 cache_db.close()
                 sys.exit(1)
             choice = rest_parts[0].strip().lower()
@@ -967,18 +986,16 @@ def cmd_search(args):
                 prob = float(rest_parts[1].strip())
                 confidence = float(rest_parts[2].strip()) if len(rest_parts) == 3 else None
             except ValueError:
-                print(f"Error: invalid probability/confidence in '{or_part}'. Use numeric values.", file=sys.stderr)
+                print(f"Error: invalid probability/confidence in '{q}'. Use numeric values.", file=sys.stderr)
                 cache_db.close()
                 sys.exit(1)
-            group.append((qname, choice, prob, confidence))
-        if group:
-            or_groups.append(group)
+            conditions.append((qname, choice, prob, confidence, False))  # use_or = False
 
     top_n = int(args.top) if args.top is not None else None
 
     # Build SQL - we need self-join for multiple question conditions on same frame
     # Use frame_answers joined against itself for each condition
-    if not or_groups:
+    if not conditions:
         print("Error: at least one --q filter required", file=sys.stderr)
         cache_db.close()
         sys.exit(1)
@@ -990,37 +1007,23 @@ def cmd_search(args):
     where_clauses = []
     params = []
 
-    # Build SQL with OR groups
-    # Each OR group becomes: (cond1 OR cond2 OR ...) for same frame
-    # Multiple OR groups are AND'd together
-    # We use a different approach: collect all conditions, then build SQL with OR logic
+    # Build SQL with field-OR support (prob OR confidence per condition)
+    # Each condition can be AND (prob AND confidence) or OR (prob OR confidence)
+    # Multiple conditions are AND'd together
     
-    # First, collect all unique question conditions across all OR groups
-    # We'll use a single frame_answers table with OR conditions in WHERE
-    # This avoids complex self-joins for OR logic
-    
-    # Build a single WHERE clause with OR groups
-    or_group_clauses = []
-    all_params = []
-    
-    for group in or_groups:
-        # Each condition in the group: (question_name = ? AND top_choice = ? AND top_probability >= ? [AND confidence >= ?])
-        cond_clauses = []
-        for (qname, choice, prob, confidence) in group:
+    for (qname, choice, prob, confidence, use_or) in conditions:
+        if use_or:
+            # OR between prob and confidence: (prob >= ? OR confidence >= ?)
+            clause = "fa.question_name = ? AND fa.top_choice = ? AND (fa.top_probability >= ? OR fa.confidence >= ?)"
+            params.extend([qname, choice, prob, confidence])
+        else:
+            # AND between prob and confidence (default)
             clause = "fa.question_name = ? AND fa.top_choice = ? AND fa.top_probability >= ?"
-            all_params.extend([qname, choice, prob])
+            params.extend([qname, choice, prob])
             if confidence is not None:
                 clause += " AND fa.confidence >= ?"
-                all_params.append(confidence)
-            cond_clauses.append(clause)
-        # Join conditions in this group with OR
-        if cond_clauses:
-            or_group_clauses.append("(" + " OR ".join(cond_clauses) + ")")
-    
-    # All OR groups are AND'd together
-    if or_group_clauses:
-        where_clauses.append("(" + " AND ".join(or_group_clauses) + ")")
-        params.extend(all_params)
+                params.append(confidence)
+        where_clauses.append(clause)
     
     # Simple join: frame_answers -> analysis_runs -> videos
     from_clause = "frame_answers fa JOIN analysis_runs ar1 ON fa.run_id = ar1.id LEFT JOIN videos v ON ar1.video_id = v.id"
@@ -1989,7 +1992,7 @@ def main():
     # ---- search ----
     p_search = sub.add_parser("search", help="Search cached frame answers by question")
     p_search.add_argument("video", type=str, nargs="+", help="One or more video files/directories (e.g., video.mp4 video2/*.mp4)")
-    p_search.add_argument("--q", dest="q_values", action="append", default=[], help="Filter condition: 'question=choice:prob[:confidence]' (e.g., activity=yes:0.8). Use \" | \" for OR within a --q (e.g., activity=yes:0.8 | activity=no:0.7). Multiple --q are AND'd together.")
+    p_search.add_argument("--q", dest="q_values", action="append", default=[], help="Filter condition: 'question=choice:prob[:confidence]' (AND) or 'question=choice:prob|conf' (OR between prob/confidence). E.g., activity=yes:0.8:0.7 (prob>=0.8 AND conf>=0.7) or activity=yes:0.8|0.7 (prob>=0.8 OR conf>=0.7). Multiple --q are AND'd.")
     p_search.add_argument("--top", type=int, default=None, help="Limit to top N frames (or ranges) by probability; results are sorted by timestamp ascending.")
     p_search.add_argument(
         "--top-per-video", type=int, default=None,
