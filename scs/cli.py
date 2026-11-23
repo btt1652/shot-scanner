@@ -984,21 +984,22 @@ def cmd_search(args):
         import re
         for part in or_parts:
             # Parse field OP value
-            # Support both symbols (>=, <=, >, <) and words (ge, le, gt, lt, eq, ne)
-            # Words avoid shell escaping issues
-            match = re.match(r'^(prob|conf)\s*(>=|<=|>|<|ge|le|gt|lt|eq|ne)\s*([0-9.]+)$', part, re.IGNORECASE)
+            # Fields: prob, conf, prob:<choice>, rank:<choice>
+            # Examples: prob>=0.8, conf ge 0.7, prob:walking>=0.7, rank:running<=2
+            match = re.match(r'^(prob|conf|rank)(?::([a-zA-Z_][a-zA-Z0-9_]*))?\s*(>=|<=|>|<|ge|le|gt|lt|eq|ne)\s*([0-9.]+)$', part, re.IGNORECASE)
             if not match:
-                print(f"Error: invalid field condition '{part}'. Expected 'prob>=0.8' or 'prob ge 0.8' or 'conf le 0.7' etc.", file=sys.stderr)
+                print(f"Error: invalid field condition '{part}'. Expected 'prob>=0.8', 'prob:walking>=0.7', 'conf ge 0.7', 'rank:running le 2' etc.", file=sys.stderr)
                 cache_db.close()
                 sys.exit(1)
-            field, op, value = match.groups()
+            field, choice, op, value = match.groups()
             # Normalize word operators to symbols for SQL
             op_map = {
                 'ge': '>=', 'le': '<=', 'gt': '>', 'lt': '<', 'eq': '=', 'ne': '!=',
                 '>=': '>=', '<=': '<=', '>': '>', '<': '<', '=': '=', '!=': '!=',
             }
             op = op_map.get(op.lower(), op)
-            field_conditions.append((field, op, float(value)))
+            # choice can be None (for prob/conf) or a choice name (for prob:<choice>/rank:<choice>)
+            field_conditions.append((field, choice, op, float(value)))
         
         if not field_conditions:
             print(f"Error: no valid field conditions in '{q}'.", file=sys.stderr)
@@ -1023,15 +1024,42 @@ def cmd_search(args):
     where_clauses = []
     params = []
 
-    # Build SQL with Option 1 field conditions
-    # Each condition has field_conditions (list of field, op, value) and use_or flag
+    # Build SQL with Option 1 field conditions (including choice-specific)
+    # field_conditions: list of (field, choice, op, value)
+    # field: 'prob', 'conf', or 'rank'
+    # choice: None (for prob/conf) or choice name (for prob:<choice>/rank:<choice>)
     for (qname, choice, field_conditions, use_or) in conditions:
         # Add qname and choice FIRST (they appear first in the WHERE clause)
         params.extend([qname, choice])
         
         clauses = []
-        for field, op, value in field_conditions:
-            col = "fa.top_probability" if field == "prob" else "fa.confidence"
+        for field, field_choice, op, value in field_conditions:
+            if field == "prob" and field_choice is None:
+                col = "fa.top_probability"
+            elif field == "conf" and field_choice is None:
+                col = "fa.confidence"
+            elif field == "prob" and field_choice is not None:
+                # Probability of specific choice from JSON
+                escaped = field_choice.replace('"', '""')
+                json_path = '$."' + escaped + '"'
+                col = "json_extract(fa.probabilities_json, ?)"
+                clauses.append(f"{col} {op} ?")
+                params.append(json_path)
+                params.append(value)
+                continue
+            elif field == "rank" and field_choice is not None:
+                # Rank of specific choice - compute via JSON
+                escaped = field_choice.replace('"', '""')
+                json_path = '$."' + escaped + '"'
+                col = "(SELECT COUNT(*) + 1 FROM json_each(fa.probabilities_json) WHERE value > json_extract(fa.probabilities_json, ?))"
+                clauses.append(f"{col} {op} ?")
+                params.append(json_path)
+                params.append(value)
+                continue
+            else:
+                print(f"Error: invalid field/choice combination: {field}:{field_choice}", file=sys.stderr)
+                cache_db.close()
+                sys.exit(1)
             clauses.append(f"{col} {op} ?")
             params.append(value)
         
@@ -2008,7 +2036,7 @@ def main():
     # ---- search ----
     p_search = sub.add_parser("search", help="Search cached frame answers by question")
     p_search.add_argument("video", type=str, nargs="+", help="One or more video files/directories (e.g., video.mp4 video2/*.mp4)")
-    p_search.add_argument("--q", dest="q_values", action="append", default=[], help="Filter condition: 'question=choice:field OP value[,field OP value...]' (AND) or 'field OP value|field OP value' (OR). Fields: prob, conf. OPs: >=, <=, >, < (or ge, le, gt, lt, eq, ne). E.g., activity=yes:prob>=0.8,conf>=0.7 (AND) or activity=yes:prob>=0.8|conf>=0.7 (OR). Words: ge,le,gt,lt,eq,ne avoid shell escaping. Multiple --q are AND'd.")
+    p_search.add_argument("--q", dest="q_values", action="append", default=[], help="Filter condition: 'question=choice:field OP value[,field OP value...]' (AND) or 'field OP value|field OP value' (OR). Fields: prob, conf, prob:<choice>, rank:<choice>. OPs: >=, <=, >, < (or ge, le, gt, lt, eq, ne). E.g., activity=yes:prob>=0.8,conf>=0.7 (AND) or activity=yes:prob>=0.8|conf>=0.7 (OR). Choice-specific: prob:walking>=0.7, rank:running le 2. Words: ge,le,gt,lt,eq,ne avoid shell escaping. Multiple --q are AND'd.")
     p_search.add_argument("--top", type=int, default=None, help="Limit to top N frames (or ranges) by probability; results are sorted by timestamp ascending.")
     p_search.add_argument(
         "--top-per-video", type=int, default=None,
