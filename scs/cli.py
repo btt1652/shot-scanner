@@ -940,76 +940,72 @@ def cmd_search(args):
                 sys.exit(1)
             seen[q] = True
 
-    # Parse conditions with field operators
-    # Syntax per condition:
-    #   question=choice:prob&&conf    -> AND between prob and confidence (both must meet threshold)
-    #   question=choice:prob||conf    -> OR between prob and confidence (either meets threshold)
-    #   question=choice:prob          -> only prob threshold
-    #   question=choice:prob:conf     -> same as && (AND)
+    # Parse conditions with Option 1 syntax:
+    #   question=choice:prob>=X,conf>=Y       -> AND (both must meet threshold)
+    #   question=choice:prob>=X|conf>=Y       -> OR (either meets threshold)
+    #   question=choice:prob>=X               -> only prob threshold
+    #   question=choice:conf>=Y               -> only confidence threshold
     # Multiple --q flags are AND'd together
-    # Example: --q "activity=yes:0.8||0.7" --q "scene_type=couple:0.9&&0.8"
-    #   => (activity=yes AND (prob>=0.8 OR confidence>=0.7)) AND (scene_type=couple AND prob>=0.9 AND confidence>=0.8)
-    conditions = []  # list of (qname, choice, prob, confidence, use_or)
+    # Example: --q "activity=yes:prob>=0.8|conf>=0.7" --q "scene_type=couple:prob>=0.9,conf>=0.8"
+    #   => (activity=yes AND (prob>=0.8 OR conf>=0.7)) AND (scene_type=couple AND prob>=0.9 AND conf>=0.8)
+    conditions = []  # list of (qname, choice, field_conditions, use_or)
+    # field_conditions: list of (field, op, value) where field in ('prob', 'conf'), op in ('>=', '<=', '>', '<')
+    # use_or: True if conditions within this --q are OR'd, False if AND'd
     for q in q_list:
         parts = q.split('=')
         if len(parts) < 2:
-            print(f"Error: invalid --q format '{q}'. Expected 'question=choice:prob[&&conf] or question=choice:prob||conf'.", file=sys.stderr)
+            print(f"Error: invalid --q format '{q}'. Expected 'question=choice:field>=value[,field>=value...]' or 'field>=value|field>=value'.", file=sys.stderr)
             cache_db.close()
             sys.exit(1)
         qname = parts[0].strip()
-        rest = parts[1]  # e.g., "yes:0.8||0.7" or "yes:0.8&&0.7" or "yes:0.8:0.7"
+        rest = parts[1]  # e.g., "yes:prob>=0.8|conf>=0.7" or "yes:prob>=0.8,conf>=0.7"
         
-        # Check for field operators
-        if '||' in rest:
-            # OR between prob and confidence
-            choice_part, rest_part = rest.split(':', 1)
-            choice = choice_part.strip().lower()
-            prob_conf = rest_part.split('||')
-            if len(prob_conf) != 2:
-                print(f"Error: invalid --q format '{q}'. Expected 'choice:prob||conf' for field-OR.", file=sys.stderr)
-                cache_db.close()
-                sys.exit(1)
-            try:
-                prob = float(prob_conf[0].strip())
-                confidence = float(prob_conf[1].strip())
-            except ValueError:
-                print(f"Error: invalid probability/confidence in '{q}'. Use numeric values.", file=sys.stderr)
-                cache_db.close()
-                sys.exit(1)
-            conditions.append((qname, choice, prob, confidence, True))  # use_or = True
-        elif '&&' in rest:
-            # AND between prob and confidence (explicit)
-            choice_part, rest_part = rest.split(':', 1)
-            choice = choice_part.strip().lower()
-            prob_conf = rest_part.split('&&')
-            if len(prob_conf) != 2:
-                print(f"Error: invalid --q format '{q}'. Expected 'choice:prob&&conf' for field-AND.", file=sys.stderr)
-                cache_db.close()
-                sys.exit(1)
-            try:
-                prob = float(prob_conf[0].strip())
-                confidence = float(prob_conf[1].strip())
-            except ValueError:
-                print(f"Error: invalid probability/confidence in '{q}'. Use numeric values.", file=sys.stderr)
-                cache_db.close()
-                sys.exit(1)
-            conditions.append((qname, choice, prob, confidence, False))  # use_or = False (AND)
+
+        
+        # First, extract choice (text before first :)
+        if ':' not in rest:
+            print(f"Error: missing choice in '{q}'. Expected 'choice:prob>=0.8,...'.", file=sys.stderr)
+            cache_db.close()
+            sys.exit(1)
+        choice, field_part = rest.split(':', 1)
+        choice = choice.strip().lower()
+
+        
+        # Now parse field_part for conditions
+        # Split by | for OR, then by , for AND
+        or_parts = [p.strip() for p in field_part.split('|')]
+        if len(or_parts) > 1:
+            use_or = True
         else:
-            # Standard format: choice:prob[:confidence] (AND between prob and confidence)
-            rest_parts = rest.split(':')
-            if len(rest_parts) < 2 or len(rest_parts) > 3:
-                print(f"Error: invalid --q format '{q}'. Expected 'choice:prob' or 'choice:prob:confidence' or 'choice:prob&&conf' or 'choice:prob||conf'.", file=sys.stderr)
+            use_or = False
+            or_parts = [p.strip() for p in field_part.split(',')]
+        
+        field_conditions = []
+        import re
+        for part in or_parts:
+            # Parse field OP value
+            # Support both symbols (>=, <=, >, <) and words (ge, le, gt, lt, eq, ne)
+            # Words avoid shell escaping issues
+            match = re.match(r'^(prob|conf)\s*(>=|<=|>|<|ge|le|gt|lt|eq|ne)\s*([0-9.]+)$', part, re.IGNORECASE)
+            if not match:
+                print(f"Error: invalid field condition '{part}'. Expected 'prob>=0.8' or 'prob ge 0.8' or 'conf le 0.7' etc.", file=sys.stderr)
                 cache_db.close()
                 sys.exit(1)
-            choice = rest_parts[0].strip().lower()
-            try:
-                prob = float(rest_parts[1].strip())
-                confidence = float(rest_parts[2].strip()) if len(rest_parts) == 3 else None
-            except ValueError:
-                print(f"Error: invalid probability/confidence in '{q}'. Use numeric values.", file=sys.stderr)
-                cache_db.close()
-                sys.exit(1)
-            conditions.append((qname, choice, prob, confidence, False))  # use_or = False (AND)
+            field, op, value = match.groups()
+            # Normalize word operators to symbols for SQL
+            op_map = {
+                'ge': '>=', 'le': '<=', 'gt': '>', 'lt': '<', 'eq': '=', 'ne': '!=',
+                '>=': '>=', '<=': '<=', '>': '>', '<': '<', '=': '=', '!=': '!=',
+            }
+            op = op_map.get(op.lower(), op)
+            field_conditions.append((field, op, float(value)))
+        
+        if not field_conditions:
+            print(f"Error: no valid field conditions in '{q}'.", file=sys.stderr)
+            cache_db.close()
+            sys.exit(1)
+        
+        conditions.append((qname, choice, field_conditions, use_or))
 
     top_n = int(args.top) if args.top is not None else None
 
@@ -1027,22 +1023,22 @@ def cmd_search(args):
     where_clauses = []
     params = []
 
-    # Build SQL with field-OR support (prob OR confidence per condition)
-    # Each condition can be AND (prob AND confidence) or OR (prob OR confidence)
-    # Multiple conditions are AND'd together
-    
-    for (qname, choice, prob, confidence, use_or) in conditions:
+    # Build SQL with Option 1 field conditions
+    # Each condition has field_conditions (list of field, op, value) and use_or flag
+    for (qname, choice, field_conditions, use_or) in conditions:
+        # Add qname and choice FIRST (they appear first in the WHERE clause)
+        params.extend([qname, choice])
+        
+        clauses = []
+        for field, op, value in field_conditions:
+            col = "fa.top_probability" if field == "prob" else "fa.confidence"
+            clauses.append(f"{col} {op} ?")
+            params.append(value)
+        
         if use_or:
-            # OR between prob and confidence: (prob >= ? OR confidence >= ?)
-            clause = "fa.question_name = ? AND fa.top_choice = ? AND (fa.top_probability >= ? OR fa.confidence >= ?)"
-            params.extend([qname, choice, prob, confidence])
+            clause = f"fa.question_name = ? AND fa.top_choice = ? AND ({' OR '.join(clauses)})"
         else:
-            # AND between prob and confidence (default)
-            clause = "fa.question_name = ? AND fa.top_choice = ? AND fa.top_probability >= ?"
-            params.extend([qname, choice, prob])
-            if confidence is not None:
-                clause += " AND fa.confidence >= ?"
-                params.append(confidence)
+            clause = f"fa.question_name = ? AND fa.top_choice = ? AND ({' AND '.join(clauses)})"
         where_clauses.append(clause)
     
     # Simple join: frame_answers -> analysis_runs -> videos
@@ -2012,7 +2008,7 @@ def main():
     # ---- search ----
     p_search = sub.add_parser("search", help="Search cached frame answers by question")
     p_search.add_argument("video", type=str, nargs="+", help="One or more video files/directories (e.g., video.mp4 video2/*.mp4)")
-    p_search.add_argument("--q", dest="q_values", action="append", default=[], help="Filter condition: 'question=choice:prob&&conf' (AND) or 'question=choice:prob||conf' (OR). E.g., activity=yes:0.8&&0.7 (prob>=0.8 AND conf>=0.7) or activity=yes:0.8||0.7 (prob>=0.8 OR conf>=0.7). Also supports 'question=choice:prob:conf' (same as &&). Multiple --q are AND'd.")
+    p_search.add_argument("--q", dest="q_values", action="append", default=[], help="Filter condition: 'question=choice:field OP value[,field OP value...]' (AND) or 'field OP value|field OP value' (OR). Fields: prob, conf. OPs: >=, <=, >, < (or ge, le, gt, lt, eq, ne). E.g., activity=yes:prob>=0.8,conf>=0.7 (AND) or activity=yes:prob>=0.8|conf>=0.7 (OR). Words: ge,le,gt,lt,eq,ne avoid shell escaping. Multiple --q are AND'd.")
     p_search.add_argument("--top", type=int, default=None, help="Limit to top N frames (or ranges) by probability; results are sorted by timestamp ascending.")
     p_search.add_argument(
         "--top-per-video", type=int, default=None,
