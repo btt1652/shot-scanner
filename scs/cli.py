@@ -988,7 +988,7 @@ def cmd_search(args):
             # Examples: prob>=0.8, conf ge 0.7, prob:walking>=0.7, rank:running<=2
             match = re.match(r'^(prob|conf|rank)(?::([a-zA-Z_][a-zA-Z0-9_]*))?\s*(>=|<=|>|<|ge|le|gt|lt|eq|ne)\s*([0-9.]+)$', part, re.IGNORECASE)
             if not match:
-                print(f"Error: invalid field condition '{part}'. Expected 'prob>=0.8', 'prob:walking>=0.7', 'conf ge 0.7', 'rank:running le 2' etc.", file=sys.stderr)
+                print(f"Error: invalid field condition '{part}'. Expected 'prob>=0.8', 'prob:walking>=0.7', 'conf<=0.7', 'rank:running<2' etc. Or use word operators: ge, le, gt, lt, eq, ne (e.g., 'prob ge 0.8').", file=sys.stderr)
                 cache_db.close()
                 sys.exit(1)
             field, choice, op, value = match.groups()
@@ -2036,7 +2036,7 @@ def main():
     # ---- search ----
     p_search = sub.add_parser("search", help="Search cached frame answers by question")
     p_search.add_argument("video", type=str, nargs="+", help="One or more video files/directories (e.g., video.mp4 video2/*.mp4)")
-    p_search.add_argument("--q", dest="q_values", action="append", default=[], help="Filter condition: 'question=choice:field OP value[,field OP value...]' (AND) or 'field OP value|field OP value' (OR). Fields: prob, conf, prob:<choice>, rank:<choice>. OPs: >=, <=, >, < (or ge, le, gt, lt, eq, ne). E.g., activity=yes:prob>=0.8,conf>=0.7 (AND) or activity=yes:prob>=0.8|conf>=0.7 (OR). Choice-specific: prob:walking>=0.7, rank:running le 2. Words: ge,le,gt,lt,eq,ne avoid shell escaping. Multiple --q are AND'd.")
+    p_search.add_argument("--q", dest="q_values", action="append", default=[], help="Filter condition: 'question=choice:field OP value[,field OP value...]' (AND) or 'field OP value|field OP value' (OR). Fields: prob, conf, prob:<choice>, rank:<choice>. OPs: >=, <=, >, < (symbols) or ge, le, gt, lt, eq, ne (words). E.g., activity=yes:prob>=0.8,conf>=0.7 (AND) or activity=yes:prob>=0.8|conf>=0.7 (OR). Choice-specific: prob:walking>=0.7, rank:running<=2. Words: ge,le,gt,lt,eq,ne avoid shell escaping. Multiple --q are AND'd.")
     p_search.add_argument("--top", type=int, default=None, help="Limit to top N frames (or ranges) by probability; results are sorted by timestamp ascending.")
     p_search.add_argument(
         "--top-per-video", type=int, default=None,
