@@ -972,13 +972,13 @@ def cmd_search(args):
 
         
         # Now parse field_part for conditions
-        # Split by | for OR, then by , for AND
-        or_parts = [p.strip() for p in field_part.split('|')]
+        # Split by || for OR, then by && for AND
+        or_parts = [p.strip() for p in field_part.split('||')]
         if len(or_parts) > 1:
             use_or = True
         else:
             use_or = False
-            or_parts = [p.strip() for p in field_part.split(',')]
+            or_parts = [p.strip() for p in field_part.split('&&')]
         
         field_conditions = []
         import re
@@ -2033,7 +2033,7 @@ def main():
     # ---- search ----
     p_search = sub.add_parser("search", help="Search cached frame answers by question")
     p_search.add_argument("video", type=str, nargs="+", help="One or more video files/directories (e.g., video.mp4 video2/*.mp4)")
-    p_search.add_argument("--q", dest="q_values", action="append", default=[], help="Filter condition: 'question=choice:field>=value[,field>=value...]' (AND) or 'field>=value|field>=value' (OR). Fields: prob, conf, prob:<choice>, rank:<choice>. Operator: >= only (or 'ge' word). E.g., activity=yes:prob>=0.8,conf>=0.7 (AND) or activity=yes:prob>=0.8|conf>=0.7 (OR). Choice-specific: prob:walking>=0.7, rank:running>=2. Word 'ge' avoids shell escaping. Multiple --q are AND'd.")
+    p_search.add_argument("--q", dest="q_values", action="append", default=[], help="Filter condition: 'question=choice:field>=value[&&field>=value...]' (AND) or 'field>=value||field>=value' (OR). Fields: prob, conf, prob:<choice>, rank:<choice>. Operator: >= only (or 'ge' word). E.g., activity=yes:prob>=0.8&&conf>=0.7 (AND) or activity=yes:prob>=0.8||conf>=0.7 (OR). Choice-specific: prob:walking>=0.7, rank:running>=2. Word 'ge' avoids shell escaping. Multiple --q are AND'd.")
     p_search.add_argument("--top", type=int, default=None, help="Limit to top N frames (or ranges) by probability; results are sorted by timestamp ascending.")
     p_search.add_argument(
         "--top-per-video", type=int, default=None,
