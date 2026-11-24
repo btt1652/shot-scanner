@@ -8,7 +8,7 @@ A lightweight CLI that analyzes video frames using an Ollama decision model as t
 |---------|-------------|
 | `scs analyze <video>` | Analyze video frames using Ollama choice-question model |
 | `scs query "<sql>" [--cache CACHE] [--save-frame DIR]` | Query the cache or extract matching frames |
-| `scs search <video> [--q "question=choice:prob"]* [--top N] [--top-per-video N] [--merge-result-threshold SEC] [--model MODEL] [--run-id RUN_ID] [--save-frame DIR] [--stitch]` | Human-friendly search without SQL |
+| `scs search <video> [--q "(group)"]* [--top N] [--top-per-video N] [--merge-result-threshold SEC] [--model MODEL] [--run-id RUN_ID] [--save-frame DIR] [--stitch]` | Human-friendly search with compact or grouped filter syntax (see below) |
 | `scs cache <cmd>` | Cache management: list, delete, prune, clear, clean |
 
 ## isearch - Experimental Image-Based Search
@@ -83,6 +83,7 @@ ollama_frame_scale = 0.1
 ollama_decision_model = "d1:3b"
 ollama_timeout = 60
 ollama_state_template = "sample frame from a video"
+ollama_frame_history = 5
 cache = "./.cache.db"
 still_frame_threshold = 0.95
 same_scene_threshold = 0.80
@@ -103,6 +104,7 @@ criteria = { morning = "Morning light", afternoon = "Afternoon light", evening =
 ### Override Precedence
 Command-line arguments take precedence over `config.toml`:
 - `--ollama-model MODEL` → overrides `ollama_decision_model` used for new analysis runs (analyze only)
+- `--ollama-frame-history N` → number of previous frames to use as context for current analysis (default: 5). Always uses **full JSON** format including all probabilities and confidence scores.
 - `--model MODEL` → filters results by model name when querying cache (search only)
 - `--q "question=choice:prob"` → adds filter criteria (search only)
 - `--run-id RUN_ID` → targets a specific analysis run ID (search only)
@@ -118,6 +120,42 @@ Command-line arguments take precedence over `config.toml`:
 ## Frame Filenames
 
 Filename format: `{video_name}_f{frame_index:06d}_{ts:.1f}s_{question_name}_{choice}.jpg`
+
+## Frame History Context
+
+By default, `scs analyze` sends independent batches of frames to the Ollama model — each batch has no knowledge of what happened in previous scenes. The `ollama_frame_history` setting enables **temporal anchoring**: including recent previous frames' question answers as context for each new request.
+
+### How it works
+
+- Set `ollama_frame_history = N` (default: 5) in `config.toml`, or use `--ollama-frame-history N` on the CLI
+- By default, the system always uses **full JSON format** to dump complete raw response body per question — including all probabilities, confidence scores, and metadata from the Ollama response for maximum fidelity
+- Before sending each batch, the system builds a context string listing the N most recent processed frames with their timestamps and question answers
+- Still frames detected between processed frames are tracked as `[still_frame]` (no model call was made), so the model knows about processing gaps
+- This context is appended to the `state` field sent to Ollama, giving the model temporal awareness without adding extra images
+
+### Example context output
+
+The system always uses **full JSON format** to provide maximum visibility into previous frame results:
+
+```
+Recent context (3 frames):
+Frame 120 (00:04:00):
+  activity: {"choice": "yes", "probabilities": {"yes": 0.88, "no": 0.12}, "confidence": 0.91}
+  act_category: {"choice": "oral_on_female", "probabilities": {"oral_on_female": 0.76, "vaginal_sex": 0.15, "non_sexual": 0.09}, "confidence": 0.82}
+  time_of_day: {"choice": "evening", "probabilities": {"evening": 0.91, "morning": 0.06, "afternoon": 0.03}, "confidence": 0.95}
+Frame 150 (00:05:00) [still_frame]: skipped
+Frame 180 (00:06:01):
+  activity: {"choice": "yes", "probabilities": {"yes": 0.85, "no": 0.15}, "confidence": 0.87}
+  act_category: {"choice": "oral_on_female", "probabilities": {"oral_on_female": 0.72, "vaginal_sex": 0.19, "non_sexual": 0.09}, "confidence": 0.79}
+  time_of_day: {"choice": "evening", "probabilities": {"evening": 0.89, "morning": 0.07, "afternoon": 0.04}, "confidence": 0.93}
+```
+
+This tells the model:
+- At 00:04:00 the scene had high-confidence results (`yes: 0.88`, `evening: 0.91`)
+- A still frame at 00:05:00 means the camera was static — no model call needed
+- At 00:06:01 the pattern held consistently (`activity=yes: 0.85`), just slightly lower confidence after a gap
+
+The full JSON response gives the model complete visibility into previous decisions: all probability distributions, confidence scores, and metadata. This allows detecting subtle shifts even when the top choice doesn't change (e.g., `vaginal_sex` went from 0.15 → 0.19), helping the model distinguish between stable scenes and transitions.
 
 ## Human-Friendly Search
 
@@ -141,8 +179,25 @@ scs search video.mp4 \
 
 ### Parameters
 - `<video>`: Video path (or glob/directory pattern)
-- `--q "question=choice:prob[:confidence]"`: Filter condition (repeatable). Add optional confidence threshold (e.g., `activity=yes:0.8:0.7`). **Within a single `--q`, use ` | ` for OR logic** (e.g., `activity=yes:0.8 | activity=no:0.7`). **Multiple `--q` flags are AND'd together**.
-  - Example: `--q "activity=yes:0.8 | activity=no:0.7" --q "scene_type=couple:0.9"` means `(activity=yes OR activity=no) AND scene_type=couple`.
+- `--q "question=choice:prob[:confidence]"`: Filter condition (repeatable).
+
+  **Compact syntax** (legacy): `question=choice:field>=val[&&field>=val...]`
+  - Within a single `--q`, use `&&` for AND, `||` for OR: `activity=yes:prob>=0.8&&conf>=0.5` or `act_category=oral_on_female:prob>=0.6||conf>=0.7`
+  - Multiple `--q` flags are AND'd together.
+
+  **Grouped syntax** (NEW): Wrap complex conditions in parentheses to group independent questions:
+  ```bash
+  # OR between groups, AND within each group
+  scs search video.mp4 --q '(act_category=oral_on_female:prob ge 0.8&&conf ge 0.5)||(act_category=vaginal_sex:prob ge 0.7)'
+  
+  # AND between multiple --q groups
+  scs search video.mp4 --q '(act_category=oral_on_female:prob ge 0.6)' --q '(camera_angle=front:prob ge 0.7)'
+  
+  # Nested OR within a group
+  scs search video.mp4 --q '(act_category=oral_on_female:prob ge 0.6||conf ge 0.7)'
+  ```
+  
+  Group syntax lets each group specify its own `question=choice` prefix with independent field filters combined via `&&`/`||`. Groups at the same `--q` level are joined by `||` (OR); multiple `--q` flags are AND'd. Use `ge` (word operator) instead of `>=` to avoid shell escaping issues.
 - `--top N`: Limit to top N frames (or ranges with `--merge-result-threshold`) by highest probability, then results are re‑ordered chronologically.
 - `--top-per-video N`: Limit number of top results per video by highest probability, then results are re‑ordered chronologically per video. When both `--top` and `--top-per-video` are supplied, `--top-per-video` takes precedence.
 - `--merge-result-threshold SEC`: Merge consecutive frames with the same score within `SEC` seconds into a single range. When used with `--top` or `--top-per-video`, the limit counts ranges (not individual frames).

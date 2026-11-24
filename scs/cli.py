@@ -7,6 +7,7 @@ Questions are defined as a JSON array (via CLI or config.toml) and each frame ge
 one answer row per question stored in the SQLite cache.
 """
 import argparse
+import collections
 import base64
 import glob
 import io
@@ -302,7 +303,7 @@ def _sql_with_params(sql: str, params: list) -> str:
     return result
 
 
-def _validate_batch_classify(frames_batch, model, state_template, questions, ollama_timeout, ollama_endpoint, batch_id_counter=None):
+def _validate_batch_classify(frames_batch, model, state_template, questions, ollama_timeout, ollama_endpoint, batch_id_counter=None, history_state=None):
     """Validate a batch of frames using multiple choice questions.
 
     frames_batch: list of tuples (frame_index, timestamp_seconds, b64_image, video_path)
@@ -324,7 +325,7 @@ def _validate_batch_classify(frames_batch, model, state_template, questions, oll
         }
     payload = {
         "model": model,
-        "state": state_template or "",
+        "state": (state_template or "") + ("\n\n" + history_state if history_state else ""),
         "images": images,
         "questions": questions_payload,
     }
@@ -579,15 +580,86 @@ def cmd_analyze(args):
         pil_img.save(buffered, format="JPEG", quality=80)
         return base64.b64encode(buffered.getvalue()).decode("utf-8")
 
+    # History tracking: store last N processed frames' results for context injection
+    # Each entry: (timestamp_seconds, frame_index, question_results_dict, was_still=False)
+    history_window_size = cfg_val("ollama_frame_history", "ollama_frame_history") or 5
+
+    # History tracking: store last N processed frames' results for context injection
+    # Each entry: (timestamp_seconds, frame_index, entries_list_or_None, was_still)
+    #   entries_list = [{"question_name": ..., "top_choice": ..., "top_probability": ..., "raw_response": ...}, ...]
+    #   was_still = True means a still_frame was detected (no model call made)
+    history_window_size = cfg_val("ollama_frame_history", "ollama_frame_history") or 5
+
+    def _format_history_context():
+        """Build context string of previous frames' results for Ollama state field.
+        
+        Always uses full JSON format: dumps complete raw response body per question
+        including all probabilities and confidence scores for maximum fidelity.
+        
+        Returns None if no history available.
+        """
+        if not video_history:
+            return None
+        
+        lines = []
+        lines.append(f"Recent context ({len(video_history)} frame(s)):")
+
+        for ts, fi, entries, was_still in video_history:
+            ts_formatted = f"{int(ts)//3600:02d}:{int(ts)%3600//60:02d}:{int(ts)%60:02d}"
+
+            if was_still and entries is None:
+                lines.append(f"Frame {fi} ({ts_formatted}) [still_frame]: skipped")
+            elif entries is None or len(entries) == 0:
+                lines.append(f"Frame {fi} ({ts_formatted}) [no_output]:")
+            else:
+                # Full JSON mode: dump complete raw responses for maximum fidelity
+                lines.append(f"Frame {fi} ({ts_formatted}):")
+                for e in entries:
+                    if not e.get("raw_response"):
+                        continue
+                    try:
+                        resp = json.loads(e["raw_response"])
+                    except (TypeError, ValueError):
+                        resp = e["raw_response"]
+                    lines.append(f'  {e["question_name"]}: {json.dumps(resp)}')
+        
+        return "\n".join(lines)
+
     def _flush_batch():
         nonlocal batch, total_validated, batch_id_counter
         if not batch:
             return
+        # Build history context from previous processed frames
+        history_state = _format_history_context()
+        
         out, batch_id_counter = _validate_batch_classify(
-            batch, model, state_template, questions, ollama_timeout, ollama_endpoint, batch_id_counter
+            batch, model, state_template, questions, ollama_timeout, ollama_endpoint, batch_id_counter, history_state
         )
         all_results.extend(out)
         total_validated += len(batch)
+        
+        # Add this batch's results to history tracking
+        # Group output rows by frame_index first
+        from collections import defaultdict as dd
+        rows_by_frame = dd(list)
+        for r in out:
+            rows_by_frame[r.get("frame_index", 0)].append(r)
+        
+        for fi, frame_rows in rows_by_frame.items():
+            if fi <= 0:
+                continue
+            ts = frame_rows[0].get("timestamp_seconds", 0)
+            # Build list of question entries with probs and raw response
+            q_entries = []
+            for r in frame_rows:
+                q_entries.append({
+                    "question_name": r.get("question_name", ""),
+                    "top_choice": r.get("top_choice", ""),
+                    "top_probability": r.get("top_probability", 0.0),
+                    "raw_response": r.get("raw_response"),
+                })
+            video_history.append((ts, fi, q_entries, False))
+        
         batch = []
 
     save_cache = cache
@@ -632,6 +704,9 @@ def cmd_analyze(args):
         batch_id_counter = 0
         total_sent = 0
         
+        # Reset history tracking for each video
+        video_history = collections.deque(maxlen=history_window_size + 1)
+        
         frame_index = 0
         if cache:
             cache_results, cache_data = _try_load_cache(
@@ -650,6 +725,30 @@ def cmd_analyze(args):
                         frame_index = cache_data.get("max_frame_index", 0)
                         batch_id_counter = cache_data.get("max_batch_id", 0)
                         print(f"Resuming from frame_index={frame_index}, validated={batch_id_counter} batches", file=sys.stderr)
+                        # Preload history from cached results (last N frames)
+                        # Group cached results by frame to build per-frame question entry lists
+                        from collections import defaultdict as dd2
+                        frame_entries_map = dd2(list)
+                        for r in cache_results:
+                            fi = r.get("frame_index", 0)
+                            ts = r.get("timestamp_seconds", 0)
+                            qe = {"question_name": r.get("question_name", ""),
+                                  "top_choice": r.get("top_choice", ""),
+                                  "top_probability": r.get("top_probability", 0.0),
+                                  "raw_response": r.get("raw_response")}
+                            frame_entries_map[(ts, fi)].append(qe)
+                        
+                        # Build list of (timestamp, frame_index, entries_list, was_still=False) sorted by timestamp
+                        all_frames_history = []
+                        for (ts, fi), entries in frame_entries_map.items():
+                            all_frames_history.append((ts, fi, entries, False))
+                        all_frames_history.sort(key=lambda x: x[0])  # sort by timestamp ascending
+                        
+                        # Take the last window_size entries for history (most recent frames)
+                        preload = list(video_history)
+                        preload.extend(all_frames_history[-(history_window_size):])
+                        video_history.clear()
+                        video_history.extend(preload[-history_window_size:])
                     elif cache_status == "complete":
                         # Full cache hit - skip entire video processing
                         print(f"Full cache hit for {vp}, skipping processing", file=sys.stderr)
@@ -717,6 +816,8 @@ def cmd_analyze(args):
                         print(f"sim check {ts_cur_formatted} <-> {ts_prev_formatted} sim={similarity:.2f} (still frame, skipped)", file=sys.stderr)
                         total_extracted += 1
                         total_skipped += 1
+                        # Track still frame in history for context
+                        video_history.append((ts, frame_index, None, True))
                     elif similarity >= same_scene_threshold and len(batch) < MAX_SCENE_BATCH_SIZE:
                         print(f"sim check {ts_cur_formatted} <-> {ts_prev_formatted} sim={similarity:.2f} (same scene)", file=sys.stderr)
                         batch.append((frame_index, ts, b64, vp))
@@ -952,23 +1053,49 @@ def cmd_search(args):
     # field_conditions: list of (field, op, value) where field in ('prob', 'conf'), op in ('>=', '<=', '>', '<')
     # use_or: True if conditions within this --q are OR'd, False if AND'd
     for q in q_list:
+        # Check for grouped syntax FIRST (before splitting on =): (group) || (group) || ...
+        if q.strip().startswith("("):
+            groups = []
+            use_or = False
+            remaining = q.strip()
+            while remaining:
+                if not remaining.startswith("("):
+                    print(f"Error: expected '(' at start of group in '{q}'", file=sys.stderr)
+                    cache_db.close()
+                    sys.exit(1)
+                end = remaining.find(")")
+                if end == -1:
+                    print(f"Error: unmatched parenthesis in '{q}'", file=sys.stderr)
+                    cache_db.close()
+                    sys.exit(1)
+                group = remaining[1:end].strip()
+                groups.append(group)
+                remaining = remaining[end+1:].strip()
+                if remaining.startswith("||"):
+                    use_or = True
+                    remaining = remaining[2:].strip()
+                elif remaining:
+                    print(f"Error: expected '||' after group in '{q}'", file=sys.stderr)
+                    cache_db.close()
+                    sys.exit(1)
+            conditions.append(("group", groups, use_or))
+            continue
+
         parts = q.split('=')
         if len(parts) < 2:
-            print(f"Error: invalid --q format '{q}'. Expected 'question=choice:field>=value[,field>=value...]' or 'field>=value|field>=value'.", file=sys.stderr)
+            print(f"Error: invalid --q format '{q}'. Expected 'question=choice:field>=value[,field>=value...]' or '(group)||(group)'.", file=sys.stderr)
             cache_db.close()
             sys.exit(1)
         qname = parts[0].strip()
-        rest = parts[1]  # e.g., "yes:prob>=0.8|conf>=0.7" or "yes:prob>=0.8,conf>=0.7"
-        
+        rest = parts[1].strip()  # e.g., "yes:prob>=0.8|conf>=0.7" or "yes:prob>=0.8,conf>=0.7"
 
-        
         # First, extract choice (text before first :)
         if ':' not in rest:
             print(f"Error: missing choice in '{q}'. Expected 'choice:prob>=0.8,...'.", file=sys.stderr)
             cache_db.close()
             sys.exit(1)
-        choice, field_part = rest.split(':', 1)
-        choice = choice.strip().lower()
+        compact_choice, field_part = rest.split(':', 1)
+        compact_choice = compact_choice.strip().lower()
 
         
         # Now parse field_part for conditions
@@ -991,19 +1118,19 @@ def cmd_search(args):
                 print(f"Error: invalid field condition '{part}'. Expected 'prob>=0.8' or 'prob ge 0.8' (only >= operator supported).", file=sys.stderr)
                 cache_db.close()
                 sys.exit(1)
-            field, choice, op, value = match.groups()
+            field, field_choice, op, value = match.groups()
             # Normalize word operators to symbols for SQL
             # Only >= (or ge) is supported - normalize to >=
             if op.lower() == 'ge':
                 op = '>='
-            field_conditions.append((field, choice, op, float(value)))
+            field_conditions.append((field, field_choice, op, float(value)))
         
         if not field_conditions:
             print(f"Error: no valid field conditions in '{q}'.", file=sys.stderr)
             cache_db.close()
             sys.exit(1)
         
-        conditions.append((qname, choice, field_conditions, use_or))
+        conditions.append(("compact", (qname, compact_choice, field_conditions, use_or)))
 
     top_n = int(args.top) if args.top is not None else None
 
@@ -1021,50 +1148,135 @@ def cmd_search(args):
     where_clauses = []
     params = []
 
-    # Build SQL with Option 1 field conditions (including choice-specific)
-    # field_conditions: list of (field, choice, op, value)
-    # field: 'prob', 'conf', or 'rank'
-    # choice: None (for prob/conf) or choice name (for prob:<choice>/rank:<choice>)
-    for (qname, choice, field_conditions, use_or) in conditions:
-        # Add qname and choice FIRST (they appear first in the WHERE clause)
-        params.extend([qname, choice])
+    # Build SQL with grouped and compact syntax conditions
+    for cond_item in conditions:
+        cond_type = cond_item[0]
         
-        clauses = []
-        for field, field_choice, op, value in field_conditions:
-            if field == "prob" and field_choice is None:
-                col = "fa.top_probability"
-            elif field == "conf" and field_choice is None:
-                col = "fa.confidence"
-            elif field == "prob" and field_choice is not None:
-                # Probability of specific choice from JSON
-                escaped = field_choice.replace('"', '""')
-                json_path = '$."' + escaped + '"'
-                col = "json_extract(fa.probabilities_json, ?)"
-                clauses.append(f"{col} {op} ?")
-                params.append(json_path)
-                params.append(value)
-                continue
-            elif field == "rank" and field_choice is not None:
-                # Rank of specific choice - compute via JSON
-                escaped = field_choice.replace('"', '""')
-                json_path = '$."' + escaped + '"'
-                col = "(SELECT COUNT(*) + 1 FROM json_each(fa.probabilities_json) WHERE value > json_extract(fa.probabilities_json, ?))"
-                clauses.append(f"{col} {op} ?")
-                params.append(json_path)
-                params.append(value)
-                continue
+        if cond_type == "group":
+            # Grouped syntax: (group) || (group) || ...
+            groups = cond_item[1]
+            use_or = cond_item[2]
+            group_clauses = []
+            for group in groups:
+                # Parse each group: "qname=choice:field_condition[&&..."
+                if ":" not in group:
+                    print(f"Error: missing ':' separator in group '{group}'. Expected 'qname=choice:prob>=0.8,...'.", file=sys.stderr)
+                    cache_db.close()
+                    sys.exit(1)
+                group_prefix, group_field_part = group.split(":", 1)
+                group_prefix = group_prefix.strip()
+                # Extract qname and choice from prefix (e.g., "activity=yes")
+                if "=" not in group_prefix:
+                    print(f"Error: expected 'qname=choice' before ':' in group '{group}'.", file=sys.stderr)
+                    cache_db.close()
+                    sys.exit(1)
+                group_qname, group_choice = group_prefix.split("=", 1)
+                group_qname = group_qname.strip().lower()
+                group_choice = group_choice.strip().lower()
+                
+                group_or_parts = [p.strip() for p in group_field_part.split("||")]
+                if len(group_or_parts) > 1:
+                    group_use_or = True
+                else:
+                    group_use_or = False
+                    group_or_parts = [p.strip() for p in group_field_part.split("&&")]
+                
+                group_field_conditions = []
+                import re
+                for part in group_or_parts:
+                    match = re.match(r"^(prob|conf|rank)(?::([a-zA-Z_][a-zA-Z0-9_]*))?\s*(>=|ge)\s*([0-9.]+)$", part, re.IGNORECASE)
+                    if not match:
+                        print(f"Error: invalid field condition in group '{part}'. Expected 'prob>=0.8' or 'prob ge 0.8'.", file=sys.stderr)
+                        cache_db.close()
+                        sys.exit(1)
+                    field, choice, op, value = match.groups()
+                    if op.lower() == "ge":
+                        op = ">="
+                    group_field_conditions.append((field, choice, op, float(value)))
+                
+                if not group_field_conditions:
+                    print(f"Error: no valid field conditions in group '{group}'.", file=sys.stderr)
+                    cache_db.close()
+                    sys.exit(1)
+                
+                # Collect group-local params so we can prepend qname/choice
+                group_local_params = []
+                gclauses = []
+                for field, field_choice, op, value in group_field_conditions:
+                    if field == "prob" and field_choice is None:
+                        col = "fa.top_probability"
+                    elif field == "conf" and field_choice is None:
+                        col = "fa.confidence"
+                    elif field == "prob" and field_choice is not None:
+                        escaped = field_choice.replace('"', '""')
+                        json_path = '$."' + field_choice + '"'
+                        col = "json_extract(fa.probabilities_json, ?)"
+                        group_local_params.append(json_path)
+                    elif field == "rank" and field_choice is not None:
+                        escaped = field_choice.replace('"', '""')
+                        json_path = '$."' + field_choice + '"'
+                        col = "(SELECT COUNT(*) + 1 FROM json_each(fa.probabilities_json) WHERE value > json_extract(fa.probabilities_json, ?))"
+                    else:
+                        print(f"Error: invalid field/choice combination in group: {field}:{field_choice}", file=sys.stderr)
+                        cache_db.close()
+                        sys.exit(1)
+                    gclauses.append(f"{col} {op} ?")
+                    group_local_params.append(value)
+                
+                # Build field filter
+                field_filter = "( " + (" OR " if group_use_or else " AND ").join(gclauses) + " )"
+                
+                # Add qname/choice FIRST, then group local params
+                group_params = [group_qname, group_choice] + group_local_params
+                params.extend(group_params)
+                group_clause = f"fa.question_name = ? AND fa.top_choice = ? AND {field_filter}"
+                group_clauses.append(group_clause)
+            
+            if use_or:
+                combined = " OR ".join(group_clauses)
             else:
-                print(f"Error: invalid field/choice combination: {field}:{field_choice}", file=sys.stderr)
-                cache_db.close()
-                sys.exit(1)
-            clauses.append(f"{col} {op} ?")
-            params.append(value)
-        
-        if use_or:
-            clause = f"fa.question_name = ? AND fa.top_choice = ? AND ({' OR '.join(clauses)})"
+                combined = " AND ".join(group_clauses)
+            where_clauses.append("( " + combined + " )")
+            continue
         else:
-            clause = f"fa.question_name = ? AND fa.top_choice = ? AND ({' AND '.join(clauses)})"
-        where_clauses.append(clause)
+            # Compact syntax (legacy) - cond_item is ('compact', (qname, choice, field_conditions, use_or))
+            _, (qname, choice, field_conditions, use_or) = cond_item
+            params.extend([qname, choice])
+            
+            clauses = []
+            for field, field_choice, op, value in field_conditions:
+                if field == "prob" and field_choice is None:
+                    col = "fa.top_probability"
+                elif field == "conf" and field_choice is None:
+                    col = "fa.confidence"
+                elif field == "prob" and field_choice is not None:
+                    escaped = field_choice.replace('"', '""')
+                    json_path = '$."' + escaped + '"'
+                    col = "json_extract(fa.probabilities_json, ?)"
+                    clauses.append(f"{col} {op} ?")
+                    params.append(json_path)
+                    params.append(value)
+                    continue
+                elif field == "rank" and field_choice is not None:
+                    escaped = field_choice.replace('"', '""')
+                    json_path = '$."' + escaped + '"'
+                    col = "(SELECT COUNT(*) + 1 FROM json_each(fa.probabilities_json) WHERE value > json_extract(fa.probabilities_json, ?))"
+                    clauses.append(f"{col} {op} ?")
+                    params.append(json_path)
+                    params.append(value)
+                    continue
+                else:
+                    print(f"Error: invalid field/choice combination: {field}:{field_choice}", file=sys.stderr)
+                    cache_db.close()
+                    sys.exit(1)
+                clauses.append(f"{col} {op} ?")
+                params.append(value)
+            
+            if use_or:
+                clause = f"fa.question_name = ? AND fa.top_choice = ? AND ({' OR '.join(clauses)})"
+            else:
+                clause = f"fa.question_name = ? AND fa.top_choice = ? AND ({' AND '.join(clauses)})"
+            where_clauses.append(clause)
     
     # Simple join: frame_answers -> analysis_runs -> videos
     from_clause = "frame_answers fa JOIN analysis_runs ar1 ON fa.run_id = ar1.id LEFT JOIN videos v ON ar1.video_id = v.id"
@@ -2021,6 +2233,7 @@ def main():
     p_classify.add_argument("--recursive", "-R", action="store_true", default=False, help="Recursively scan directories for video files")
     p_classify.add_argument("--cache", type=str, default=None, help="Path to SQLite cache file (default: ./.cache.db)")
     p_classify.add_argument("--ollama-state", "-s", type=str, default=None, help="State context string for Ollama (default: 'sample frame from a video')")
+    p_classify.add_argument("--ollama-frame-history", type=int, default=None, help="Number of previous processed frames to include as context (default: 5). Set to 0 to disable.")
     p_classify.set_defaults(func=cmd_analyze)
 
     # ---- query ----
@@ -2033,7 +2246,7 @@ def main():
     # ---- search ----
     p_search = sub.add_parser("search", help="Search cached frame answers by question")
     p_search.add_argument("video", type=str, nargs="+", help="One or more video files/directories (e.g., video.mp4 video2/*.mp4)")
-    p_search.add_argument("--q", dest="q_values", action="append", default=[], help="Filter condition: 'question=choice:field>=value[&&field>=value...]' (AND) or 'field>=value||field>=value' (OR). Fields: prob, conf, prob:<choice>, rank:<choice>. Operator: >= only (or 'ge' word). E.g., activity=yes:prob>=0.8&&conf>=0.7 (AND) or activity=yes:prob>=0.8||conf>=0.7 (OR). Choice-specific: prob:walking>=0.7, rank:running>=2. Word 'ge' avoids shell escaping. Multiple --q are AND'd.")
+    p_search.add_argument("--q", dest="q_values", action="append", default=[], help="Filter condition. Compact: 'question=choice:field>=val[&&field>=val...]' (AND) or 'field>=val||field>=val' (OR). Grouped: '(question=choice:field>=val)||(question=choice:field>=val)' for complex OR/AND combinations. Groups allow independent qname+choice with nested ||/&& operators. Fields: prob, conf, prob:<choice>, rank:<choice>. Operator: >= only (or 'ge' word). E.g., activity=yes:prob>=0.8&&conf>=0.7, or (activity=yes:prob>=0.8||conf>=0.5)||(scene=couple:prob>=0.9). Word 'ge' avoids shell escaping. Multiple --q flags are AND'd together.")
     p_search.add_argument("--top", type=int, default=None, help="Limit to top N frames (or ranges) by probability; results are sorted by timestamp ascending.")
     p_search.add_argument(
         "--top-per-video", type=int, default=None,
