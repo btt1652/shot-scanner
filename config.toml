@@ -15,86 +15,39 @@ cache = "./.cache.db"
 still_frame_threshold = 0.95
 same_scene_threshold = 0.80
 recursive = false
+ollama_frame_history = 5
+
+[[questions]]
+name = "female_nudity"
+instructions = "Classify only the female actress's nudity level based on clothing type, body coverage, and visible exposed body areas. Consider both how much of her body is covered and the type of clothing she is wearing. Use visual evidence only"
+criteria = { "fully nude" = "The actress is completely naked and is not wearing clothing or underwear. Her body is entirely uncovered, although the entire body does not need to be visible in the frame if there is sufficient visual evidence to establish complete nudity", "partial nude" = "The actress is either wearing regular clothing that exposes intimate body parts or wearing minimal-coverage clothing that leaves most of her body exposed. This includes two cases: (1) Regular clothing that is opened, lowered, or adjusted to reveal breasts, nipples, buttocks, or genital areas, even if the rest of the outfit provides substantial coverage. (2) Minimal-coverage outfits such as bikinis, lingerie, bras, panties, or underwear, even when intimate body parts remain covered, if approximately 70% or more of the visible body surface is exposed skin. Use the overall amount of exposed skin and the type of clothing to make this classification. Do not count ordinary exposed areas such as the face, hands, or arms alone as sufficient coverage evidence", "no nudity" = "The actress is wearing regular everyday clothing, such as dresses, shirts, pants, skirts, or shorts. Clothing may expose ordinary body areas such as arms, legs, shoulders, cleavage, or stomach without qualifying as partial nudity" }
+
+[[questions]]
+name = "female_framing_direction"
+instructions = "Classify the actress's body orientation relative to the camera based exclusively on the direction her torso is facing. Ignore the direction of her head, face, hips, and legs. Determine which side of her torso is most prominently visible to the camera"
+criteria = { "front" = "The front of the actress's torso is facing the camera. Her chest and abdomen are primarily facing toward the camera", "side" = "The actress's torso is turned sideways relative to the camera. The side profile of her torso is primarily visible. This includes diagonal or three-quarter angles when the torso is positioned between a front-facing and back-facing orientation", "back" = "The back of the actress's torso is facing the camera. Her back is primarily visible, while her chest and abdomen are facing away from the camera" }
+
+[[questions]]
+name = "female_framing"
+instructions = "Classify the camera framing based on which parts of the female actress's body are visible in the frame. Focus on the visible body area, not her pose or body orientation. Select the most specific matching category"
+criteria = { "head and torso" = "head and torso\": \"The actress's head and upper body are visible, including her shoulders, chest, waist, or abdomen", "lower body" = "The frame primarily shows the actress's lower body, such as her buttocks, hips, thighs, or legs, while her head and upper torso are outside the frame or not significantly visible", "full body" = "The frame shows the actress's head, torso, and legs together. Her entire body does not need to be visible, but substantial portions of all three areas must be within the frame" }
+
+[[questions]]
+name = "sexual_activity"
+instructions = "Classify the sexual activity visibly taking place in the frame. Focus on the action being performed, not the participants' body positions. Use only visible evidence and do not infer activity from poses or facial expressions alone"
+criteria = { "kissing" = "The actress is visibly kissing another person on the lips or tongue", "makeout" = "The actress is touching or being touched on intimate body areas or cuddle each other in a sexual context", "blowjob" = "The actress is visibly performing or receiving oral sexual activity, including a blowjob", "penetrative_sex" = "The actress is visibly engaging in vaginal or anal penetrative sexual activity", "masturbation" = "The actress is visibly stimulating her own genitals for sexual purposes" }
 
 [[questions]]
 name = "sex_position"
-instructions = "What sexual position is depicted in this frame? Choose the best match."
-criteria = { "missionary" = "Missionary position (man on top, face-to-face)", "doggy_style" = "Doggy style / rear entry", "cowgirl" = "Cowgirl / woman on top facing man", "reverse_cowgirl" = "Reverse cowgirl / woman on top facing away", "spooning" = "Spooning / side-by-side rear entry", "standing" = "Standing position", "sixty_nine" = "69 / mutual oral", "blowjob" = "Fellatio / blowjob (primary focus)", "cunnilingus" = "Cunnilingus / oral on female", "handjob" = "Handjob / manual stimulation", "fingering" = "Fingering / manual stimulation of female", "anal" = "Anal penetration", "double_penetration" = "Double penetration (DP)", "tribbing" = "Tribbing / scissoring", "other" = "Other position not listed", "none" = "No sexual position visible" }
+instructions = "Classify the physical arrangement of the actress and her partner based on their visible body positions and relative orientation. Focus on who is above or below, whether they are standing, sitting, or lying down, and whether they face each other or face away. Ignore the specific sexual activity being performed. Select the closest matching position"
+criteria = { "missionary" = "The actress is lying on her back while her partner is positioned above her, facing her", "cowgirl" = "The actress is positioned above her partner, facing toward her partner", "reverse_cowgirl" = "The actress is positioned above her partner, facing away from her partner", "doggy_style" = "The actress is positioned on her hands and knees or leaning forward, with her partner positioned behind her", "standing" = "Both participants are standing during the interaction", "side_by_side" = "Both participants are lying beside each other, either facing the same direction or facing one another", "sitting" = "One or both participants are seated, with their bodies arranged in a seated position", "other_position" = "The participants' physical arrangement is visible but does not match any of the defined positions" }
 
 [[questions]]
-name = "scene_type"
-instructions = "How many people are actively engaged and what is the group dynamic?"
-criteria = { "solo" = "Solo / masturbation (one person)", "couple" = "Couple / two people", "threesome" = "Threesome (three people)", "foursome" = "Foursome (four people)", "gangbang" = "Gangbang (one person with multiple partners sequentially/simultaneously)", "orgy" = "Orgy (multiple people, 5+, group sex)", "not_applicable" = "No sexual activity / non-sexual scene" }
+name = "female_count"
+instructions = "How many female actress in the frame?"
+criteria = { "one" = "", "more than one" = "" }
 
 [[questions]]
-name = "nudity_level"
-instructions = "What level of nudity is visible in this frame?"
-criteria = { "fully_clothed" = "Fully clothed, no skin exposure beyond face/hands", "partially_clothed" = "Partially clothed (lingerie, underwear, partial undress)", "topless" = "Topless (breasts exposed, bottom covered)", "bottomless" = "Bottomless (genitals/buttocks exposed, top covered)", "fully_nude" = "Fully nude (full body exposed)", "implied_nude" = "Implied nude (strategically covered/framed)" }
-
-[[questions]]
-name = "clothing_detail"
-instructions = "What clothing/attire is visible, if any?"
-criteria = { "none" = "No clothing visible", "lingerie" = "Lingerie / bra & panties / stockings", "underwear" = "Basic underwear only", "dress_skirt" = "Dress or skirt (partially on)", "shirt_top" = "Shirt / top only", "pants_shorts" = "Pants / shorts only", "cosplay_costume" = "Cosplay / costume / roleplay outfit", "uniform" = "Uniform (nurse, maid, police, etc.)", "shoes_only" = "Only shoes/heels worn", "accessories_only" = "Jewelry, collars, cuffs, glasses only" }
-
-[[questions]]
-name = "camera_framing"
-instructions = "What body parts are visible in the frame? (Framing/shot type)"
-criteria = { "close_up_face" = "Close-up: face only (expression, oral)", "close_up_genitals" = "Close-up: genitals / penetration detail", "close_up_body_part" = "Close-up: specific body part (breasts, buttocks, etc.)", "medium_shot" = "Medium shot: torso up (head to waist)", "medium_wide" = "Medium-wide: upper body + some context", "full_body" = "Full body visible (head to toe)", "wide_shot" = "Wide shot: full body + room/environment", "pov" = "POV (first-person perspective)", "over_shoulder" = "Over-the-shoulder angle" }
-
-[[questions]]
-name = "environment"
-instructions = "What is the setting/location of the scene?"
-criteria = { "bedroom" = "Bedroom (bed, nightstands, residential)", "living_room" = "Living room / sofa / couch setting", "kitchen" = "Kitchen / dining area", "bathroom" = "Bathroom / shower / tub", "outdoor" = "Outdoor (yard, beach, pool, public, nature)", "hotel" = "Hotel / motel room", "office" = "Office / workplace setting", "dungeon" = "Dungeon / BDSM room / play space", "vehicle" = "Car / van / vehicle interior", "studio" = "Professional studio (backdrop, lighting rig visible)", "other_indoor" = "Other indoor location" }
-
-[[questions]]
-name = "lighting_quality"
-instructions = "What is the lighting style/quality?"
-criteria = { "natural_daylight" = "Natural daylight / window light", "warm_indoor" = "Warm indoor / lamps / practical lighting", "professional_studio" = "Professional studio lighting (key/fill/rim)", "neon_colorful" = "Neon / colorful / RGB lighting", "dim_moody" = "Dim / moody / low-key lighting", "harsh_flash" = "Harsh direct flash / on-camera light", "candle_firelight" = "Candlelight / firelight / warm glow" }
-
-[[questions]]
-name = "act_category"
-instructions = "What is the primary sexual act/category in this frame?"
-criteria = { "vaginal_sex" = "Vaginal penetration (PIV)", "anal_sex" = "Anal penetration", "oral_on_male" = "Oral on male (blowjob, deepthroat)", "oral_on_female" = "Oral on female (cunnilingus, rimming)", "manual_stimulation" = "Handjob / fingering / manual", "toy_play" = "Sex toy usage (vibrator, dildo, butt plug, etc.)", "bdsm_kink" = "BDSM / kink (bondage, impact, domination, submission)", "roleplay" = "Roleplay / scenario (step-family, uniform, etc.)", "squirting" = "Squirting / female ejaculation visible", "creampie" = "Creampie / internal cumshot visible", "facial" = "Facial / cum on face", "cum_on_body" = "Cum on body (tits, ass, stomach, etc.)", "swallowing" = "Swallowing cum", "footjob" = "Footjob / foot fetish", "titjob" = "Titjob / mammary intercourse", "non_sexual" = "Non-sexual (dialogue, setup, clothed, transition)" }
-
-[[questions]]
-name = "camera_angle"
-instructions = "Camera perspective relative to the action."
-criteria = { "front" = "Front view (facing performers)", "side" = "Side profile view", "back" = "Rear view (from behind)", "top_down" = "Top-down / bird's eye", "bottom_up" = "Low angle / worm's eye", "pov_male" = "POV from male perspective", "pov_female" = "POV from female perspective", "pov_third" = "POV third person (over shoulder)", "dutch_angle" = "Dutch angle / tilted", "drone_aerial" = "Drone / aerial (outdoor)" }
-
-
-
-# {
-#   "model": "clef-flash:9b",
-#   "state": "",
-#   "questions": {
-#     "female_nudity": {
-#       "type": "choice",
-#       "instructions": "Classify the female actress's nudity level based on clothing type, body coverage, and visible exposed body areas. Consider both how much of her body is covered and the type of clothing she is wearing. Use visual evidence only",
-#       "criteria": {
-#         "fully nude": "The actress is completely naked and is not wearing clothing or underwear. Her body is entirely uncovered, although the entire body does not need to be visible in the frame if there is sufficient visual evidence to establish complete nudity",
-#         "partial nude": "The actress is either wearing regular clothing that exposes intimate body parts or wearing minimal-coverage clothing that leaves most of her body exposed. This includes two cases: (1) Regular clothing that is opened, lowered, or adjusted to reveal breasts, nipples, buttocks, or genital areas, even if the rest of the outfit provides substantial coverage. (2) Minimal-coverage outfits such as bikinis, lingerie, bras, panties, or underwear, even when intimate body parts remain covered, if approximately 70% or more of the visible body surface is exposed skin. Use the overall amount of exposed skin and the type of clothing to make this classification. Do not count ordinary exposed areas such as the face, hands, or arms alone as sufficient coverage evidence",
-#         "no nudity": "The actress is wearing regular everyday clothing, such as dresses, shirts, pants, skirts, or shorts. Clothing may expose ordinary body areas such as arms, legs, shoulders, cleavage, or stomach without qualifying as partial nudity",
-#         "unidentified": "There is insufficient visual information to determine the actress's nudity level because her clothing or relevant body areas are obscured, outside the frame, too distant, or unclear"
-#       }
-#     },
-#     "female_framing_direction": {
-#       "type": "choice",
-#       "instructions": "Classify the actress's body orientation relative to the camera based exclusively on the direction her torso is facing. Ignore the direction of her head, face, hips, and legs. Determine which side of her torso is most prominently visible to the camera",
-#       "criteria": {
-#         "front": "The front of the actress's torso is facing the camera. Her chest and abdomen are primarily facing toward the camera",
-#         "side": "The actress's torso is turned sideways relative to the camera. The side profile of her torso is primarily visible. This includes diagonal or three-quarter angles when the torso is positioned between a front-facing and back-facing orientation",
-#         "back": "The back of the actress's torso is facing the camera. Her back is primarily visible, while her chest and abdomen are facing away from the camera"
-#       }
-#     },
-#     "female_framing": {
-#       "type": "choice",
-#       "instructions": "Classify the camera framing based on which parts of the female actress's body are visible in the frame. Focus on the visible body area, not her pose or body orientation. Select the most specific matching category.",
-#       "criteria": {
-#         "head and torso": "The actress's head and upper body are visible, including her shoulders, chest, waist, or abdomen",
-#         "lower body": "The frame primarily shows the actress's lower body, such as her buttocks, hips, thighs, or legs, while her head and upper torso are outside the frame or not significantly visible.",
-#         "full body": "The frame shows the actress's head, torso, and legs together. Her entire body does not need to be visible, but substantial portions of all three areas must be within the frame",
-#         "unidentified": "There is insufficient visual information to determine the framing because the actress is heavily obscured, only a small or unclear body area is visible, or the frame does not provide enough context"
-#       }
-#     }
-#   }
-# }
+name = "female_pose"
+instructions = "Classify the female actress's physical body position in the frame. Focus on her overall posture, including whether she is standing, sitting, kneeling, crouching, or lying down. For lying positions, distinguish between lying on her front, back, or side. Base the classification on her torso, hips, and legs rather than the direction of her face. Do not infer a position when the relevant body parts are not visible"
+criteria = { "standing" = "The actress is upright on her feet, with her body supported primarily by her legs", "sitting" = "The actress is sitting on a chair, bed, floor, or another surface, with her weight supported primarily by her buttocks", "lying_on_back" = "The actress is lying horizontally with her back against a supporting surface and her chest facing upward", "lying_on_stomach" = "The actress is lying horizontally on her stomach, with her front torso facing downward", "lying_on_side" = "The actress is lying horizontally on her left or right side", "on_all_fours" = "The actress is supporting her body with both hands and both knees, with her torso generally horizontal", "kneeling" = "The actress is supporting her body on one or both knees, whether upright or leaning forward" }
