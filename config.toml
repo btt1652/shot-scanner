@@ -1,7 +1,7 @@
 # scs - Default configuration
 # Uses an Ollama decision model as the sole judge for classification.
 # Multiple questions are defined in the [[questions]] array.
-# 
+
 # feed prob score of last N request into the current request context
 # prob >= 75 or confident >= 75
 
@@ -63,13 +63,38 @@ criteria = { "front" = "Front view (facing performers)", "side" = "Side profile 
 
 
 
-# "questions": {
-#   "female_nudity": {
-#     "type": "choice",
-#     "instructions": "nudity level of female actress body",
-#     "criteria": {
-#       "fully nude": "The actress is completely naked, wearing no clothing that covers her body. This includes visible breasts, nipples, buttocks, and genital areas.",
-#       "partial nude": "The actress is partially naked or wearing revealing clothing that exposes intimate body parts or significant portions of her body. Examples include exposed breasts, nipples, buttocks, cleavage, thighs, legs, or stomach. This category also includes topless or bottomless appearances",
-#       "no nudity": "The actress is wearing regular clothing that fully covers her breasts, nipples, and genital area, without exposing her stomach",
-#       "unidentified": "There is insufficient visual information to determine the actress's nudity level. For example, the body is out of frame, obscured, too distant, or only partially visible"
-# 
+# {
+#   "model": "clef-flash:9b",
+#   "state": "",
+#   "questions": {
+#     "female_nudity": {
+#       "type": "choice",
+#       "instructions": "Classify the female actress's nudity level based on clothing type, body coverage, and visible exposed body areas. Consider both how much of her body is covered and the type of clothing she is wearing. Use visual evidence only",
+#       "criteria": {
+#         "fully nude": "The actress is completely naked and is not wearing clothing or underwear. Her body is entirely uncovered, although the entire body does not need to be visible in the frame if there is sufficient visual evidence to establish complete nudity",
+#         "partial nude": "The actress is either wearing regular clothing that exposes intimate body parts or wearing minimal-coverage clothing that leaves most of her body exposed. This includes two cases: (1) Regular clothing that is opened, lowered, or adjusted to reveal breasts, nipples, buttocks, or genital areas, even if the rest of the outfit provides substantial coverage. (2) Minimal-coverage outfits such as bikinis, lingerie, bras, panties, or underwear, even when intimate body parts remain covered, if approximately 70% or more of the visible body surface is exposed skin. Use the overall amount of exposed skin and the type of clothing to make this classification. Do not count ordinary exposed areas such as the face, hands, or arms alone as sufficient coverage evidence",
+#         "no nudity": "The actress is wearing regular everyday clothing, such as dresses, shirts, pants, skirts, or shorts. Clothing may expose ordinary body areas such as arms, legs, shoulders, cleavage, or stomach without qualifying as partial nudity",
+#         "unidentified": "There is insufficient visual information to determine the actress's nudity level because her clothing or relevant body areas are obscured, outside the frame, too distant, or unclear"
+#       }
+#     },
+#     "female_framing_direction": {
+#       "type": "choice",
+#       "instructions": "Classify the actress's body orientation relative to the camera based exclusively on the direction her torso is facing. Ignore the direction of her head, face, hips, and legs. Determine which side of her torso is most prominently visible to the camera",
+#       "criteria": {
+#         "front": "The front of the actress's torso is facing the camera. Her chest and abdomen are primarily facing toward the camera",
+#         "side": "The actress's torso is turned sideways relative to the camera. The side profile of her torso is primarily visible. This includes diagonal or three-quarter angles when the torso is positioned between a front-facing and back-facing orientation",
+#         "back": "The back of the actress's torso is facing the camera. Her back is primarily visible, while her chest and abdomen are facing away from the camera"
+#       }
+#     },
+#     "female_framing": {
+#       "type": "choice",
+#       "instructions": "Classify the camera framing based on which parts of the female actress's body are visible in the frame. Focus on the visible body area, not her pose or body orientation. Select the most specific matching category.",
+#       "criteria": {
+#         "head and torso": "The actress's head and upper body are visible, including her shoulders, chest, waist, or abdomen",
+#         "lower body": "The frame primarily shows the actress's lower body, such as her buttocks, hips, thighs, or legs, while her head and upper torso are outside the frame or not significantly visible.",
+#         "full body": "The frame shows the actress's head, torso, and legs together. Her entire body does not need to be visible, but substantial portions of all three areas must be within the frame",
+#         "unidentified": "There is insufficient visual information to determine the framing because the actress is heavily obscured, only a small or unclear body area is visible, or the frame does not provide enough context"
+#       }
+#     }
+#   }
+# }
