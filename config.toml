@@ -17,6 +17,8 @@ same_scene_threshold = 0.80
 recursive = false
 ollama_frame_history = 5
 isolated_frame_time = 3
+merge_same_threshold = 0    # >0 enables -mst (same-score merging)
+merge_threshold = 0         # >0 enables -mt (all-mode merging)
 
 [[questions]]
 name = "female_nudity"
