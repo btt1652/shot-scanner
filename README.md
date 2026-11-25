@@ -378,3 +378,23 @@ scs search video.mp4 \
   --q "activity=sitting:0.95" \
   --stitch custom_output.mp4
 ```
+
+### Isolated Frame Time Padding (`isolated_frame_time`)
+
+When stitching, frames are grouped into sections based on timestamp proximity. By default, any gap larger than `--merge-same-threshold` (or 1 sec if not set) creates a new section.
+
+The `isolated_frame_time` setting adds **extra padding seconds** around each group's end timestamp before checking for isolation. This helps bridge small gaps where you want related content stitched together even though they're slightly beyond the merge threshold.
+
+**How it works:**
+- If `isolated_frame_time = 3` and `threshold = 1`: maximum allowed gap between groups is 4 seconds
+- Gap ≤ 1 second → direct merge (clearly related)
+- Gap 1–4 seconds → pad and merge (possibly related, keep together)
+- Gap > 4 seconds → isolate (unrelated)
+
+**Configuration:** Set in `config.toml`:
+```toml
+isolated_frame_time = 3   # Seconds of padding after isolated groups (default: 3)
+merge_same_threshold = 2  # Max gap for direct grouping (optional)
+```
+
+With both set above, the stitching logic allows merging groups with gaps up to 5 seconds (2 + 3). Setting `isolated_frame_time = 0` disables padding — only exact threshold matching applies.

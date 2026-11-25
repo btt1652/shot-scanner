@@ -30,6 +30,7 @@ def default_config() -> dict:
         "ollama_state_template": "sample frame from a video",
         "ollama_frame_history": 5,
         "merge_same_threshold": 0,
+        "isolated_frame_time": 3,
         "merge_threshold": 0,
         "cache": "./.cache.db",
         "still_frame_threshold": 0.95,

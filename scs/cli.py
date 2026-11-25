@@ -1641,6 +1641,9 @@ def cmd_search(args):
         else:
             threshold = 1.0  # Default fallback
 
+        # Isolated frame padding time (configurable via config.toml, default 3 sec)
+        isolated_frame_time_sec = cfg.get("isolated_frame_time", 3) or 3
+
         # Build mapping run_id -> video_path and add source_video_path to each row
         run_to_path = {}
         for r in cache_db.execute_sql("SELECT ar.id AS run_id, v.video_path FROM analysis_runs ar JOIN videos v ON ar.video_id = v.id"):
@@ -1667,25 +1670,8 @@ def cmd_search(args):
             cache_db.close()
             sys.exit(0)
 
-        # Build sections from rows (handle ranges)
-        all_sections_by_video = {}
-        for vid, frames in by_video.items():
-            # If frames are ranges (have frame_indices), each range is a section
-            if frames and "frame_indices" in frames[0]:
-                all_sections_by_video[vid] = [[r] for r in frames]
-            else:
-                sections = []
-                cur = [frames[0]]
-                for i in range(1, len(frames)):
-                    prev_ts = frames[i - 1]["timestamp_seconds"]
-                    curr_ts = frames[i]["timestamp_seconds"]
-                    if curr_ts - prev_ts <= threshold:
-                        cur.append(frames[i])
-                    else:
-                        sections.append(cur)
-                        cur = [frames[i]]
-                sections.append(cur)
-                all_sections_by_video[vid] = sections
+        # Build sections from rows with isolated-frame-time padding
+        all_sections_by_video = _build_stitch_sections(by_video, threshold, isolated_frame_time_sec)
 
         # Determine output paths
         if args.stitch and isinstance(args.stitch, str):
@@ -1708,18 +1694,30 @@ def cmd_search(args):
             try:
                 for sec_idx, section in enumerate(sections):
                     img_paths = []
+                    seg_frame_counter = 0
                     for f_idx, row in enumerate(section):
-                        if "frame_indices" in row:
-                            fi = int(row.get("frame_indices")[0])
+                        # Get all frame indices from this row (ranges may have multiple)
+                        fi_list = row.get("frame_indices", None)
+                        if fi_list:
+                            # Range: extract each individual frame
+                            for fi in fi_list:
+                                cap.set(cv2.CAP_PROP_POS_FRAMES, int(fi))
+                                ret, frame = cap.read()
+                                if ret:
+                                    img_path = os.path.join(tmpdir, f"seg_{seg_frame_counter:04d}.jpg")
+                                    cv2.imwrite(img_path, frame)
+                                    img_paths.append(img_path)
+                                    seg_frame_counter += 1
                         else:
+                            # Non-range: single timestamp
                             fi = int(row.get("frame_index", 0))
-
-                        cap.set(cv2.CAP_PROP_POS_FRAMES, fi)
-                        ret, frame = cap.read()
-                        if ret:
-                            img_path = os.path.join(tmpdir, f"seg_{f_idx:04d}.jpg")
-                            cv2.imwrite(img_path, frame)
-                            img_paths.append(img_path)
+                            cap.set(cv2.CAP_PROP_POS_FRAMES, fi)
+                            ret, frame = cap.read()
+                            if ret:
+                                img_path = os.path.join(tmpdir, f"seg_{seg_frame_counter:04d}.jpg")
+                                cv2.imwrite(img_path, frame)
+                                img_paths.append(img_path)
+                                seg_frame_counter += 1
                     if img_paths:
                         seg_file = os.path.join(tmpdir, f"segment_{sec_idx:04d}.mp4")
                         pattern = os.path.join(tmpdir, "seg_%04d.jpg")
@@ -2023,6 +2021,116 @@ def cmd_cache(args):
 
     cache_db.close()
     sys.exit(1)
+
+
+def _get_row_ts(row):
+    """Get the primary timestamp from a row (for sorting/grouping)."""
+    if "start_timestamp" in row:
+        return row["start_timestamp"]
+    return row.get("timestamp_seconds", 0)
+
+
+def _get_row_end_ts(row):
+    """Get the end timestamp from a row. Ranges use end_timestamp; non-ranges use same as start."""
+    if "end_timestamp" in row:
+        return row["end_timestamp"]
+    return row.get("timestamp_seconds", 0)
+
+
+def _build_stitch_sections(by_video, threshold_sec, isolated_padding_sec):
+    """Build stitch sections from query results, applying isolated-frame-time padding.
+    
+    For both range and non-range rows: when an isolated gap is detected between groups,
+    pad forward from the group's end timestamp by isolated_padding_sec. If the next
+    result falls within that padded window, it merges into the same section.
+    
+    This prevents isolated moments from being cut off from nearby results during stitching.
+    
+    Args:
+        by_video: dict mapping video_path -> list of row dicts (sorted by ts ascending)
+        threshold_sec: max gap for direct grouping (e.g., 1.0 sec)
+        isolated_padding_sec: extra seconds to pad after isolated group (e.g., 3 sec)
+    
+    Returns:
+        dict mapping video_path -> list of sections, where each section is a list of row dicts
+    """
+    all_sections_by_video = {}
+    
+    for vid, frames in by_video.items():
+        if not frames:
+            continue
+        
+        # Normalize frames: sort by timestamp, track whether they're ranges
+        has_ranges = any("frame_indices" in f for f in frames)
+        sorted_frames = sorted(frames, key=lambda r: _get_row_ts(r))
+        
+        if not has_ranges:
+            # Non-range mode: walk through timestamps with padding logic
+            sections = []
+            cur_section = [sorted_frames[0]]
+            prev_end = _get_row_end_ts(sorted_frames[0])
+            was_isolated = False
+            
+            for i in range(1, len(sorted_frames)):
+                curr_frame = sorted_frames[i]
+                curr_start = _get_row_ts(curr_frame)
+                curr_end = _get_row_end_ts(curr_frame)
+                gap = curr_start - prev_end
+                
+                max_gap_allowed = threshold_sec + isolated_padding_sec
+                
+                if gap <= threshold_sec:
+                    # Close enough — keep merging directly
+                    cur_section.append(curr_frame)
+                    prev_end = curr_end
+                    was_isolated = False
+                elif gap < max_gap_allowed:
+                    # Within padding zone — isolate but still merge into same section
+                    cur_section.append(curr_frame)
+                    prev_end = curr_end
+                    was_isolated = True
+                else:
+                    # Truly too far — finalize current, start new section
+                    sections.append(cur_section)
+                    cur_section = [curr_frame]
+                    prev_end = curr_end
+                    was_isolated = True
+            
+            # Don't forget last section
+            sections.append(cur_section)
+            all_sections_by_video[vid] = sections
+        else:
+            # Range mode: apply padding between consecutive ranges
+            sections = []
+            cur_section = [sorted_frames[0]]
+            prev_range_end = _get_row_end_ts(sorted_frames[0])
+            
+            for i in range(1, len(sorted_frames)):
+                curr_range = sorted_frames[i]
+                curr_start = _get_row_ts(curr_range)
+                curr_end = _get_row_end_ts(curr_range)
+                gap = curr_start - prev_range_end
+                
+                max_gap_allowed = threshold_sec + isolated_padding_sec
+                
+                if gap <= threshold_sec:
+                    # Close enough — keep in same section
+                    cur_section.append(curr_range)
+                    prev_range_end = curr_end
+                elif gap < max_gap_allowed:
+                    # Within padding zone — merge despite isolation
+                    cur_section.append(curr_range)
+                    prev_range_end = curr_end
+                else:
+                    # Too far — isolate this range as its own section
+                    sections.append(cur_section)
+                    cur_section = [curr_range]
+                    prev_range_end = curr_end
+            
+            sections.append(cur_section)
+            all_sections_by_video[vid] = sections
+    
+    return all_sections_by_video
 
 
 def _resolve_paths(paths: list[Path]) -> set[Path]:
