@@ -1349,16 +1349,20 @@ def cmd_search(args):
         params.append(args.run_id)
 
     top_per_video = getattr(args, "top_per_video", None)
-    merge_threshold = getattr(args, "merge_result_threshold", None)
+    merge_same_threshold = getattr(args, "merge_same_threshold", None)
+    merge_threshold = getattr(args, "merge_threshold", None)
 
-    # --top-per-video overrides --top when both are supplied
-    if top_per_video is not None and top_n is not None:
-        top_n = None
+    # Determine which merge mode is active
+    use_merge_same = merge_same_threshold is not None
+    use_merge_all = merge_threshold is not None
+    use_merge = use_merge_same or use_merge_all
 
-    use_merge = merge_threshold is not None
-
-    def _merge_frame_rows_into_ranges(rows, threshold):
-        """Merge consecutive rows with same score into ranges."""
+    def _merge_frame_rows_into_ranges(rows, threshold, group_by_score=True):
+        """Merge consecutive rows into timestamp ranges.
+        
+        If group_by_score=True (same-mode): only merge rows with identical probability score.
+        If group_by_score=False (all-mode): merge ALL adjacent rows by timestamp proximity.
+        """
         from collections import defaultdict
         groups = defaultdict(list)
         for r in rows:
@@ -1376,13 +1380,29 @@ def cmd_search(args):
                 prob = r.get("top_probability")
                 ts = r.get("timestamp_seconds") or 0
                 fid = r.get("frame_index") or 0
-                if (
-                    current is not None
-                    and prob == current.get("top_probability")
-                    and (ts - current.get("end_timestamp")) <= threshold
-                ):
+                
+                if group_by_score:
+                    # Same-mode: merge only when score matches AND within threshold
+                    should_merge = (
+                        current is not None
+                        and prob == current.get("top_probability")
+                        and (ts - current.get("end_timestamp")) <= threshold
+                    )
+                else:
+                    # All-mode: merge whenever within threshold regardless of score
+                    should_merge = (
+                        current is not None
+                        and (ts - current.get("end_timestamp")) <= threshold
+                    )
+                
+                if should_merge:
                     current["end_timestamp"] = ts
                     current["frame_indices"].append(fid)
+                    # Track best probability seen in this range
+                    if prob is not None and (current.get("top_probability") is None or prob > current["top_probability"]):
+                        current["top_probability"] = prob
+                        current["top_choice"] = r.get("top_choice")
+                        current["confidence"] = r.get("confidence")
                 else:
                     if current is not None:
                         ranges.append(current)
@@ -1414,7 +1434,12 @@ def cmd_search(args):
         print(f"{_sql_with_params(query_sql, params)}\n", file=sys.stderr)
         rows = cache_db.execute_sql(query_sql, params)
 
-        results = _merge_frame_rows_into_ranges(rows, merge_threshold)
+        if use_merge_all:
+            # All-mode: merge all adjacent rows by timestamp proximity regardless of score
+            results = _merge_frame_rows_into_ranges(rows, merge_threshold, group_by_score=False)
+        else:
+            # Same-mode: merge only rows with identical probability score
+            results = _merge_frame_rows_into_ranges(rows, merge_same_threshold, group_by_score=True)
 
         if top_n is not None:
             results = sorted(results, key=lambda r: (r.get("top_probability") or 0), reverse=True)[:top_n]
@@ -1555,9 +1580,14 @@ def cmd_search(args):
         from collections import defaultdict
 
         cfg = load_config()
-        # --stitch now uses --merge-result-threshold (default 1.0 seconds)
-        threshold = getattr(args, "merge_result_threshold", None)
-        if threshold is None:
+        # Stitch: use --merge-threshold/-mt if given (all-mode), else --merge-same-threshold/-mst (same-score), else default 1.0
+        stitch_merge_all = getattr(args, "merge_threshold", None)
+        stitch_merge_same = getattr(args, "merge_same_threshold", None)
+        if stitch_merge_all is not None:
+            threshold = stitch_merge_all
+        elif stitch_merge_same is not None:
+            threshold = stitch_merge_same
+        else:
             threshold = 1.0
 
         # Build mapping run_id -> video_path and add source_video_path to each row
@@ -2119,19 +2149,53 @@ def cmd_isearch(args):
         where_clauses.append("fa.run_id = ?")
         params.append(args.run_id)
 
-    # top / top-per-video logic (reuse simplified)
+    # top / top-per-video / merge logic
     top_n = args.top
     top_per_video = args.top_per_video
-    merge_threshold = args.merge_result_threshold
+    merge_same_threshold = getattr(args, "merge_same_threshold", None)
+    merge_all_threshold = getattr(args, "merge_threshold", None)
+    use_merge_same = merge_same_threshold is not None
+    use_merge_all = merge_all_threshold is not None
+    use_merge = use_merge_same or use_merge_all
 
-    # If top-per-video given, use a window function (similar to search)
-    if top_per_video is not None:
+    if use_merge:
+        # Fetch all matching rows; limits applied to merged ranges in Python.
+        query_sql = f"""
+            SELECT DISTINCT {select_cols}
+            FROM {from_clause}
+            WHERE {' AND '.join(where_clauses)}
+            ORDER BY fa.top_probability DESC
+        """
+        print(f"{_sql_with_params(query_sql, params)}\n", file=sys.stderr)
+        rows = cache_db.execute_sql(query_sql, params)
+
+        if use_merge_all:
+            results = _merge_frame_rows_into_ranges(rows, merge_all_threshold, group_by_score=False)
+        else:
+            results = _merge_frame_rows_into_ranges(rows, merge_same_threshold, group_by_score=True)
+
+        if top_n is not None:
+            results = sorted(results, key=lambda r: (r.get("top_probability") or 0), reverse=True)[:top_n]
+
+        if top_per_video is not None:
+            from collections import defaultdict
+            by_run = defaultdict(list)
+            for r in results:
+                by_run[r.get("run_id")].append(r)
+            results_merged = []
+            for rid, group in by_run.items():
+                group_sorted = sorted(group, key=lambda r: (r.get("top_probability") or 0), reverse=True)
+                results_merged.extend(group_sorted[:top_per_video])
+            results = results_merged
+        rows = results
+    elif top_per_video is not None:
+        # Use a window function to limit the top N frames per video.
         query_sql = f"""
             WITH ranked AS (
-                SELECT fa.run_id, fa.frame_index, fa.timestamp_seconds, fa.question_name, fa.top_choice, fa.top_probability, v.id AS video_id
+                SELECT fa.run_id, fa.frame_index, fa.timestamp_seconds, fa.question_name, fa.top_choice, fa.top_probability, v.id AS video_id,
+                       ROW_NUMBER() OVER (PARTITION BY v.id ORDER BY fa.top_probability DESC) AS rn
                 FROM {from_clause}
                 WHERE {' AND '.join(where_clauses)}
-                ROW_NUMBER() OVER (PARTITION BY v.id ORDER BY fa.top_probability DESC) AS rn
             )
             SELECT run_id, frame_index, timestamp_seconds, question_name, top_choice, top_probability
             FROM ranked
@@ -2228,12 +2292,12 @@ def main():
     p_classify.add_argument("--ollama-frame-scale", "-ofs", type=float, default=None, help="Scale factor for frames sent to Ollama (0.0-1.0, default: 0.1). Lower = faster")
     p_classify.add_argument("--ollama-model", "-dm", default=None, help="Ollama model name (default: typesafe/jev-1.14)")
     p_classify.add_argument("--ollama-timeout", "-ot", type=int, default=None, help="Ollama request timeout in seconds (default: 60)")
-    p_classify.add_argument("--still-frame-threshold", type=float, default=None, help="Similarity (0-1) above which a frame is considered still (default: 0.95)")
-    p_classify.add_argument("--same-scene-threshold", type=float, default=None, help="Similarity (0-1) above which frames are considered same scene (default: 0.80)")
+    p_classify.add_argument("--still-frame-threshold", "-sft", type=float, default=None, help="Similarity (0-1) above which a frame is considered still (default: 0.95)")
+    p_classify.add_argument("--same-scene-threshold", "-sst", type=float, default=None, help="Similarity (0-1) above which frames are considered same scene (default: 0.80)")
     p_classify.add_argument("--recursive", "-R", action="store_true", default=False, help="Recursively scan directories for video files")
-    p_classify.add_argument("--cache", type=str, default=None, help="Path to SQLite cache file (default: ./.cache.db)")
+    p_classify.add_argument("--cache", "-c", type=str, default=None, help="Path to SQLite cache file (default: ./.cache.db)")
     p_classify.add_argument("--ollama-state", "-s", type=str, default=None, help="State context string for Ollama (default: 'sample frame from a video')")
-    p_classify.add_argument("--ollama-frame-history", type=int, default=None, help="Number of previous processed frames to include as context (default: 5). Set to 0 to disable.")
+    p_classify.add_argument("--ollama-frame-history", "-fh", type=int, default=None, help="Number of previous processed frames to include as context (default: 5). Set to 0 to disable.")
     p_classify.set_defaults(func=cmd_analyze)
 
     # ---- query ----
@@ -2247,17 +2311,18 @@ def main():
     p_search = sub.add_parser("search", help="Search cached frame answers by question")
     p_search.add_argument("video", type=str, nargs="+", help="One or more video files/directories (e.g., video.mp4 video2/*.mp4)")
     p_search.add_argument("--q", dest="q_values", action="append", default=[], help="Filter condition. Compact: 'question=choice:field>=val[&&field>=val...]' (AND) or 'field>=val||field>=val' (OR). Grouped: '(question=choice:field>=val)||(question=choice:field>=val)' for complex OR/AND combinations. Groups allow independent qname+choice with nested ||/&& operators. Fields: prob, conf, prob:<choice>, rank:<choice>. Operator: >= only (or 'ge' word). E.g., activity=yes:prob>=0.8&&conf>=0.7, or (activity=yes:prob>=0.8||conf>=0.5)||(scene=couple:prob>=0.9). Word 'ge' avoids shell escaping. Multiple --q flags are AND'd together.")
-    p_search.add_argument("--top", type=int, default=None, help="Limit to top N frames (or ranges) by probability; results are sorted by timestamp ascending.")
+    p_search.add_argument("--top", "-t", type=int, default=None, help="Limit to top N frames (or ranges) by probability; results are sorted by timestamp ascending.")
     p_search.add_argument(
-        "--top-per-video", type=int, default=None,
+        "--top-per-video", "-tpv", type=int, default=None,
         help="Limit number of top results per video by probability; results are sorted by timestamp ascending per video (overrides --top if both given)",
     )
-    p_search.add_argument("--merge-result-threshold", type=float, default=None, help="Timestamp difference threshold (seconds) to merge adjacent frames with the same score into a single range.")
-    p_search.add_argument("--save-frame", type=str, default=None, help="Directory to save extracted frames")
-    p_search.add_argument("--cache", type=str, default=None, help="Path to SQLite cache file (default: ./.cache.db)")
-    p_search.add_argument("--model", type=str, default=None, help="Filter results by Ollama model name (e.g., clef-flash:9b, d1:3b)")
-    p_search.add_argument("--run-id", type=int, default=None, help="Filter results to a specific analysis run ID")
-    p_search.add_argument("--stitch", nargs="?", const=True, default=None, metavar="PATH", help="Stitch matched frames into a single video using ffmpeg. Uses --merge-result-threshold (default 1 sec) to group consecutive frames with the same score into ranges. Optional: provide output path (auto-generates if omitted).")
+    p_search.add_argument("--merge-same-threshold", "-mst", type=float, default=None, help="Timestamp difference threshold (seconds) to merge adjacent frames with the SAME score into a single range. Only merges rows sharing an identical top_probability.")
+    p_search.add_argument("--merge-threshold", "-mt", type=float, default=None, help="Timestamp difference threshold (seconds) to merge ALL adjacent query results into ranges based on timestamp proximity alone (regardless of score differences). Produces continuous time-range blocks from any matching frames.")
+    p_search.add_argument("--save-frame", "-sf", type=str, default=None, help="Directory to save extracted frames")
+    p_search.add_argument("--cache", "-c", type=str, default=None, help="Path to SQLite cache file (default: ./.cache.db)")
+    p_search.add_argument("--model", "-m", type=str, default=None, help="Filter results by Ollama model name (e.g., clef-flash:9b, d1:3b)")
+    p_search.add_argument("--run-id", "-ri", type=int, default=None, help="Filter results to a specific analysis run ID")
+    p_search.add_argument("--stitch", "-st", nargs="?", const=True, default=None, metavar="PATH", help="Stitch matched frames into a single video using ffmpeg. Default threshold is 1 second unless --merge-same-threshold/-mst or --merge-threshold/-mt is provided.")
     p_search.set_defaults(func=cmd_search)
 
     # ---- isearch ----
@@ -2265,15 +2330,16 @@ def main():
     p_isearch.add_argument("image", type=Path, help="Path to reference image (jpg, png, webp, bmp …).")
     p_isearch.add_argument("--question", "-Q", type=str, default=None, help="Question name to score the reference image against (optional if --question-ref is given).")
     p_isearch.add_argument("-qr", "--question-ref", type=str, default=None, help="Use the question set from a run_id (integer) or latest run of a video path (string).")
-    p_isearch.add_argument("--video", nargs="+", type=Path, default=None, help="One or more video paths to filter results by (space-separated).")
-    p_isearch.add_argument("--top", type=int, default=None, help="Limit to top N frames by probability.")
-    p_isearch.add_argument("--top-per-video", type=int, default=None, help="Limit number of top results per video by probability.")
-    p_isearch.add_argument("--merge-result-threshold", type=float, default=None, help="Timestamp difference threshold (seconds) to merge adjacent frames with same score.")
-    p_isearch.add_argument("--save-frame", type=str, default=None, help="Directory to save extracted frames (JPG only).")
-    p_isearch.add_argument("--cache", type=str, default=None, help="Path to SQLite cache file (default: ./.cache.db)")
-    p_isearch.add_argument("--model", type=str, default=None, help="Filter results by Ollama model name (e.g., clef-flash:9b, d1:3b)")
-    p_isearch.add_argument("--run-id", type=int, default=None, help="Filter results to a specific analysis run ID")
-    p_isearch.add_argument("--stitch", nargs="?", const=True, default=None, metavar="PATH", help="Stitch matched frames into a single video using ffmpeg.")
+    p_isearch.add_argument("--video", "-v", nargs="+", type=Path, default=None, help="One or more video paths to filter results by (space-separated).")
+    p_isearch.add_argument("--top", "-t", type=int, default=None, help="Limit to top N frames by probability.")
+    p_isearch.add_argument("--top-per-video", "-tpv", type=int, default=None, help="Limit number of top results per video by probability.")
+    p_isearch.add_argument("--merge-same-threshold", "-mst", type=float, default=None, help="Timestamp difference threshold (seconds) to merge adjacent frames with same score.")
+    p_isearch.add_argument("--merge-threshold", "-mt", type=float, default=None, help="Timestamp difference threshold (seconds) to merge ALL adjacent query results into ranges based on timestamp proximity alone (regardless of score differences).")
+    p_isearch.add_argument("--save-frame", "-sf", type=str, default=None, help="Directory to save extracted frames (JPG only).")
+    p_isearch.add_argument("--cache", "-c", type=str, default=None, help="Path to SQLite cache file (default: ./.cache.db)")
+    p_isearch.add_argument("--model", "-m", type=str, default=None, help="Filter results by Ollama model name (e.g., clef-flash:9b, d1:3b)")
+    p_isearch.add_argument("--run-id", "-ri", type=int, default=None, help="Filter results to a specific analysis run ID")
+    p_isearch.add_argument("--stitch", "-st", nargs="?", const=True, default=None, metavar="PATH", help="Stitch matched frames into a single video using ffmpeg. Default threshold is 1 second unless --merge-same-threshold/-mst or --merge-threshold/-mt is provided.")
     p_isearch.set_defaults(func=cmd_isearch)
 
     # ---- cache ----

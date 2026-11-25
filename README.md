@@ -179,13 +179,13 @@ scs search video.mp4 \
 
 ### Parameters
 - `<video>`: Video path (or glob/directory pattern)
-- `--q "question=choice:prob[:confidence]"`: Filter condition (repeatable).
+- `--q "question=choice:prob[:confidence]"` (`-q`): Filter condition (repeatable).
 
   **Compact syntax** (legacy): `question=choice:field>=val[&&field>=val...]`
   - Within a single `--q`, use `&&` for AND, `||` for OR: `activity=yes:prob>=0.8&&conf>=0.5` or `act_category=oral_on_female:prob>=0.6||conf>=0.7`
   - Multiple `--q` flags are AND'd together.
 
-  **Grouped syntax** (NEW): Wrap complex conditions in parentheses to group independent questions:
+  **Grouped syntax**: Wrap complex conditions in parentheses to group independent questions:
   ```bash
   # OR between groups, AND within each group
   scs search video.mp4 --q '(act_category=oral_on_female:prob ge 0.8&&conf ge 0.5)||(act_category=vaginal_sex:prob ge 0.7)'
@@ -198,14 +198,35 @@ scs search video.mp4 \
   ```
   
   Group syntax lets each group specify its own `question=choice` prefix with independent field filters combined via `&&`/`||`. Groups at the same `--q` level are joined by `||` (OR); multiple `--q` flags are AND'd. Use `ge` (word operator) instead of `>=` to avoid shell escaping issues.
-- `--top N`: Limit to top N frames (or ranges with `--merge-result-threshold`) by highest probability, then results are re‑ordered chronologically.
-- `--top-per-video N`: Limit number of top results per video by highest probability, then results are re‑ordered chronologically per video. When both `--top` and `--top-per-video` are supplied, `--top-per-video` takes precedence.
-- `--merge-result-threshold SEC`: Merge consecutive frames with the same score within `SEC` seconds into a single range. When used with `--top` or `--top-per-video`, the limit counts ranges (not individual frames).
-- `--save-frame DIR`: Save extracted frames to directory (JPG only)
-- `--model MODEL`: Filter results by Ollama model name (e.g., clef-flash:9b, d1:3b)
-- `--run-id RUN_ID`: Filter results to a specific analysis run ID
-- `--cache CACHE`: Path to SQLite cache file (default: ./.cache.db)
-- `--stitch [PATH]`: Stitch matched frames into a single video using ffmpeg. Uses `--merge-result-threshold` (default 1 sec) to group consecutive frames with the same score into ranges before stitching.
+- `--top N` (`-t`): Limit to top N frames (or ranges with merge) by highest probability, then results are re‑ordered chronologically.
+- `--top-per-video N` (`-tpv`): Limit number of top results per video by highest probability, then results are re‑ordered chronologically per video. When both `--top` and `--top-per-video` are supplied, `--top-per-video` takes precedence.
+- `--merge-same-threshold SEC` (`-mst`): Merge consecutive frames **with the SAME probability score** within `SEC` seconds into a single time-range. Only merges rows sharing an identical `top_probability`.
+- `--merge-threshold SEC` (`-mt`): Merge **ALL** adjacent query results into continuous time-ranges based on timestamp proximity alone (regardless of score differences). Produces time-range blocks spanning any probability scores as long as frames are within the threshold window.
+
+  **Example — two merge modes:**
+  Given frames at 10.0s (prob=0.85), 10.5s (prob=0.85), 11.0s (prob=0.72), 11.5s (prob=0.72):
+  - `-mst 1.0` → two ranges: `[10.0-10.5] prob=0.85` and `[11.0-11.5] prob=0.72` (score break at 11.0s)
+  - `-mt 1.0` → one range: `[10.0-11.5]` best\_prob=0.85 (all merged by timestamp continuity)
+
+  When used with `--top` or `--top-per-video`, the limit counts ranges (not individual frames).
+- `--save-frame DIR` (`-sf`): Save extracted frames to directory (JPG only)
+- `--model MODEL` (`-m`): Filter results by Ollama model name (e.g., clef-flash:9b, d1:3b)
+- `--run-id RUN_ID` (`-ri`): Filter results to a specific analysis run ID
+- `--cache CACHE` (`-c`): Path to SQLite cache file (default: ./.cache.db)
+- `--stitch [PATH]` (`-st`): Stitch matched frames into a single video using ffmpeg. Default threshold is 1 second unless `--merge-same-threshold/-mst` or `--merge-threshold/-mt` is provided.
+
+#### Quick Reference — Shorthand Flags
+| Long Flag | Short | Description |
+|-----------|-------|-------------|
+| `--top` | `-t` | Limit to top N results |
+| `--top-per-video` | `-tpv` | Limit per video |
+| `--merge-same-threshold` | `-mst` | Merge same-score frames |
+| `--merge-threshold` | `-mt` | Merge all frames by time |
+| `--save-frame` | `-sf` | Extract frame images |
+| `--model` | `-m` | Filter by model |
+| `--run-id` | `-ri` | Filter by run ID |
+| `--cache` | `-c` | Cache path |
+| `--stitch` | `-st` | Video stitching
 
 ### Frame Extraction via Search
 ```bash
