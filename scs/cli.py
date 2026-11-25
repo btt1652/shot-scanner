@@ -1028,6 +1028,15 @@ def cmd_search(args):
 
     cache_db = CacheDB(args.cache or "./.cache.db")
 
+    # Load config for default values (CLI flags override)
+    cfg = load_config()
+    def cfg_val(key, cli_arg):
+        return get_config_value(cfg, key, getattr(args, cli_arg, None))
+
+    # Merge threshold defaults from config; <= 0 means disabled
+    merge_same_threshold_default = cfg_val("merge_same_threshold", "merge_same_threshold") or 0
+    merge_all_threshold_default = cfg_val("merge_threshold", "merge_threshold") or 0
+
     # Parse --q flags into list of (question_name, choice, min_probability)
     q_list = [q.strip() for q in (args.q_values or []) if q.strip()]
 
@@ -1349,12 +1358,32 @@ def cmd_search(args):
         params.append(args.run_id)
 
     top_per_video = getattr(args, "top_per_video", None)
-    merge_same_threshold = getattr(args, "merge_same_threshold", None)
-    merge_threshold = getattr(args, "merge_threshold", None)
-
+    
+    # Merge thresholds: CLI flag overrides config default
+    # Config values <= 0 mean disabled; CLI value of 0 explicitly disables
+    _cli_same = getattr(args, "merge_same_threshold", None)
+    _cli_all = getattr(args, "merge_threshold", None)
+    
+    # Resolve final values (None from CLI means use config default)
+    if _cli_same is not None:
+        merge_same_threshold = float(_cli_same) if _cli_same != 0 else 0
+    else:
+        merge_same_threshold = float(merge_same_threshold_default) if merge_same_threshold_default and merge_same_threshold_default > 0 else 0
+    
+    if _cli_all is not None:
+        merge_threshold = float(_cli_all) if _cli_all != 0 else 0
+    else:
+        merge_threshold = float(merge_all_threshold_default) if merge_all_threshold_default and merge_all_threshold_default > 0 else 0
+    
+    # Validate: both modes cannot be enabled simultaneously
+    if merge_same_threshold > 0 and merge_threshold > 0:
+        print("Error: --merge-same-threshold/-mst and --merge-threshold/-mt are mutually exclusive. Enable only one.", file=sys.stderr)
+        cache_db.close()
+        sys.exit(1)
+    
     # Determine which merge mode is active
-    use_merge_same = merge_same_threshold is not None
-    use_merge_all = merge_threshold is not None
+    use_merge_same = merge_same_threshold > 0
+    use_merge_all = merge_threshold > 0
     use_merge = use_merge_same or use_merge_all
 
     def _merge_frame_rows_into_ranges(rows, threshold, group_by_score=True):
@@ -1580,15 +1609,37 @@ def cmd_search(args):
         from collections import defaultdict
 
         cfg = load_config()
-        # Stitch: use --merge-threshold/-mt if given (all-mode), else --merge-same-threshold/-mst (same-score), else default 1.0
+        
+        # Merge threshold defaults from config; <= 0 means disabled
+        _cfg_same = cfg.get("merge_same_threshold", 0) or 0
+        _cfg_all = cfg.get("merge_threshold", 0) or 0
+        
+        # CLI flag overrides config default
         stitch_merge_all = getattr(args, "merge_threshold", None)
         stitch_merge_same = getattr(args, "merge_same_threshold", None)
+        
         if stitch_merge_all is not None:
-            threshold = stitch_merge_all
-        elif stitch_merge_same is not None:
-            threshold = stitch_merge_same
+            threshold_all = float(stitch_merge_all) if stitch_merge_all != 0 else 0
         else:
-            threshold = 1.0
+            threshold_all = float(_cfg_all) if _cfg_all > 0 else 0
+        
+        if stitch_merge_same is not None:
+            threshold_same = float(stitch_merge_same) if stitch_merge_same != 0 else 0
+        else:
+            threshold_same = float(_cfg_same) if _cfg_same > 0 else 0
+        
+        # Validate: both modes cannot be enabled simultaneously in stitch either
+        if threshold_all > 0 and threshold_same > 0:
+            print("Error: --merge-same-threshold/-mst and --merge-threshold/-mt are mutually exclusive.", file=sys.stderr)
+            cache_db.close()
+            sys.exit(1)
+        
+        if threshold_all > 0:
+            threshold = threshold_all
+        elif threshold_same > 0:
+            threshold = threshold_same
+        else:
+            threshold = 1.0  # Default fallback
 
         # Build mapping run_id -> video_path and add source_video_path to each row
         run_to_path = {}
@@ -2034,6 +2085,12 @@ def cmd_isearch(args):
     from collections import defaultdict
 
     cfg = load_config()
+    def cfg_val(key, cli_arg):
+        return get_config_value(cfg, key, getattr(args, cli_arg, None))
+
+    # Merge threshold defaults from config; <= 0 means disabled
+    merge_same_threshold_default = cfg_val("merge_same_threshold", "merge_same_threshold") or 0
+    merge_all_threshold_default = cfg_val("merge_threshold", "merge_threshold") or 0
 
     # Resolve video set if provided
     video_set = None
@@ -2152,10 +2209,30 @@ def cmd_isearch(args):
     # top / top-per-video / merge logic
     top_n = args.top
     top_per_video = args.top_per_video
-    merge_same_threshold = getattr(args, "merge_same_threshold", None)
-    merge_all_threshold = getattr(args, "merge_threshold", None)
-    use_merge_same = merge_same_threshold is not None
-    use_merge_all = merge_all_threshold is not None
+    
+    # Merge thresholds: CLI flag overrides config default
+    _cli_same = getattr(args, "merge_same_threshold", None)
+    _cli_all = getattr(args, "merge_threshold", None)
+    
+    # Resolve final values (None from CLI means use config default)
+    if _cli_same is not None:
+        merge_same_threshold = float(_cli_same) if _cli_same != 0 else 0
+    else:
+        merge_same_threshold = float(merge_same_threshold_default) if merge_same_threshold_default > 0 else 0
+    
+    if _cli_all is not None:
+        merge_all_threshold = float(_cli_all) if _cli_all != 0 else 0
+    else:
+        merge_all_threshold = float(merge_all_threshold_default) if merge_all_threshold_default > 0 else 0
+    
+    # Validate: both modes cannot be enabled simultaneously
+    if merge_same_threshold > 0 and merge_all_threshold > 0:
+        print("Error: --merge-same-threshold/-mst and --merge-threshold/-mt are mutually exclusive. Enable only one.", file=sys.stderr)
+        cache_db.close()
+        sys.exit(1)
+    
+    use_merge_same = merge_same_threshold > 0
+    use_merge_all = merge_all_threshold > 0
     use_merge = use_merge_same or use_merge_all
 
     if use_merge:
@@ -2316,8 +2393,8 @@ def main():
         "--top-per-video", "-tpv", type=int, default=None,
         help="Limit number of top results per video by probability; results are sorted by timestamp ascending per video (overrides --top if both given)",
     )
-    p_search.add_argument("--merge-same-threshold", "-mst", type=float, default=None, help="Timestamp difference threshold (seconds) to merge adjacent frames with the SAME score into a single range. Only merges rows sharing an identical top_probability.")
-    p_search.add_argument("--merge-threshold", "-mt", type=float, default=None, help="Timestamp difference threshold (seconds) to merge ALL adjacent query results into ranges based on timestamp proximity alone (regardless of score differences). Produces continuous time-range blocks from any matching frames.")
+    p_search.add_argument("--merge-same-threshold", "-mst", type=float, default=None, help="Timestamp difference threshold (seconds) to merge adjacent frames with the SAME score into a single range. Only merges rows sharing an identical top_probability. Default from config.toml: merge_same_threshold = 0 (disabled). Set > 0 to enable. Can be overridden via CLI.")
+    p_search.add_argument("--merge-threshold", "-mt", type=float, default=None, help="Timestamp difference threshold (seconds) to merge ALL adjacent query results into ranges based on timestamp proximity alone (regardless of score differences). Produces continuous time-range blocks from any matching frames. Default from config.toml: merge_threshold = 0 (disabled). Set > 0 to enable. Can be overridden via CLI. Mutually exclusive with -mst.")
     p_search.add_argument("--save-frame", "-sf", type=str, default=None, help="Directory to save extracted frames")
     p_search.add_argument("--cache", "-c", type=str, default=None, help="Path to SQLite cache file (default: ./.cache.db)")
     p_search.add_argument("--model", "-m", type=str, default=None, help="Filter results by Ollama model name (e.g., clef-flash:9b, d1:3b)")
@@ -2334,7 +2411,7 @@ def main():
     p_isearch.add_argument("--top", "-t", type=int, default=None, help="Limit to top N frames by probability.")
     p_isearch.add_argument("--top-per-video", "-tpv", type=int, default=None, help="Limit number of top results per video by probability.")
     p_isearch.add_argument("--merge-same-threshold", "-mst", type=float, default=None, help="Timestamp difference threshold (seconds) to merge adjacent frames with same score.")
-    p_isearch.add_argument("--merge-threshold", "-mt", type=float, default=None, help="Timestamp difference threshold (seconds) to merge ALL adjacent query results into ranges based on timestamp proximity alone (regardless of score differences).")
+    p_isearch.add_argument("--merge-threshold", "-mt", type=float, default=None, help="Timestamp difference threshold (seconds) to merge ALL adjacent query results into ranges based on timestamp proximity alone (regardless of score differences). Mutually exclusive with -mst. Default from config.toml: merge_threshold = 0 (disabled).")
     p_isearch.add_argument("--save-frame", "-sf", type=str, default=None, help="Directory to save extracted frames (JPG only).")
     p_isearch.add_argument("--cache", "-c", type=str, default=None, help="Path to SQLite cache file (default: ./.cache.db)")
     p_isearch.add_argument("--model", "-m", type=str, default=None, help="Filter results by Ollama model name (e.g., clef-flash:9b, d1:3b)")

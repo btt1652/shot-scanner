@@ -84,6 +84,8 @@ ollama_decision_model = "d1:3b"
 ollama_timeout = 60
 ollama_state_template = "sample frame from a video"
 ollama_frame_history = 5
+merge_same_threshold = 0     # >0 enables -mst (same-score merging)
+merge_threshold = 0          # >0 enables -mt (all-mode merging, mutually exclusive with -mst)
 cache = "./.cache.db"
 still_frame_threshold = 0.95
 same_scene_threshold = 0.80
@@ -200,8 +202,8 @@ scs search video.mp4 \
   Group syntax lets each group specify its own `question=choice` prefix with independent field filters combined via `&&`/`||`. Groups at the same `--q` level are joined by `||` (OR); multiple `--q` flags are AND'd. Use `ge` (word operator) instead of `>=` to avoid shell escaping issues.
 - `--top N` (`-t`): Limit to top N frames (or ranges with merge) by highest probability, then results are re‑ordered chronologically.
 - `--top-per-video N` (`-tpv`): Limit number of top results per video by highest probability, then results are re‑ordered chronologically per video. When both `--top` and `--top-per-video` are supplied, `--top-per-video` takes precedence.
-- `--merge-same-threshold SEC` (`-mst`): Merge consecutive frames **with the SAME probability score** within `SEC` seconds into a single time-range. Only merges rows sharing an identical `top_probability`.
-- `--merge-threshold SEC` (`-mt`): Merge **ALL** adjacent query results into continuous time-ranges based on timestamp proximity alone (regardless of score differences). Produces time-range blocks spanning any probability scores as long as frames are within the threshold window.
+- `--merge-same-threshold SEC` (`-mst`): Merge consecutive frames **with the SAME probability score** within `SEC` seconds into a single time-range. Only merges rows sharing an identical `top_probability`. Default from `config.toml`: `merge_same_threshold = 0` (disabled). Set `> 0` to enable, or override via CLI.
+- `--merge-threshold SEC` (`-mt`): Merge **ALL** adjacent query results into continuous time-ranges based on timestamp proximity alone (regardless of score differences). Produces time-range blocks spanning any probability scores as long as frames are within the threshold window. Default from `config.toml`: `merge_threshold = 0` (disabled). Set `> 0` to enable, or override via CLI. Mutually exclusive with `-mst` — both cannot be enabled simultaneously.
 
   **Example — two merge modes:**
   Given frames at 10.0s (prob=0.85), 10.5s (prob=0.85), 11.0s (prob=0.72), 11.5s (prob=0.72):
@@ -216,17 +218,17 @@ scs search video.mp4 \
 - `--stitch [PATH]` (`-st`): Stitch matched frames into a single video using ffmpeg. Default threshold is 1 second unless `--merge-same-threshold/-mst` or `--merge-threshold/-mt` is provided.
 
 #### Quick Reference — Shorthand Flags
-| Long Flag | Short | Description |
-|-----------|-------|-------------|
-| `--top` | `-t` | Limit to top N results |
-| `--top-per-video` | `-tpv` | Limit per video |
-| `--merge-same-threshold` | `-mst` | Merge same-score frames |
-| `--merge-threshold` | `-mt` | Merge all frames by time |
-| `--save-frame` | `-sf` | Extract frame images |
-| `--model` | `-m` | Filter by model |
-| `--run-id` | `-ri` | Filter by run ID |
-| `--cache` | `-c` | Cache path |
-| `--stitch` | `-st` | Video stitching
+| Long Flag | Short | Default in config.toml | Description |
+|-----------|-------|------------------------|-------------|
+| `--top` | `-t` | — | Limit to top N results |
+| `--top-per-video` | `-tpv` | — | Limit per video |
+| `--merge-same-threshold` | `-mst` | `merge_same_threshold = 0` | Merge same-score frames (set >0 to enable) |
+| `--merge-threshold` | `-mt` | `merge_threshold = 0` | Merge all frames by time (mutually exclusive with -mst) |
+| `--save-frame` | `-sf` | — | Extract frame images |
+| `--model` | `-m` | — | Filter by model |
+| `--run-id` | `-ri` | — | Filter by run ID |
+| `--cache` | `-c` | — | Cache path |
+| `--stitch` | `-st` | — | Video stitching
 
 ### Frame Extraction via Search
 ```bash
