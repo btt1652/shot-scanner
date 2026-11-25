@@ -16,6 +16,7 @@ still_frame_threshold = 0.95
 same_scene_threshold = 0.80
 recursive = false
 ollama_frame_history = 5
+isolated_frame_time = 3
 
 [[questions]]
 name = "female_nudity"
