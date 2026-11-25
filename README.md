@@ -211,6 +211,54 @@ scs search video.mp4 \
   - `-mt 1.0` → one range: `[10.0-11.5]` best\_prob=0.85 (all merged by timestamp continuity)
 
   When used with `--top` or `--top-per-video`, the limit counts ranges (not individual frames).
+
+#### AI Agent / Programmatic Output (`--json`)
+
+Use `--json` (or `-j`) to output results as a clean JSON array instead of ASCII table:
+
+```bash
+# Get top 3 matching frames as JSON
+scs search video.mp4 --q "activity=yes:prob>=0.8" --top 3 --json
+```
+
+**Output format (individual frames):**
+```json
+[
+  {
+    "range": false,
+    "timestamp_seconds": 1528.861,
+    "frame_index": 45820,
+    "question_name": "act_category",
+    "top_choice": "oral_on_female",
+    "top_probability": 0.767853,
+    "confidence": 0.91,
+    "video_id": 68,
+    "run_id": 68
+  }
+]
+```
+
+**Output format (merged ranges with `-mst`/`-mt`):**
+```json
+[
+  {
+    "range": true,
+    "start_timestamp_seconds": 1528.861,
+    "end_timestamp_seconds": 1529.828,
+    "duration_seconds": 0.968,
+    "frame_count": 2,
+    "question_name": "act_category",
+    "top_choice": "oral_on_female",
+    "top_probability": 0.767853,
+    "confidence": null,
+    "frame_indices": [45820, 45849],
+    "video_id": 68,
+    "run_id": 68
+  }
+]
+```
+
+This is designed for easy consumption by LLM agents, CI pipelines, or any tool that needs structured data.
 - `--save-frame DIR` (`-sf`): Save extracted frames to directory (JPG only)
 - `--model MODEL` (`-m`): Filter results by Ollama model name (e.g., clef-flash:9b, d1:3b)
 - `--run-id RUN_ID` (`-ri`): Filter results to a specific analysis run ID
@@ -224,6 +272,7 @@ scs search video.mp4 \
 | `--top-per-video` | `-tpv` | — | Limit per video |
 | `--merge-same-threshold` | `-mst` | `merge_same_threshold = 0` | Merge same-score frames (set >0 to enable) |
 | `--merge-threshold` | `-mt` | `merge_threshold = 0` | Merge all frames by time (mutually exclusive with -mst) |
+| `--json` | `-j` | — | Output JSON array for AI agents / programmatic use (overrides table) |
 | `--save-frame` | `-sf` | — | Extract frame images |
 | `--model` | `-m` | — | Filter by model |
 | `--run-id` | `-ri` | — | Filter by run ID |

@@ -1754,7 +1754,57 @@ def cmd_search(args):
         cache_db.close()
         sys.exit(0)
 
-    _print_table(rows)
+    # Output results
+    if getattr(args, "json", False):
+        # JSON mode for AI agents / programmatic use
+        import json as _json
+        
+        output = []
+        for r in rows:
+            is_range = "start_timestamp" in r and "end_timestamp" in r
+            
+            if is_range:
+                entries = {
+                    "range": True,
+                    "start_timestamp_seconds": round(r.get("start_timestamp", 0), 3),
+                    "end_timestamp_seconds": round(r.get("end_timestamp", 0), 3),
+                    "duration_seconds": round(r.get("end_timestamp", 0) - r.get("start_timestamp", 0), 3),
+                    "frame_count": len(r.get("frame_indices", [])),
+                    "question_name": r.get("question_name", ""),
+                    "top_choice": r.get("top_choice", ""),
+                    "top_probability": round(r.get("top_probability", 0), 6),
+                    "confidence": round(r.get("confidence", 0), 6) if r.get("confidence") is not None else None,
+                    "frame_indices": r.get("frame_indices", []),
+                }
+                if r.get("video_id"):
+                    entries["video_id"] = r["video_id"]
+                if r.get("run_id"):
+                    entries["run_id"] = r["run_id"]
+                output.append(entries)
+            else:
+                entries = {
+                    "range": False,
+                    "timestamp_seconds": round(r.get("timestamp_seconds", 0), 3),
+                    "frame_index": r.get("frame_index", 0),
+                    "question_name": r.get("question_name", ""),
+                    "top_choice": r.get("top_choice", ""),
+                    "top_probability": round(r.get("top_probability", 0), 6),
+                    "confidence": round(r.get("confidence", 0), 6) if r.get("confidence") is not None else None,
+                }
+                if r.get("video_id"):
+                    entries["video_id"] = r["video_id"]
+                if r.get("run_id"):
+                    entries["run_id"] = r["run_id"]
+                output.append(entries)
+        
+        print(_json.dumps(output, indent=2, ensure_ascii=False))
+    else:
+        # Default: ASCII table
+        if rows:
+            _print_table(rows)
+        else:
+            print("(no rows)")
+    
     cache_db.close()
     sys.exit(0)
 
@@ -2343,11 +2393,56 @@ def cmd_isearch(args):
             cap.release()
         print(f"Extracted {saved} frame(s) to {args.save_frame}", file=sys.stderr)
 
-    # print table
-    if rows:
-        _print_table(rows)
+
+    if getattr(args, "json", False):
+        # JSON mode for AI agents / programmatic use
+        import json as _json
+        
+        output = []
+        for r in rows:
+            is_range = "start_timestamp" in r and "end_timestamp" in r
+            
+            if is_range:
+                entries = {
+                    "range": True,
+                    "start_timestamp_seconds": round(r.get("start_timestamp", 0), 3),
+                    "end_timestamp_seconds": round(r.get("end_timestamp", 0), 3),
+                    "duration_seconds": round(r.get("end_timestamp", 0) - r.get("start_timestamp", 0), 3),
+                    "frame_count": len(r.get("frame_indices", [])),
+                    "question_name": r.get("question_name", ""),
+                    "top_choice": r.get("top_choice", ""),
+                    "top_probability": round(r.get("top_probability", 0), 6),
+                    "confidence": round(r.get("confidence", 0), 6) if r.get("confidence") is not None else None,
+                    "frame_indices": r.get("frame_indices", []),
+                }
+                if r.get("video_id"):
+                    entries["video_id"] = r["video_id"]
+                if r.get("run_id"):
+                    entries["run_id"] = r["run_id"]
+                output.append(entries)
+            else:
+                entries = {
+                    "range": False,
+                    "timestamp_seconds": round(r.get("timestamp_seconds", 0), 3),
+                    "frame_index": r.get("frame_index", 0),
+                    "question_name": r.get("question_name", ""),
+                    "top_choice": r.get("top_choice", ""),
+                    "top_probability": round(r.get("top_probability", 0), 6),
+                    "confidence": round(r.get("confidence", 0), 6) if r.get("confidence") is not None else None,
+                }
+                if r.get("video_id"):
+                    entries["video_id"] = r["video_id"]
+                if r.get("run_id"):
+                    entries["run_id"] = r["run_id"]
+                output.append(entries)
+        
+        print(_json.dumps(output, indent=2, ensure_ascii=False))
     else:
-        print("(no rows)")
+        # Default: ASCII table
+        if rows:
+            _print_table(rows)
+        else:
+            print("(no rows)")
 
     cache_db.close()
     sys.exit(0)
@@ -2400,6 +2495,7 @@ def main():
     p_search.add_argument("--model", "-m", type=str, default=None, help="Filter results by Ollama model name (e.g., clef-flash:9b, d1:3b)")
     p_search.add_argument("--run-id", "-ri", type=int, default=None, help="Filter results to a specific analysis run ID")
     p_search.add_argument("--stitch", "-st", nargs="?", const=True, default=None, metavar="PATH", help="Stitch matched frames into a single video using ffmpeg. Default threshold is 1 second unless --merge-same-threshold/-mst or --merge-threshold/-mt is provided.")
+    p_search.add_argument("--json", "-j", action="store_true", default=False, help="Output results as JSON array (for AI agents / programmatic use). Overrides table output on stdout. Merged ranges include start/end timestamps and frame lists.")
     p_search.set_defaults(func=cmd_search)
 
     # ---- isearch ----
