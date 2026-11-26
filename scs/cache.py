@@ -128,6 +128,33 @@ class CacheDB:
         fa_col_names = [row[1] for row in fa_cols.fetchall()]
         if "confidence" not in fa_col_names:
             self.conn.execute("ALTER TABLE frame_answers ADD COLUMN confidence REAL")
+        # Ensure frame_answers has UNIQUE constraint on (run_id, frame_index, question_name)
+        # SQLite doesn't support ALTER TABLE ADD CONSTRAINT, so recreate the table if missing
+        fa_uniq = self.conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='frame_answers'"
+        ).fetchone()
+        if fa_uniq and "UNIQUE(run_id, frame_index, question_name)" not in fa_uniq[0]:
+            self.conn.executescript("""
+                CREATE TABLE frame_answers_new (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    run_id INTEGER NOT NULL REFERENCES analysis_runs(id) ON DELETE CASCADE,
+                    frame_index INTEGER NOT NULL,
+                    timestamp_seconds REAL NOT NULL,
+                    question_name TEXT NOT NULL,
+                    question_instructions TEXT,
+                    criteria_json TEXT,
+                    top_choice TEXT,
+                    top_probability REAL,
+                    confidence REAL,
+                    probabilities_json TEXT,
+                    raw_response TEXT,
+                    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                    UNIQUE(run_id, frame_index, question_name)
+                );
+                INSERT INTO frame_answers_new SELECT * FROM frame_answers;
+                DROP TABLE frame_answers;
+                ALTER TABLE frame_answers_new RENAME TO frame_answers;
+            """)
 
     def set_stat(self, key: str, value: str):
         """Set a cache statistics entry."""

@@ -23,7 +23,7 @@ merge_threshold = 0         # >0 enables -mt (all-mode merging)
 # Frame processing settings used by both Ollama and OpenRouter providers.
 provider = "openrouter"
 frame_sample_rate = 1
-frame_scale = 0.1
+frame_scale = 0.25
 decision_model = "clef-flash:9b"
 state_template = "frame from an adult video"
 frame_history = 5
@@ -33,7 +33,7 @@ host = "192.168.1.190"
 timeout = 60
 
 [openrouter]
-api_key = ""  # Set via OPENROUTER_API_KEY env var or paste key here
+api_key = ""  # Set via OPENROUTER_API_KEY env var (support .env file) or paste key here
 model = "perplexity/pplx-decider-v1.3:free"
 endpoint = "https://openrouter.ai/api/alpha/decisions"
 timeout = 60
