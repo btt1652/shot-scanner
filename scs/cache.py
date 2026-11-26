@@ -120,8 +120,29 @@ class CacheDB:
             "SELECT sql FROM sqlite_master WHERE type='table' AND name='frame_answers'"
         ).fetchone()
         if fa_uniq and "UNIQUE(run_id, frame_index, question_name)" not in fa_uniq[0]:
-            self.conn.execute("DROP TABLE IF EXISTS frame_answers")
-            fa_uniq = None
+            self.conn.executescript("""
+                DROP TABLE IF EXISTS frame_answers;
+                CREATE TABLE IF NOT EXISTS frame_answers (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    run_id INTEGER NOT NULL REFERENCES analysis_runs(id) ON DELETE CASCADE,
+                    frame_index INTEGER NOT NULL,
+                    timestamp_seconds REAL NOT NULL,
+                    question_name TEXT NOT NULL,
+                    question_instructions TEXT,
+                    criteria_json TEXT,
+                    top_choice TEXT,
+                    top_probability REAL,
+                    confidence REAL,
+                    probabilities_json TEXT,
+                    raw_response TEXT,
+                    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                    UNIQUE(run_id, frame_index, question_name)
+                );
+                CREATE INDEX IF NOT EXISTS idx_frame_answers_run ON frame_answers(run_id);
+                CREATE INDEX IF NOT EXISTS idx_frame_answers_choice ON frame_answers(top_choice);
+                CREATE INDEX IF NOT EXISTS idx_frame_answers_qname ON frame_answers(question_name);
+                CREATE INDEX IF NOT EXISTS idx_frame_answers_qname_choice ON frame_answers(question_name, top_choice);
+            """)
         self.conn.executescript(SCHEMA_SQL)
         # Ensure analysis_runs has model column (migration for existing DBs)
         ar_cols = self.conn.execute("PRAGMA table_info(analysis_runs)")
