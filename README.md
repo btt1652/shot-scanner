@@ -59,7 +59,11 @@ scs analyze video.mp4 \
   --openrouter-model perplexity/pplx-decider-v1.3
 ```
 
-The `OPENROUTER_API_KEY` environment variable is supported as a fallback when `openrouter_api_key` is not set in `config.toml`.
+The `OPENROUTER_API_KEY` environment variable is supported as a fallback when `openrouter_api_key` is not set in `config.toml`. You can also store it in a `.env` file in the project root — it is loaded automatically:
+
+```
+OPENROUTER_API_KEY=sk-or-v1-...
+```
 
 ### How It Works
 
@@ -230,6 +234,12 @@ Or set the env var instead:
 ```bash
 export OPENROUTER_API_KEY=sk-or-v1-...
 ```
+
+Or create a `.env` file in the project root:
+```
+OPENROUTER_API_KEY=sk-or-v1-...
+```
+The `.env` file is loaded automatically if it exists.
 
 ### Endpoint
 

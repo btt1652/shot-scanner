@@ -4,11 +4,16 @@ Config file contains a flat set of keys for all defaults.
 CLI flags always override config values when given.
 
 Uses tomllib (Python 3.11+) for reading TOML files.
+Loads .env file automatically if present (python-dotenv).
 """
 
 import sys
 import tomllib
 from pathlib import Path
+from dotenv import load_dotenv
+
+# Load .env file if it exists (for environment variables like OPENROUTER_API_KEY)
+load_dotenv()
 
 CONFIG_DIR = Path(__file__).resolve().parent.parent
 CONFIG_FILE = CONFIG_DIR / "config.toml"
@@ -32,7 +37,6 @@ def default_config() -> dict:
         # Ollama-specific settings
         "ollama_host": "192.168.1.190",
         "ollama_timeout": 60,
-        "provider": "ollama",
         "openrouter_api_key": "",
         "openrouter_model": "perplexity/pplx-decider-v1.3",
         "openrouter_endpoint": "https://openrouter.ai/api/alpha/decisions",
