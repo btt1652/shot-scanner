@@ -33,7 +33,7 @@ host = "192.168.1.190"
 timeout = 60
 
 [openrouter]
-api_key = """"  # Set via OPENROUTER_API_KEY env var or paste key here
+api_key = ""  # Set via OPENROUTER_API_KEY env var or paste key here
 model = "perplexity/pplx-decider-v1.3"
 endpoint = "https://openrouter.ai/api/alpha/decisions"
 timeout = 60
