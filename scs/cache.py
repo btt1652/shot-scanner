@@ -114,35 +114,6 @@ class CacheDB:
                     DROP TABLE IF EXISTS frame_answers;
                     DROP TABLE IF EXISTS videos;
                 """)
-        # Ensure frame_answers has UNIQUE constraint on (run_id, frame_index, question_name)
-        # SQLite doesn't support ALTER TABLE ADD CONSTRAINT, so drop and recreate if missing
-        fa_uniq = self.conn.execute(
-            "SELECT sql FROM sqlite_master WHERE type='table' AND name='frame_answers'"
-        ).fetchone()
-        if fa_uniq and "UNIQUE(run_id, frame_index, question_name)" not in fa_uniq[0]:
-            self.conn.executescript("""
-                DROP TABLE IF EXISTS frame_answers;
-                CREATE TABLE IF NOT EXISTS frame_answers (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    run_id INTEGER NOT NULL REFERENCES analysis_runs(id) ON DELETE CASCADE,
-                    frame_index INTEGER NOT NULL,
-                    timestamp_seconds REAL NOT NULL,
-                    question_name TEXT NOT NULL,
-                    question_instructions TEXT,
-                    criteria_json TEXT,
-                    top_choice TEXT,
-                    top_probability REAL,
-                    confidence REAL,
-                    probabilities_json TEXT,
-                    raw_response TEXT,
-                    created_at TEXT NOT NULL DEFAULT (datetime('now')),
-                    UNIQUE(run_id, frame_index, question_name)
-                );
-                CREATE INDEX IF NOT EXISTS idx_frame_answers_run ON frame_answers(run_id);
-                CREATE INDEX IF NOT EXISTS idx_frame_answers_choice ON frame_answers(top_choice);
-                CREATE INDEX IF NOT EXISTS idx_frame_answers_qname ON frame_answers(question_name);
-                CREATE INDEX IF NOT EXISTS idx_frame_answers_qname_choice ON frame_answers(question_name, top_choice);
-            """)
         self.conn.executescript(SCHEMA_SQL)
         # Ensure analysis_runs has model column (migration for existing DBs)
         ar_cols = self.conn.execute("PRAGMA table_info(analysis_runs)")
@@ -306,23 +277,17 @@ class CacheDB:
         if not answers:
             return 0
         with self.conn:
+            # Delete existing answers for this run to avoid conflicts
+            self.conn.execute(
+                "DELETE FROM frame_answers WHERE run_id = ?", (run_id,)
+            )
             for a in answers:
                 self.conn.execute(
                     """INSERT INTO frame_answers (
                            run_id, frame_index, timestamp_seconds, question_name,
                            question_instructions, criteria_json, top_choice, top_probability,
                            confidence, probabilities_json, raw_response)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                       ON CONFLICT(run_id, frame_index, question_name) DO UPDATE SET
-                           timestamp_seconds=excluded.timestamp_seconds,
-                           question_instructions=excluded.question_instructions,
-                           criteria_json=excluded.criteria_json,
-                           top_choice=excluded.top_choice,
-                           top_probability=excluded.top_probability,
-                           confidence=excluded.confidence,
-                           probabilities_json=excluded.probabilities_json,
-                           raw_response=excluded.raw_response,
-                           created_at=datetime('now')""",
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (
                         run_id,
                         a.get("frame_index"),
