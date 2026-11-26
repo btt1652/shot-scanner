@@ -114,6 +114,14 @@ class CacheDB:
                     DROP TABLE IF EXISTS frame_answers;
                     DROP TABLE IF EXISTS videos;
                 """)
+        # Ensure frame_answers has UNIQUE constraint on (run_id, frame_index, question_name)
+        # SQLite doesn't support ALTER TABLE ADD CONSTRAINT, so drop and recreate if missing
+        fa_uniq = self.conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='frame_answers'"
+        ).fetchone()
+        if fa_uniq and "UNIQUE(run_id, frame_index, question_name)" not in fa_uniq[0]:
+            self.conn.execute("DROP TABLE IF EXISTS frame_answers")
+            fa_uniq = None
         self.conn.executescript(SCHEMA_SQL)
         # Ensure analysis_runs has model column (migration for existing DBs)
         ar_cols = self.conn.execute("PRAGMA table_info(analysis_runs)")
@@ -128,15 +136,6 @@ class CacheDB:
         fa_col_names = [row[1] for row in fa_cols.fetchall()]
         if "confidence" not in fa_col_names:
             self.conn.execute("ALTER TABLE frame_answers ADD COLUMN confidence REAL")
-        # Ensure frame_answers has UNIQUE constraint on (run_id, frame_index, question_name)
-        # SQLite doesn't support ALTER TABLE ADD CONSTRAINT, so drop and recreate if missing
-        fa_uniq = self.conn.execute(
-            "SELECT sql FROM sqlite_master WHERE type='table' AND name='frame_answers'"
-        ).fetchone()
-        if fa_uniq and "UNIQUE(run_id, frame_index, question_name)" not in fa_uniq[0]:
-            self.conn.executescript("""
-                DROP TABLE IF EXISTS frame_answers;
-            """)
 
     def set_stat(self, key: str, value: str):
         """Set a cache statistics entry."""
