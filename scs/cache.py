@@ -101,41 +101,15 @@ class CacheDB:
         return self._conn
 
     def _execute_schema(self):
-        """Initialize schema if not exists, migrate if needed."""
-        SCHEMA_VERSION = 7  # Increment when we drop/recreate due to mismatches
-        expected_ar_cols = {"id", "video_id", "params_hash", "model", "cache_status", "created_at", "updated_at", "questions_json"}
-        expected_fa_cols = {"id", "run_id", "frame_index", "timestamp_seconds", "question_name", "question_instructions", "criteria_json", "top_choice", "top_probability", "confidence", "probabilities_json", "raw_response", "created_at"}
-
-        # Check if any key table has unexpected columns (e.g. old content_hash left over)
-        # If so, drop all data tables to get a fresh start via SCHEMA_SQL.
-        should_drop_all = False
-        for tbl, expected in [("analysis_runs", expected_ar_cols), ("frame_answers", expected_fa_cols)]:
-            try:
-                cols = self.conn.execute(f"PRAGMA table_info({tbl})")
-                actual = {row[1] for row in cols.fetchall()}
-                if actual != expected:
-                    print(f"Schema mismatch on {tbl}: expected {sorted(expected)}, got {sorted(actual)}. Dropping all tables for clean rebuild.", file=sys.stderr)
-                    should_drop_all = True
-                    break
-            except Exception:
-                pass
-
-        if should_drop_all:
-            self.conn.executescript("""
-                DROP TABLE IF EXISTS frame_answers;
-                DROP TABLE IF EXISTS analysis_runs;
-                DROP TABLE IF EXISTS videos;
-            """)
-
-        self.conn.executescript(SCHEMA_SQL)
-        # Ensure cache_stats gets recreated if dropped above
+        """Ensure database schema matches SCHEMA_SQL by dropping all tables and recreating."""
+        # Drop all user tables so SCHEMA_SQL creates them fresh from the current spec.
+        # No backward compatibility — stale DBs always get wiped.
         self.conn.executescript("""
-            CREATE TABLE IF NOT EXISTS cache_stats (
-                key TEXT PRIMARY KEY,
-                value TEXT NOT NULL,
-                updated_at TEXT NOT NULL DEFAULT (datetime('now'))
-            );
+            DROP TABLE IF EXISTS frame_answers;
+            DROP TABLE IF EXISTS analysis_runs;
+            DROP TABLE IF EXISTS videos;
         """)
+        self.conn.executescript(SCHEMA_SQL)
 
     def set_stat(self, key: str, value: str):
         """Set a cache statistics entry."""
