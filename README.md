@@ -8,7 +8,7 @@ A lightweight CLI that analyzes video frames using a decision model as the sole 
 |---------|-------------|
 | `scs analyze <video>` | Analyze video frames using a decision model (Ollama or OpenRouter) |
 | `scs query "<sql>" [--cache CACHE] [--save-frame DIR]` | Query the cache or extract matching frames |
-| `scs search <video> [--q "(group)"]* [--top N] [--top-per-video N] [--merge-result-threshold SEC] [--model MODEL] [--run-id RUN_ID] [--save-frame DIR] [--stitch]` | Human-friendly search with compact or grouped filter syntax |
+| `scs search <video> [--list] [--top N] [--top-per-video N] [--merge-same-threshold SEC|-mst] [--merge-threshold SEC|-mt] [--model MODEL] [--run-id RUN_ID] [--save-frame DIR] [--stitch] [--stitch-grid VIDEOS...] [--stitch-grid-output PATH] [--json|-j] [--cache PATH|-c]` | Human-friendly search with named-argument flags; `--stitch-grid` arranges videos in a 2x2 grid |
 | `scs cache <cmd>` | Cache management: list, delete, prune, clear, clean |
 
 ## Provider: Ollama vs OpenRouter
@@ -160,7 +160,7 @@ Command-line arguments take precedence over `config.toml`:
 | `--max-images-per-request N, -mipr N` | Batch size limit | `--mipr 6` |
 | `--frame-sample-rate N` | Frame sampling rate | `--fsr 2` |
 | `--model MODEL` | Cache query filter | `--model clef-flash:9b` |
-| `--q "question=choice:prob"` | Search filter | `--q "activity=yes:0.8"` |
+| `--<question> <choice>` | Search filter | `--activity walking` |
 | `--run-id RUN_ID` | Target specific run | `--run-id 42` |
 | `--cache PATH` | Cache database path | `--cache ./custom.cache.db` |
 
@@ -261,16 +261,25 @@ python3 -m scs analyze video.mp4 --provider openrouter --openrouter-api-key sk-.
 python3 -m scs analyze video.mp4 --provider openrouter --openrouter-model typesafe/jev-1.14
 
 # Search with filters
-scs search video.mp4 --q "activity=yes:0.8" --q "time_of_day=evening:0.9"
+scs search video.mp4 --activity yes --prob 0.8 --time_of_day evening
 
 # Search with JSON output
-scs search video.mp4 --q "activity=yes:0.8" --top 3 --json
+scs search video.mp4 --activity yes --prob 0.8 --top 3 --json
+
+# List available questions and choices for a video
+scs search video.mp4 --list
+
+# Filter by any choice for a question (no choice specified)
+scs search video.mp4 --activity --prob 0.9
+
+# Fuzzy match choice names with * wildcard
+scs search video.mp4 --act_category "oral*" --prob 0.7
 
 # Extract frames meeting criteria
-scs search video.mp4 --q "activity=walking:0.8" --top 5 --save-frame ./walking_frames
+scs search video.mp4 --activity walking --prob walking 0.8 --top 5 --save-frame ./walking_frames
 
 # Stitch matched frames into a video
-scs search video.mp4 --q "activity=sitting:0.95" --stitch
+scs search video.mp4 --activity sitting --prob sitting 0.95 --stitch
 
 # Custom SQL query
 python3 -m scs query "SELECT frame_index, timestamp_seconds, top_choice FROM frame_answers WHERE top_probability > 0.9" --save-frame ./high_confidence
@@ -318,21 +327,21 @@ The full JSON response gives the model complete visibility into previous decisio
 
 ## Human-Friendly Search
 
-For interactive use, use the `search` command with simple key-value filters instead of raw SQL.
+Use named-argument flags to filter search results. Each flag is a question name followed by its choice, with optional probability/confidence/rank modifiers.
 
 ### Basic Search
 
 ```bash
-# Find frames where activity is "yes" with probability >= 0.8
-scs search video.mp4 --q "activity=yes:0.8"
+# Find frames where activity is "walking" with top probability >= 0.8
+scs search video.mp4 --activity walking --prob 0.8
 
-# Find frames where time_of_day is "evening" with probability >= 0.9
-scs search video.mp4 --q "time_of_day=evening:0.9"
+# Find frames where time_of_day is "evening" with confidence >= 0.9
+scs search video.mp4 --time_of_day evening --conf 0.9
 
 # Multiple filters (AND logic — all must match)
 scs search video.mp4 \
-  --q "activity=yes:0.8" \
-  --q "time_of_day=evening:0.9" \
+  --activity walking \
+  --time_of_day evening \
   --top 10 \
   --save-frame ./frames
 ```
@@ -340,25 +349,51 @@ scs search video.mp4 \
 ### Parameters
 
 - `<video>`: Video path (or glob/directory pattern)
-- `--q "question=choice:prob[:confidence]"` (`-q`): Filter condition (repeatable).
-
-  **Compact syntax** (legacy): `question=choice:field>=val[&&field>=val...]`
-  - Within a single `--q`, use `&&` for AND, `\|\|` for OR: `activity=yes:prob>=0.8&&conf>=0.5` or `act_category=oral_on_female:prob>=0.6\|\|conf>=0.7`
-  - Multiple `--q` flags are AND'd together.
-
-  **Grouped syntax**: Wrap complex conditions in parentheses to group independent questions:
+- `--list`, `-l`: List all available questions and their choices for the given video(s). Use this to discover what questions exist before constructing filters.
   ```bash
-  # OR between groups, AND within each group
-  scs search video.mp4 --q '(act_category=oral_on_female:prob ge 0.8&&conf ge 0.5)||(act_category=vaginal_sex:prob ge 0.7)'
-  
-  # AND between multiple --q groups
-  scs search video.mp4 --q '(act_category=oral_on_female:prob ge 0.6)' --q '(camera_angle=front:prob ge 0.7)'
-  
-  # Nested OR within a group
-  scs search video.mp4 --q '(act_category=oral_on_female:prob ge 0.6||conf ge 0.7)'
+  scs search video.mp4 --list
   ```
-  
-  Group syntax lets each group specify its own `question=choice` prefix with independent field filters combined via `&&`/`\|\|`. Groups at the same `--q` level are joined by `\|\|` (OR); multiple `--q` flags are AND'd. Use `ge` (word operator) instead of `>=` to avoid shell escaping issues.
+- Named-argument filter: `--<question> <choice>` with optional modifiers.
+
+  **Named-argument modifiers** — optional filters that apply to the most recent question flag:
+
+  | Modifier | Syntax | Meaning |
+  |----------|--------|---------|
+  | (none) | `--activity walking` | `top_choice = walking` |
+  | `--prob` | `--prob 0.8` | `top_probability >= 0.8` for current question's choice |
+  | `--prob <choice>` | `--prob walking 0.5` | `prob:walking >= 0.5` (any choice's probability) |
+  | `--conf` | `--conf 0.7` | `confidence >= 0.7` for current question's top choice |
+  | `--rank` | `--rank walking 1` | `rank:walking = 1` (exact rank: 1=top, 2=second, etc.) |
+
+  **Examples:**
+
+  ```bash
+  # Walking is the top choice AND its probability >= 0.5
+  scs search video.mp4 --activity walking --prob 0.5
+
+  # Walking is the top choice AND walking's probability >= 0.5 AND confidence >= 0.7
+  scs search video.mp4 --activity walking --prob walking 0.5 --conf 0.7
+
+  # Walking is the top choice AND running's probability >= 0.3 (even if running isn't top)
+  scs search video.mp4 --activity walking --prob running 0.3
+
+  # Walking must be rank 1 (top choice) with prob >= 0.8
+  scs search video.mp4 --activity walking --rank walking 1 --prob 0.8
+
+  # Multiple questions (AND logic)
+  scs search video.mp4 --activity walking --scene couple --conf 0.8
+
+  # Complex query with non-top choice probability and confidence filters
+  scs search video.mp4 --activity walking --prob running 0.5 --conf 0.7 --scene couple --conf 0.8
+
+  # Fuzzy choice matching with * wildcard
+  scs search video.mp4 --act_category "oral*" --prob 0.7
+  ```
+
+  **Rules:**
+  - Each question flag can only appear once per query (duplicate = error)
+  - All conditions within a question are AND'd
+  - Multiple question flags are AND'd together
 - `--top N` (`-t`): Limit to top N frames (or ranges with merge) by highest probability, then results are re‑ordered chronologically.
 - `--top-per-video N` (`-tpv`): Limit number of top results per video by highest probability, then results are re‑ordered chronologically per video. When both `--top` and `--top-per-video` are supplied, `--top-per-video` takes precedence.
 - `--merge-same-threshold SEC` (`-mst`): Merge consecutive frames **with the SAME probability score** within `SEC` seconds into a single time-range. Only merges rows sharing an identical `top_probability`. Default from `config.toml`: `merge_same_threshold = 0` (disabled). Set `> 0` to enable, or override via CLI.
@@ -377,7 +412,7 @@ Use `--json` (or `-j`) to output results as a clean JSON array instead of ASCII 
 
 ```bash
 # Get top 3 matching frames as JSON
-scs search video.mp4 --q "activity=yes:prob>=0.8" --top 3 --json
+scs search video.mp4 --activity yes --prob 0.8 --top 3 --json
 ```
 
 **Output format (individual frames):**
@@ -419,7 +454,7 @@ scs search video.mp4 --q "activity=yes:prob>=0.8" --top 3 --json
 
 This is designed for easy consumption by LLM agents, CI pipelines, or any tool that needs structured data.
 
-- `--save-frame DIR` (`-sf`): Save extracted frames to directory (JPG only). Each frame image has a result overlay showing the question name, top choice with score, and all choice probabilities
+- `--save-frame DIR` (`-sf`): Save extracted frames to directory (JPG only). Each frame image has a result overlay showing all questions with their top choice, probability scores, confidence score, and all choice probabilities
 - `--model MODEL` (`-m`): Filter results by decision model name (e.g., clef-flash:9b, d1:3b, perplexity/pplx-decider-v1.3)
 - `--run-id RUN_ID` (`-ri`): Filter results to a specific analysis run ID
 - `--cache CACHE` (`-c`): Path to SQLite cache file (default: ./.cache.db)
@@ -429,6 +464,7 @@ This is designed for easy consumption by LLM agents, CI pipelines, or any tool t
 
 | Long Flag | Short | Default in config.toml | Description |
 |-----------|-------|------------------------|-------------|
+| `--<question> <choice>` | — | — | Named-argument filter: question + choice, with optional `--prob`, `--conf`, `--rank` modifiers |
 | `--top` | `-t` | — | Limit to top N results |
 | `--top-per-video` | `-tpv` | — | Limit per video |
 | `--merge-same-threshold` | `-mst` | `merge_same_threshold = 0` | Merge same-score frames (set >0 to enable) |
@@ -438,15 +474,17 @@ This is designed for easy consumption by LLM agents, CI pipelines, or any tool t
 | `--model` | `-m` | — | Filter by decision model name |
 | `--run-id` | `-ri` | — | Filter by run ID |
 | `--cache` | `-c` | — | Cache path |
-| `--stitch` | `-st` | — | Video stitching |
+| `--stitch` | `-st` | — | Video stitching (sequential concat of matched frames) |
+| `--stitch-grid` | `-sg` | — | Grid stitch (2x2 layout from multiple videos) |
+| `--stitch-grid-output` | `-sg-o` | — | Output path for `--stitch-grid` |
 
 ### Frame Extraction via Search
 
 ```bash
 # Search and save frames
 scs search video.mp4 \
-  --q "activity=walking:0.8" \
-  --q "time_of_day=morning:0.9" \
+  --activity walking --prob walking 0.8 \
+  --time_of_day morning --prob morning 0.9 \
   --top 5 \
   --save-frame ./walking_frames
 ```
@@ -535,13 +573,13 @@ The `--stitch` flag uses ffmpeg to merge adjacent frames into a single video fil
 ```bash
 # Stitch matched frames (auto-generates output: {video_name}_stitched.mp4)
 scs search video.mp4 \
-  --q "activity=sitting:0.95" \
+  --activity sitting --prob sitting 0.95 \
   --top 3 \
   --stitch
 
 # Stitch to custom output path
 scs search video.mp4 \
-  --q "activity=sitting:0.95" \
+  --activity sitting --prob sitting 0.95 \
   --stitch custom_output.mp4
 ```
 
@@ -565,6 +603,44 @@ merge_same_threshold = 2  # Max gap for direct grouping (optional)
 
 With both set above, the stitching logic allows merging groups with gaps up to 5 seconds (2 + 3). Setting `isolated_frame_time = 0` disables padding — only exact threshold matching applies.
 
+## Grid Stitching (--stitch-grid)
+
+The `--stitch-grid` flag arranges multiple videos into a single output with a 2×2 grid layout (4 panels playing simultaneously). This is different from `--stitch` which concatenates clips sequentially.
+
+**Usage:**
+
+```bash
+# Stitch 4 videos into a 2x2 grid (auto-named output)
+scs search --stitch-grid video1.mp4 video2.mp4 video3.mp4 video4.mp4
+
+# Stitch with custom output path
+scs search --stitch-grid video1.mp4 video2.mp4 video3.mp4 video4.mp4 --stitch-grid-output my_grid.mp4
+
+# Works with isearch too
+scs isearch ref.jpg --video v1.mp4 v2.mp4 v3.mp4 v4.mp4 --stitch-grid
+```
+
+**Grid layout:**
+
+```
++----------+----------+
+| Video 1  | Video 2  |
+| (top-    | (top-    |
+|  left)   |  right)  |
++----------+----------+
+| Video 3  | Video 4  |
+| (bottom- | (bottom- |
+|  left)   |  right)  |
++----------+----------+
+```
+
+- Up to 4 videos are placed in the grid (fewer = some cells are black)
+- Output resolution matches the input videos
+- Output duration matches the longest input video
+- FPS is taken from the first input video
+
+**Configuration:** No config.toml settings required. All parameters are CLI-only.
+
 ## isearch — Experimental Image-Based Search
 
 Search cached frame answers by reference image (single image). Uses a single reference image to find semantically similar frames across cached analysis runs.
@@ -572,7 +648,7 @@ Search cached frame answers by reference image (single image). Uses a single ref
 ### Usage
 
 ```bash
-scs isearch <image> [--question Q] [-qr RUN_ID|VIDEO] [--top N] [--top-per-video N] [--merge-result-threshold SEC] [--model MODEL] [--run-id RUN_ID] [--save-frame DIR] [--stitch] [--cache PATH]
+scs isearch <image> [--question Q] [-qr RUN_ID|VIDEO] [--top N] [--top-per-video N] [--merge-same-threshold SEC|-mst] [--merge-threshold SEC|-mt] [--model MODEL] [--run-id RUN_ID] [--save-frame DIR] [--stitch] [--stitch-grid VIDEOS...] [--stitch-grid-output PATH] [--json|-j] [--cache PATH|-c]
 ```
 
 ### Parameters
@@ -582,11 +658,16 @@ scs isearch <image> [--question Q] [-qr RUN_ID|VIDEO] [--top N] [--top-per-video
 - `-qr RUN_ID|VIDEO` or `--question-ref`: Use the question set from a run_id (integer) or latest run of a video path (string)
 - `--top N`: Limit to top N frames by probability
 - `--top-per-video N`: Limit number of top results per video by probability
-- `--merge-result-threshold SEC`: Timestamp difference threshold (seconds) to merge adjacent frames with same score
+- `--merge-same-threshold SEC` / `-mst`: Timestamp difference threshold (seconds) to merge adjacent frames with same score
+- `--merge-threshold SEC` / `-mt`: Timestamp difference threshold (seconds) to merge ALL adjacent query results into ranges by timestamp proximity (mutually exclusive with `-mst`)
 - `--model MODEL`: Filter results by decision model name (e.g., clef-flash:9b, d1:3b, perplexity/pplx-decider-v1.3)
 - `--run-id RUN_ID`: Filter results to a specific analysis run ID
-- `--save-frame DIR`: Directory to save extracted frames (JPG only). Each frame image has a result overlay showing the question name, top choice with score, and all choice probabilities
-- `--stitch [PATH]`: Stitch matched frames into a single video using ffmpeg. Uses `--merge-result-threshold` (default 1 sec) to group consecutive frames with same score into ranges before stitching
+- `--save-frame DIR`: Directory to save extracted frames (JPG only). Each frame image has a result overlay showing all questions with their top choice, probability scores, confidence score, and all choice probabilities
+- `--stitch [PATH]`: Stitch matched frames into a single video using ffmpeg. Uses `--merge-same-threshold`/`-mst` (default 1 sec) to group consecutive frames with same score into ranges before stitching
+- `--stitch-grid VIDEOS...`: Stitch multiple videos into a 2x2 grid layout (4 panels side by side)
+- `--stitch-grid-output PATH`: Output path for `--stitch-grid` mode
+- `--json` / `-j`: Output results as JSON array (for AI agents / programmatic use)
+- `--video` / `-v`: One or more video paths to filter results by
 - `--cache PATH`: Path to SQLite cache file (default: ./.cache.db)
 
 ### Example

@@ -1,0 +1,1 @@
+python3 -m scs search /mnt/hdd/GVG-676_Uncen-leaked.mp4 --female_nudity "fully nude" --prob "fully nude" 0.7 --conf 0.7 --female_framing "full body" --prob "full body" 0.9 --conf 0.9 --top 10 -mt 3 --save-frame ./f

@@ -53,10 +53,12 @@ _BUILTIN_MODEL_LIMITS = {
 }
 
 
-def _draw_result_on_frame(frame, question_name, top_choice, top_probability, probabilities_json):
-    """Draw a minimal result overlay on a frame image.
+def _draw_result_on_frame(frame, questions_data):
+    """Draw a result overlay on a frame image showing question names and choices.
 
-    Shows question name, top choice with score, and all choices with probabilities.
+    questions_data is a list of dicts with keys:
+        question_name, top_choice, top_probability, confidence, probabilities_json
+    Each question is drawn as a section with its choices and probability scores.
     Returns the modified frame (numpy array).
     """
     try:
@@ -71,41 +73,54 @@ def _draw_result_on_frame(frame, question_name, top_choice, top_probability, pro
     font_path = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
     if os.path.exists(font_path):
         try:
-            font = ImageFont.truetype(font_path, 14)
-            font_small = ImageFont.truetype(font_path, 12)
+            font = ImageFont.truetype(font_path, 13)
         except Exception:
             font = ImageFont.load_default()
-            font_small = ImageFont.load_default()
     else:
         font = ImageFont.load_default()
-        font_small = ImageFont.load_default()
 
-    # Parse probabilities
-    probs = {}
-    if probabilities_json:
-        try:
-            probs = json.loads(probabilities_json) if isinstance(probabilities_json, str) else probabilities_json
-        except (json.JSONDecodeError, TypeError):
-            probs = {}
-
-    # Build overlay lines
+    # Build overlay lines for all questions
     lines = []
-    lines.append(f"{question_name}")
-    if top_choice:
-        lines.append(f"> {top_choice} ({top_probability:.0%})")
-    for choice, prob in sorted(probs.items(), key=lambda x: x[1], reverse=True):
-        if choice == top_choice:
-            continue
-        lines.append(f"  {choice} ({prob:.0%})")
+
+    for q_idx, q in enumerate(questions_data):
+        q_name = q.get("question_name", "")
+        top_choice = q.get("top_choice", "")
+        top_prob = q.get("top_probability", 0.0)
+        confidence = q.get("confidence")
+        probs_json = q.get("probabilities_json")
+
+        # Parse probabilities for this question
+        probs = {}
+        if probs_json:
+            try:
+                probs = json.loads(probs_json) if isinstance(probs_json, str) else probs_json
+            except (json.JSONDecodeError, TypeError):
+                probs = {}
+
+        if q_idx > 0 or lines:
+            lines.append("")  # blank separator between questions (and after metadata)
+
+        # Question name in YELLOW
+        lines.append(f"{q_name}")
+        if top_choice:
+            conf_str = f" conf:{confidence:.0%}" if confidence is not None else ""
+            lines.append(f"> {top_choice} ({top_prob:.0%}){conf_str}")
+        for choice, prob in sorted(probs.items(), key=lambda x: x[1], reverse=True):
+            if choice == top_choice:
+                continue
+            lines.append(f"  {choice} ({prob:.0%})")
+
+    if not lines:
+        return frame
 
     # Calculate text block size
     line_heights = []
     for line in lines:
         bbox = draw.textbbox((0, 0), line, font=font)
-        line_heights.append(bbox[3] - bbox[1] + 4)
+        line_heights.append(bbox[3] - bbox[1] + 3)
 
-    total_height = sum(line_heights) + 16
-    padding = 8
+    total_height = sum(line_heights) + 14
+    padding = 6
     max_line_width = max(draw.textbbox((0, 0), line, font=font)[2] for line in lines)
     box_width = max_line_width + padding * 2
     box_height = total_height + padding * 2
@@ -127,7 +142,17 @@ def _draw_result_on_frame(frame, question_name, top_choice, top_probability, pro
     # Draw text lines
     text_y = y + padding
     for i, line in enumerate(lines):
-        color = "#00FF00" if i == 1 else "#FFFFFF"  # Green for top choice, white for others
+        if line == "":
+            text_y += 4  # blank separator line
+            continue
+        is_top_choice = line.startswith("> ")
+        is_choice = line.startswith("  ")
+        if is_top_choice:
+            color = "#00FF00"  # green for top choice
+        elif is_choice:
+            color = "#AAAAAA"  # white for other choices
+        else:
+            color = "#FFFF00"  # yellow for question names
         draw.text((x + padding, text_y), line, fill=color, font=font)
         text_y += line_heights[i]
 
@@ -271,12 +296,20 @@ def _save_cache(cache, video_path, sample_rate, frame_scale, state, questions_js
             content_hash=content_hash,
         )
 
+        # Build full params for storage
+        params_dict = _cache_params(
+            sample_rate, frame_scale, state, questions_json, model,
+            same_scene_threshold, still_frame_threshold,
+        )
+        params_json = json.dumps(params_dict, sort_keys=True)
+
         # Upsert analysis run for this param set
         run_id = cache_db.upsert_run(
             video_id=video_id,
             params_hash=params_hash,
             model=model,
             questions_json=questions_json,
+            params_json=params_json,
         )
 
         cache_db.upsert_frame_answers(run_id, all_results)
@@ -1194,6 +1227,59 @@ def cmd_query(args):
             cache_db.close()
             sys.exit(0)
 
+        # Pre-fetch all question data for each frame (run_id, frame_index)
+        frame_keys = set()
+        run_ids = set()
+        for row in rows:
+            run_id = row.get("run_id")
+            fi = row.get("frame_index")
+            if fi is not None and run_id is not None:
+                frame_keys.add((run_id, fi))
+                run_ids.add(run_id)
+
+        # Fetch run metadata (model, params, etc.) for each run_id
+        run_meta = {}
+        if run_ids:
+            mplaceholders = ",".join(["?"] * len(run_ids))
+            mrows = cache_db.execute_sql(
+                f"SELECT id, model, params_hash, params_json, created_at FROM analysis_runs WHERE id IN ({mplaceholders})",
+                list(run_ids),
+            )
+            for mr in mrows:
+                run_meta[mr["id"]] = {
+                    "model": mr.get("model") or "",
+                    "params_hash": mr.get("params_hash") or "",
+                    "params_json": mr.get("params_json") or "{}",
+                    "created_at": mr.get("created_at") or "",
+                }
+
+        all_questions_for_frame = {}
+        if frame_keys:
+            placeholders = ",".join(["(?,?)"] * len(frame_keys))
+            qparams = []
+            for rk, fi in frame_keys:
+                qparams.append(rk)
+                qparams.append(fi)
+            qrows = cache_db.execute_sql(
+                f"SELECT run_id, frame_index, question_name, top_choice, top_probability, confidence, probabilities_json "
+                f"FROM frame_answers WHERE (run_id, frame_index) IN ({placeholders})",
+                qparams,
+            )
+            for qr in qrows:
+                key = (qr["run_id"], qr["frame_index"])
+                meta = run_meta.get(qr["run_id"], {})
+                all_questions_for_frame.setdefault(key, []).append({
+                    "question_name": qr["question_name"],
+                    "top_choice": qr["top_choice"],
+                    "top_probability": qr["top_probability"],
+                    "confidence": qr["confidence"],
+                    "probabilities_json": qr["probabilities_json"],
+                    "run_id": qr["run_id"],
+                    "model": meta.get("model", ""),
+                    "params_hash": meta.get("params_hash", ""),
+                    "params_json": meta.get("params_json", "{}"),
+                })
+
         os.makedirs(save_frame_dir, exist_ok=True)
 
         saved = 0
@@ -1227,10 +1313,12 @@ def cmd_query(args):
                 fname = f"{video_name}_f{fi:06d}_{ts:.1f}s_{q_name}_{choice}.{fmt}"
                 out_path = os.path.join(save_frame_dir, fname)
 
+                # Collect all questions for this frame
+                run_id = frame_info.get("run_id")
+                questions_data = all_questions_for_frame.get((run_id, fi), [])
+
                 # Draw result overlay on frame
-                probs_json = frame_info.get("probabilities_json")
-                top_prob = frame_info.get("top_probability", 0.0)
-                frame = _draw_result_on_frame(frame, q_name, choice, top_prob, probs_json)
+                frame = _draw_result_on_frame(frame, questions_data)
 
                 if fmt == "jpg":
                     cv2.imwrite(out_path, frame, [int(cv2.IMWRITE_JPEG_QUALITY), quality])
@@ -1239,7 +1327,7 @@ def cmd_query(args):
                 else:
                     cv2.imwrite(out_path, frame)
                 saved += 1
-                print(f"Saved frame: {out_path}", file=sys.stderr)
+                print(f"Saved frame: {out_path}  run_id={run_id} model={frame_info.get('model','')}", file=sys.stderr)
 
             cap.release()
 
@@ -1249,22 +1337,251 @@ def cmd_query(args):
 
     _print_table(rows)
     cache_db.close()
-    sys.exit(0)
+def _suggest_question(cache_db, qname, stderr):
+    """Print suggestions for valid question names if the given name doesn't match."""
+    if not qname:
+        return
+    rows = cache_db.conn.execute(
+        "SELECT DISTINCT question_name FROM frame_answers WHERE question_name LIKE ? ORDER BY question_name",
+        (f'%{qname}%',)
+    ).fetchall()
+    if rows:
+        matches = [r["question_name"] for r in rows]
+        print(f"  Did you mean one of these questions? {', '.join(matches)}", file=stderr)
+    else:
+        all_q = cache_db.conn.execute(
+            "SELECT DISTINCT question_name FROM frame_answers ORDER BY question_name LIMIT 20"
+        ).fetchall()
+        if all_q:
+            print(f"  Available questions: {', '.join(r['question_name'] for r in all_q)}", file=stderr)
+
+
+def _search_list_questions(cache_db, video_paths):
+    """List all available questions and their choices for the given video(s)."""
+    resolved = _resolve_paths(video_paths) if video_paths else set()
+
+    # Build video filter
+    if resolved:
+        matched_video_ids = []
+        for vp in resolved:
+            cur = cache_db.conn.execute(
+                "SELECT id FROM videos WHERE video_path = ?", (str(vp),)
+            )
+            row = cur.fetchone()
+            if row:
+                matched_video_ids.append(row["id"])
+            else:
+                print(f"Warning: no cached video matches '{vp}'", file=sys.stderr)
+
+        if not matched_video_ids:
+            print("No matching videos found in cache.", file=sys.stderr)
+            return
+
+        placeholders = ','.join(['?'] * len(matched_video_ids))
+        video_filter = f"AND v.id IN ({placeholders})"
+        video_params = matched_video_ids
+    else:
+        video_filter = ""
+        video_params = []
+
+    rows = cache_db.conn.execute(
+        f"""
+        SELECT DISTINCT fa.question_name, fa.top_choice, fa.top_probability,
+               fa.probabilities_json, v.id AS video_id, v.video_path
+        FROM frame_answers fa
+        JOIN analysis_runs ar ON fa.run_id = ar.id
+        JOIN videos v ON ar.video_id = v.id
+        WHERE 1=1 {video_filter}
+        ORDER BY fa.question_name, fa.top_probability DESC
+        """,
+        video_params
+    ).fetchall()
+
+    if not rows:
+        print("No frame answers found in cache.", file=sys.stderr)
+        return
+
+    # Group by question name
+    questions = {}
+    for r in rows:
+        qname = r["question_name"]
+        if qname not in questions:
+            questions[qname] = {"choices": {}, "video_paths": set()}
+        if r["top_choice"]:
+            questions[qname]["choices"][r["top_choice"]] = max(
+                questions[qname]["choices"].get(r["top_choice"], 0.0),
+                r["top_probability"] or 0.0,
+            )
+        questions[qname]["video_paths"].add(r["video_path"])
+
+    print(f"\n{'='*60}")
+    print(f"Available questions and choices ({len(questions)} questions)")
+    print(f"{'='*60}\n")
+
+    for qname in sorted(questions.keys()):
+        info = questions[qname]
+        print(f"  {_COLORS.get('yellow')}{qname}{_COLORS.get('reset')}")
+        print(f"    Videos: {', '.join(sorted(info['video_paths']))}")
+        print(f"    Choices (top probability seen):")
+        for choice, prob in sorted(info["choices"].items(), key=lambda x: x[1], reverse=True):
+            print(f"      {choice}: max_prob={prob:.0%}")
+        print()
+
+    print("Usage examples:")
+    print('  scs search video.mp4 --activity walking --prob 0.8')
+    print('  scs search video.mp4 --activity walking --prob walking 0.5 --conf 0.7')
+    print('  scs search video.mp4 --activity walking --scene couple --conf 0.8')
+    print('  scs search video.mp4 --activity walking --rank walking 1')
+    print()
+
+
+def _parse_named_conditions(unknown_args, cache_db, question_names):
+    """Parse named-argument question conditions from unknown args.
+
+    unknown_args: list of args not consumed by argparse (question flags + modifiers)
+    question_names: set of valid question names from cache
+
+    Returns list of condition tuples: (qname, choice, field_conditions, use_or)
+    Each field_condition is (field, field_choice, op, value).
+    All conditions within a question are AND'd; multiple questions are AND'd.
+
+    Syntax:
+      --<question> <choice>              — set question + choice (e.g., --activity walking)
+      --prob <value>                     — top_probability >= value for current question
+      --prob <choice> <value>            — prob:<choice> >= value for current question
+      --conf <value>                     — confidence >= value for current question
+      --rank <choice> <n>                — rank:<choice> = n for current question
+
+    Duplicate question flags raise an error.
+    """
+    conditions = []
+    current = None
+    i = 0
+
+    MODIFIER_FLAGS = ('--prob', '--conf', '--rank')
+
+    while i < len(unknown_args):
+        arg = unknown_args[i]
+
+        if arg.startswith('--') and arg not in MODIFIER_FLAGS:
+            # Question flag — consume the next arg as the choice value
+            qname = arg[2:]  # strip --
+            if any(c[0] == qname for c in conditions):
+                print(f"Error: duplicate question flag '{arg}'. Each question can only be specified once per query.", file=sys.stderr)
+                cache_db.close()
+                sys.exit(1)
+            if qname not in question_names:
+                _suggest_question(cache_db, qname, sys.stderr)
+                print(f"Error: unknown question '{qname}'. Use --list to see available questions.", file=sys.stderr)
+                cache_db.close()
+                sys.exit(1)
+            if i + 1 >= len(unknown_args) or unknown_args[i + 1].startswith('--'):
+                print(f"Error: '{arg}' requires a choice value.", file=sys.stderr)
+                cache_db.close()
+                sys.exit(1)
+            choice = unknown_args[i + 1]
+            current = (qname, choice, [], False)
+            conditions.append(current)
+            i += 2
+        elif arg == '--prob':
+            if current is None:
+                print("Error: --prob must follow a question flag like --activity.", file=sys.stderr)
+                cache_db.close()
+                sys.exit(1)
+            if i + 1 >= len(unknown_args) or unknown_args[i + 1].startswith('--'):
+                print("Error: --prob requires a numeric value.", file=sys.stderr)
+                cache_db.close()
+                sys.exit(1)
+            # Check if next arg is a number (no choice) or a string (choice)
+            if i + 2 < len(unknown_args) and not unknown_args[i + 2].startswith('--'):
+                # --prob <choice> <value>
+                choice = unknown_args[i + 1]
+                try:
+                    value = float(unknown_args[i + 2])
+                except ValueError:
+                    print(f"Error: --prob requires a numeric value, got '{unknown_args[i + 2]}'.", file=sys.stderr)
+                    cache_db.close()
+                    sys.exit(1)
+                current[2].append(('prob', choice, '>=', value))
+                i += 3
+            else:
+                # --prob <value> (no choice, applies to top choice)
+                try:
+                    value = float(unknown_args[i + 1])
+                except ValueError:
+                    print(f"Error: --prob requires a numeric value, got '{unknown_args[i + 1]}'.", file=sys.stderr)
+                    cache_db.close()
+                    sys.exit(1)
+                current[2].append(('prob', None, '>=', value))
+                i += 2
+        elif arg == '--conf':
+            if current is None:
+                print("Error: --conf must follow a question flag like --activity.", file=sys.stderr)
+                cache_db.close()
+                sys.exit(1)
+            if i + 1 >= len(unknown_args) or unknown_args[i + 1].startswith('--'):
+                print("Error: --conf requires a numeric value.", file=sys.stderr)
+                cache_db.close()
+                sys.exit(1)
+            try:
+                value = float(unknown_args[i + 1])
+            except ValueError:
+                print(f"Error: --conf requires a numeric value, got '{unknown_args[i + 1]}'.", file=sys.stderr)
+                cache_db.close()
+                sys.exit(1)
+            current[2].append(('conf', None, '>=', value))
+            i += 2
+        elif arg == '--rank':
+            if current is None:
+                print("Error: --rank must follow a question flag like --activity.", file=sys.stderr)
+                cache_db.close()
+                sys.exit(1)
+            if i + 2 >= len(unknown_args) or unknown_args[i + 2].startswith('--'):
+                print("Error: --rank requires a choice name and an integer rank value.", file=sys.stderr)
+                cache_db.close()
+                sys.exit(1)
+            choice = unknown_args[i + 1]
+            try:
+                rank = int(unknown_args[i + 2])
+            except ValueError:
+                print(f"Error: --rank requires an integer value, got '{unknown_args[i + 2]}'.", file=sys.stderr)
+                cache_db.close()
+                sys.exit(1)
+            current[2].append(('rank', choice, '=', rank))
+            i += 3
+        else:
+            i += 1
+
+    # Tag each condition as "compact" for the SQL builder
+    return [("compact", c) for c in conditions]
+
 
 def cmd_search(args):
     """Search cached frame answers by question name, choice, and probability.
 
     Usage:
-        scs search <video> [--q "question=choice:prob"]* [--top N] [--top-per-video N] [--merge-result-threshold SEC] [--model MODEL --save-frame DIR] [--stitch [PATH]]
+        scs search <video> [--list] [--top N] [--top-per-video N] [--merge-same-threshold SEC|-mst] [--merge-threshold SEC|-mt] [--model MODEL] [--run-id RUN_ID] [--save-frame DIR] [--stitch [PATH]] [--stitch-grid VIDEOS...] [--stitch-grid-output PATH] [--json|-j] [--cache PATH|-c]
+        scs search <video> [--activity walking] [--scene couple] [--prob 0.8] [--conf 0.7] [--rank walking 1]
 
-    Each --q adds a filter: 'question_name=choice:min_probability'. All must match for a row to qualify.
-    Example:
-        scs search video.mp4 \
-          --q "activity=yes:0.8" \
-          --q "time_of_day=no:0.9" \
-          --top 10 \
-          --save-frame ./frames
+    Named-argument filter syntax (AND logic, one question per flag):
+      --<question> <choice>              — match a specific choice for this question
+      --prob <value>                     — top_probability >= value for the current question
+      --prob <choice> <value>            — prob:<choice> >= value for the current question
+      --conf <value>                     — confidence >= value for the current question
+      --rank <choice> <n>                — rank:<choice> = n for the current question
+
+    Examples:
+        scs search video.mp4 --activity walking --prob 0.8
+        scs search video.mp4 --activity walking --prob walking 0.5 --conf 0.7
+        scs search video.mp4 --activity walking --prob walking 0.5 --scene couple --conf 0.8
+        scs search video.mp4 --activity walking --rank walking 1
+        scs search video.mp4 --list
+
+    --stitch-grid: stitch multiple videos into a 2x2 grid layout.
+        scs search --stitch-grid video1.mp4 video2.mp4 video3.mp4 video4.mp4
+        scs search --stitch-grid v1.mp4 v2.mp4 v3.mp4 v4.mp4 --stitch-grid-output output.mp4
     """
+    import re
     import cv2
     import os
 
@@ -1279,144 +1596,75 @@ def cmd_search(args):
     merge_same_threshold_default = cfg_val("merge_same_threshold", "merge_same_threshold") or 0
     merge_all_threshold_default = cfg_val("merge_threshold", "merge_threshold") or 0
 
-    # Parse --q flags into list of (question_name, choice, min_probability)
-    q_list = [q.strip() for q in (args.q_values or []) if q.strip()]
+    # Handle --list flag: show available questions and choices for the video(s)
+    if getattr(args, "list", False):
+        _search_list_questions(cache_db, args.video)
+        cache_db.close()
+        return
 
-    # Check for duplicate --q arguments
-    if len(q_list) != len(set(q_list)):
-        seen = {}
-        for q in q_list:
-            if q in seen:
-                print(f"Error: duplicate --q argument '{q}'. Each --q must be unique.", file=sys.stderr)
-                cache_db.close()
-                sys.exit(1)
-            seen[q] = True
+    # Discover available question names from cache
+    question_rows = cache_db.conn.execute(
+        "SELECT DISTINCT question_name FROM frame_answers ORDER BY question_name"
+    ).fetchall()
+    question_names = {r["question_name"] for r in question_rows}
 
-    # Parse conditions with Option 1 syntax:
-    #   question=choice:prob>=X,conf>=Y       -> AND (both must meet threshold)
-    #   question=choice:prob>=X|conf>=Y       -> OR (either meets threshold)
-    #   question=choice:prob>=X               -> only prob threshold
-    #   question=choice:conf>=Y               -> only confidence threshold
-    # Multiple --q flags are AND'd together
-    # Example: --q "activity=yes:prob>=0.8|conf>=0.7" --q "scene_type=couple:prob>=0.9,conf>=0.8"
-    #   => (activity=yes AND (prob>=0.8 OR conf>=0.7)) AND (scene_type=couple AND prob>=0.9 AND conf>=0.8)
-    conditions = []  # list of (qname, choice, field_conditions, use_or)
-    # field_conditions: list of (field, op, value) where field in ('prob', 'conf'), op in ('>=', '<=', '>', '<')
-    # use_or: True if conditions within this --q are OR'd, False if AND'd
-    for q in q_list:
-        # Check for grouped syntax FIRST (before splitting on =): (group) || (group) || ...
-        if q.strip().startswith("("):
-            groups = []
-            use_or = False
-            remaining = q.strip()
-            while remaining:
-                if not remaining.startswith("("):
-                    print(f"Error: expected '(' at start of group in '{q}'", file=sys.stderr)
-                    cache_db.close()
-                    sys.exit(1)
-                end = remaining.find(")")
-                if end == -1:
-                    print(f"Error: unmatched parenthesis in '{q}'", file=sys.stderr)
-                    cache_db.close()
-                    sys.exit(1)
-                group = remaining[1:end].strip()
-                groups.append(group)
-                remaining = remaining[end+1:].strip()
-                if remaining.startswith("||"):
-                    use_or = True
-                    remaining = remaining[2:].strip()
-                elif remaining:
-                    print(f"Error: expected '||' after group in '{q}'", file=sys.stderr)
-                    cache_db.close()
-                    sys.exit(1)
-            conditions.append(("group", groups, use_or))
-            continue
-
-        parts = q.split('=')
-        if len(parts) < 2:
-            print(f"Error: invalid --q format '{q}'. Expected 'question=choice:field>=value[,field>=value...]' or '(group)||(group)'.", file=sys.stderr)
-            cache_db.close()
-            sys.exit(1)
-        qname = parts[0].strip()
-        rest = parts[1].strip()  # e.g., "yes:prob>=0.8|conf>=0.7" or "yes:prob>=0.8,conf>=0.7"
-
-        # First, extract choice (text before first :)
-        if ':' not in rest:
-            print(f"Error: missing choice in '{q}'. Expected 'choice:prob>=0.8,...'.", file=sys.stderr)
-            cache_db.close()
-            sys.exit(1)
-        compact_choice, field_part = rest.split(':', 1)
-        compact_choice = compact_choice.strip().lower()
-
-        
-        # Now parse field_part for conditions
-        # Split by || for OR, then by && for AND
-        or_parts = [p.strip() for p in field_part.split('||')]
-        if len(or_parts) > 1:
-            use_or = True
-        else:
-            use_or = False
-            or_parts = [p.strip() for p in field_part.split('&&')]
-        
-        field_conditions = []
-        import re
-        for part in or_parts:
-            # Parse field OP value
-            # Fields: prob, conf, prob:<choice>, rank:<choice>
-            # Examples: prob>=0.8, conf ge 0.7, prob:walking>=0.7, rank:running<=2
-            match = re.match(r'^(prob|conf|rank)(?::([a-zA-Z_][a-zA-Z0-9_]*))?\s*(>=|ge)\s*([0-9.]+)$', part, re.IGNORECASE)
-            if not match:
-                print(f"Error: invalid field condition '{part}'. Expected 'prob>=0.8' or 'prob ge 0.8' (only >= operator supported).", file=sys.stderr)
-                cache_db.close()
-                sys.exit(1)
-            field, field_choice, op, value = match.groups()
-            # Normalize word operators to symbols for SQL
-            # Only >= (or ge) is supported - normalize to >=
-            if op.lower() == 'ge':
-                op = '>='
-            field_conditions.append((field, field_choice, op, float(value)))
-        
-        if not field_conditions:
-            print(f"Error: no valid field conditions in '{q}'.", file=sys.stderr)
-            cache_db.close()
-            sys.exit(1)
-        
-        conditions.append(("compact", (qname, compact_choice, field_conditions, use_or)))
+    # Parse named-argument conditions from unknown args
+    unknown_args = getattr(args, 'unknown_args', [])
+    conditions = _parse_named_conditions(unknown_args, cache_db, question_names)
 
     top_n = int(args.top) if args.top is not None else None
 
     # Build SQL - we need self-join for multiple question conditions on same frame
     # Use frame_answers joined against itself for each condition
     if not conditions:
-        print("Error: at least one --q filter required", file=sys.stderr)
+        print("Error: at least one question filter required. Use --list to see available questions.", file=sys.stderr)
         cache_db.close()
         sys.exit(1)
 
     # Build query with self-joins for multiple conditions
     # First condition uses fa (main frame_answers), subsequent use fa1, fa2, etc.
+    # Each self-join matches on run_id + frame_index so we find frames that satisfy ALL conditions.
     select_cols = "fa.run_id, fa.frame_index, fa.timestamp_seconds, fa.question_name, fa.top_choice, fa.top_probability, fa.confidence, fa.probabilities_json, v.id AS video_id"
-    from_clause = "frame_answers fa JOIN analysis_runs ar1 ON fa.run_id = ar1.id"
+    from_clause = "frame_answers fa"
     where_clauses = []
     params = []
+    alias_idx = 0
+
+    def _field_col(alias, field, field_choice):
+        """Return the SQL column reference for a field using the given alias."""
+        if field == "prob" and field_choice is None:
+            return f"{alias}.top_probability"
+        elif field == "conf" and field_choice is None:
+            return f"{alias}.confidence"
+        elif field == "prob" and field_choice is not None:
+            json_path = '$."' + field_choice.replace('"', '""') + '"'
+            return f"json_extract({alias}.probabilities_json, ?)"
+        elif field == "rank" and field_choice is not None:
+            json_path = '$."' + field_choice.replace('"', '""') + '"'
+            return f"(SELECT COUNT(*) + 1 FROM json_each({alias}.probabilities_json) WHERE value > json_extract({alias}.probabilities_json, ?))"
+        else:
+            print(f"Error: invalid field/choice combination: {field}:{field_choice}", file=sys.stderr)
+            cache_db.close()
+            sys.exit(1)
 
     # Build SQL with grouped and compact syntax conditions
     for cond_item in conditions:
         cond_type = cond_item[0]
-        
+        alias = f"fa{alias_idx}" if alias_idx > 0 else "fa"
+        alias_idx += 1
+
         if cond_type == "group":
             # Grouped syntax: (group) || (group) || ...
             groups = cond_item[1]
             use_or = cond_item[2]
             group_clauses = []
             for group in groups:
-                # Parse each group: "qname=choice:field_condition[&&..."
                 if ":" not in group:
                     print(f"Error: missing ':' separator in group '{group}'. Expected 'qname=choice:prob>=0.8,...'.", file=sys.stderr)
                     cache_db.close()
                     sys.exit(1)
                 group_prefix, group_field_part = group.split(":", 1)
                 group_prefix = group_prefix.strip()
-                # Extract qname and choice from prefix (e.g., "activity=yes")
                 if "=" not in group_prefix:
                     print(f"Error: expected 'qname=choice' before ':' in group '{group}'.", file=sys.stderr)
                     cache_db.close()
@@ -1424,16 +1672,15 @@ def cmd_search(args):
                 group_qname, group_choice = group_prefix.split("=", 1)
                 group_qname = group_qname.strip().lower()
                 group_choice = group_choice.strip().lower()
-                
+
                 group_or_parts = [p.strip() for p in group_field_part.split("||")]
                 if len(group_or_parts) > 1:
                     group_use_or = True
                 else:
                     group_use_or = False
                     group_or_parts = [p.strip() for p in group_field_part.split("&&")]
-                
+
                 group_field_conditions = []
-                import re
                 for part in group_or_parts:
                     match = re.match(r"^(prob|conf|rank)(?::([a-zA-Z_][a-zA-Z0-9_]*))?\s*(>=|ge)\s*([0-9.]+)$", part, re.IGNORECASE)
                     if not match:
@@ -1444,45 +1691,41 @@ def cmd_search(args):
                     if op.lower() == "ge":
                         op = ">="
                     group_field_conditions.append((field, choice, op, float(value)))
-                
+
                 if not group_field_conditions:
                     print(f"Error: no valid field conditions in group '{group}'.", file=sys.stderr)
+                    _suggest_question(cache_db, group_qname, sys.stderr)
                     cache_db.close()
                     sys.exit(1)
-                
-                # Collect group-local params so we can prepend qname/choice
+
                 group_local_params = []
                 gclauses = []
                 for field, field_choice, op, value in group_field_conditions:
-                    if field == "prob" and field_choice is None:
-                        col = "fa.top_probability"
-                    elif field == "conf" and field_choice is None:
-                        col = "fa.confidence"
-                    elif field == "prob" and field_choice is not None:
-                        escaped = field_choice.replace('"', '""')
-                        json_path = '$."' + field_choice + '"'
-                        col = "json_extract(fa.probabilities_json, ?)"
-                        group_local_params.append(json_path)
+                    col = _field_col(alias, field, field_choice)
+                    if field == "prob" and field_choice is not None:
+                        group_local_params.append('$."' + field_choice.replace('"', '""') + '"')
                     elif field == "rank" and field_choice is not None:
-                        escaped = field_choice.replace('"', '""')
-                        json_path = '$."' + field_choice + '"'
-                        col = "(SELECT COUNT(*) + 1 FROM json_each(fa.probabilities_json) WHERE value > json_extract(fa.probabilities_json, ?))"
-                    else:
-                        print(f"Error: invalid field/choice combination in group: {field}:{field_choice}", file=sys.stderr)
-                        cache_db.close()
-                        sys.exit(1)
+                        group_local_params.append('$."' + field_choice.replace('"', '""') + '"')
                     gclauses.append(f"{col} {op} ?")
                     group_local_params.append(value)
-                
-                # Build field filter
+
                 field_filter = "( " + (" OR " if group_use_or else " AND ").join(gclauses) + " )"
-                
-                # Add qname/choice FIRST, then group local params
-                group_params = [group_qname, group_choice] + group_local_params
+
+                # Handle empty choice (::), fuzzy choice (* wildcard), and normal exact choice
+                if group_choice == '':
+                    group_clause = f"{alias}.question_name = ? AND {field_filter}"
+                    group_params = [group_qname] + group_local_params
+                elif '*' in group_choice or '.*' in group_choice:
+                    like_pattern = group_choice.replace('.*', '%').replace('*', '%')
+                    group_clause = f"{alias}.question_name = ? AND {alias}.top_choice LIKE ? AND {field_filter}"
+                    group_params = [group_qname, like_pattern] + group_local_params
+                else:
+                    group_clause = f"{alias}.question_name = ? AND {alias}.top_choice = ? AND {field_filter}"
+                    group_params = [group_qname, group_choice] + group_local_params
+
                 params.extend(group_params)
-                group_clause = f"fa.question_name = ? AND fa.top_choice = ? AND {field_filter}"
                 group_clauses.append(group_clause)
-            
+
             if use_or:
                 combined = " OR ".join(group_clauses)
             else:
@@ -1492,45 +1735,52 @@ def cmd_search(args):
         else:
             # Compact syntax (legacy) - cond_item is ('compact', (qname, choice, field_conditions, use_or))
             _, (qname, choice, field_conditions, use_or) = cond_item
-            params.extend([qname, choice])
-            
+
+            # Handle fuzzy/regex choice matching
+            is_regex = isinstance(choice, str) and choice.startswith('regex:')
+            if is_regex:
+                choice = choice[6:]  # strip 'regex:' prefix
+
+            # Build the question+choice filter first (params must match SQL order)
+            if choice == '':
+                # Double colon syntax (::) — match any choice for this question
+                clause = f"{alias}.question_name = ?"
+                params.append(qname)
+            elif is_regex:
+                # Fuzzy choice matching with * wildcard — filter by LIKE after question match
+                like_pattern = choice.replace('.*', '%').replace('*', '%')
+                clause = f"{alias}.question_name = ? AND {alias}.top_choice LIKE ?"
+                params.append(qname)
+                params.append(like_pattern)
+            else:
+                # Normal exact choice match
+                clause = f"{alias}.question_name = ? AND {alias}.top_choice = ?"
+                params.extend([qname, choice])
+
             clauses = []
             for field, field_choice, op, value in field_conditions:
-                if field == "prob" and field_choice is None:
-                    col = "fa.top_probability"
-                elif field == "conf" and field_choice is None:
-                    col = "fa.confidence"
-                elif field == "prob" and field_choice is not None:
-                    escaped = field_choice.replace('"', '""')
-                    json_path = '$."' + escaped + '"'
-                    col = "json_extract(fa.probabilities_json, ?)"
-                    clauses.append(f"{col} {op} ?")
-                    params.append(json_path)
-                    params.append(value)
-                    continue
+                col = _field_col(alias, field, field_choice)
+                if field == "prob" and field_choice is not None:
+                    params.append('$."' + field_choice.replace('"', '""') + '"')
                 elif field == "rank" and field_choice is not None:
-                    escaped = field_choice.replace('"', '""')
-                    json_path = '$."' + escaped + '"'
-                    col = "(SELECT COUNT(*) + 1 FROM json_each(fa.probabilities_json) WHERE value > json_extract(fa.probabilities_json, ?))"
-                    clauses.append(f"{col} {op} ?")
-                    params.append(json_path)
-                    params.append(value)
-                    continue
-                else:
-                    print(f"Error: invalid field/choice combination: {field}:{field_choice}", file=sys.stderr)
-                    cache_db.close()
-                    sys.exit(1)
+                    params.append('$."' + field_choice.replace('"', '""') + '"')
                 clauses.append(f"{col} {op} ?")
                 params.append(value)
-            
-            if use_or:
-                clause = f"fa.question_name = ? AND fa.top_choice = ? AND ({' OR '.join(clauses)})"
-            else:
-                clause = f"fa.question_name = ? AND fa.top_choice = ? AND ({' AND '.join(clauses)})"
+
+            if clauses:
+                field_filter = '(' + (' OR ' if use_or else ' AND ').join(clauses) + ')'
+                clause = f"{clause} AND {field_filter}"
+
             where_clauses.append(clause)
-    
-    # Simple join: frame_answers -> analysis_runs -> videos
-    from_clause = "frame_answers fa JOIN analysis_runs ar1 ON fa.run_id = ar1.id LEFT JOIN videos v ON ar1.video_id = v.id"
+
+    # Add self-joins for subsequent conditions and append analysis_runs/videos joins
+    if alias_idx > 1:
+        join_parts = []
+        for i in range(1, alias_idx):
+            prev_alias = f"fa{i-1}" if i > 1 else "fa"
+            join_parts.append(f"JOIN frame_answers fa{i} ON {prev_alias}.run_id = fa{i}.run_id AND {prev_alias}.frame_index = fa{i}.frame_index")
+        from_clause = "frame_answers fa " + " ".join(join_parts)
+    from_clause += " JOIN analysis_runs ar1 ON fa.run_id = ar1.id LEFT JOIN videos v ON ar1.video_id = v.id"
 
     # Limit to specified video(s) - support hash-based lookup
     # For each input, try exact path match first, then fall back to content_hash match
@@ -1794,6 +2044,35 @@ def cmd_search(args):
             cache_db.close()
             sys.exit(0)
 
+        # Pre-fetch all question data for each frame (run_id, frame_index)
+        frame_keys = set()
+        for row in rows:
+            fi = row.get("frame_index") or (row.get("frame_indices") or [None])[0]
+            if fi is not None:
+                frame_keys.add((row.get("run_id"), fi))
+
+        all_questions_for_frame = {}
+        if frame_keys:
+            placeholders = ",".join(["(?,?)"] * len(frame_keys))
+            qparams = []
+            for rk, fi in frame_keys:
+                qparams.append(rk)
+                qparams.append(fi)
+            qrows = cache_db.execute_sql(
+                f"SELECT run_id, frame_index, question_name, top_choice, top_probability, confidence, probabilities_json "
+                f"FROM frame_answers WHERE (run_id, frame_index) IN ({placeholders})",
+                qparams,
+            )
+            for qr in qrows:
+                key = (qr["run_id"], qr["frame_index"])
+                all_questions_for_frame.setdefault(key, []).append({
+                    "question_name": qr["question_name"],
+                    "top_choice": qr["top_choice"],
+                    "top_probability": qr["top_probability"],
+                    "confidence": qr["confidence"],
+                    "probabilities_json": qr["probabilities_json"],
+                })
+
         os.makedirs(save_frame_dir, exist_ok=True)
 
         saved = 0
@@ -1832,14 +2111,16 @@ def cmd_search(args):
                 fname = f"{video_name}_f{fi:06d}_{ts:.1f}s_{q_name}_{choice}.jpg"
                 out_path = os.path.join(save_frame_dir, fname)
 
+                # Collect all questions for this frame
+                run_id = frame_info.get("run_id")
+                questions_data = all_questions_for_frame.get((run_id, fi), [])
+
                 # Draw result overlay on frame
-                probs_json = frame_info.get("probabilities_json")
-                top_prob = frame_info.get("top_probability", 0.0)
-                frame = _draw_result_on_frame(frame, q_name, choice, top_prob, probs_json)
+                frame = _draw_result_on_frame(frame, questions_data)
 
                 cv2.imwrite(out_path, frame, [int(cv2.IMWRITE_JPEG_QUALITY), quality])
                 saved += 1
-                print(f"Saved frame: {out_path}", file=sys.stderr)
+                print(f"Saved frame: {out_path}  run_id={run_id} model={frame_info.get('model','')}", file=sys.stderr)
 
             cap.release()
 
@@ -1998,6 +2279,36 @@ def cmd_search(args):
                 shutil.rmtree(tmpdir)
         cache_db.close()
         sys.exit(0)
+
+    # ---- stitch-grid: 2x2 grid layout from multiple videos ----
+    if getattr(args, "stitch_grid", None):
+        grid_videos = args.stitch_grid  # list of video paths (nargs="+")
+        output_path = getattr(args, "stitch_grid_output", None)
+
+        # Resolve video paths
+        resolved_videos, missing = _resolve_video_paths(grid_videos)
+        for m in missing:
+            print(f"Warning: no video matched input '{m}'", file=sys.stderr)
+
+        if not resolved_videos:
+            print("Error: no valid video sources for grid stitch.", file=sys.stderr)
+            cache_db.close()
+            sys.exit(1)
+
+        if not output_path:
+            base = os.path.splitext(os.path.basename(resolved_videos[0]))[0]
+            output_path = f"{base}_grid.mp4"
+
+        # Get FPS from first video
+        cap_first = cv2.VideoCapture(resolved_videos[0])
+        fps = cap_first.get(cv2.CAP_PROP_FPS)
+        if not fps or fps <= 0:
+            fps = 30.0
+        cap_first.release()
+
+        success = _stitch_grid(resolved_videos, output_path, grid_cols=2, grid_rows=2, fps=fps)
+        cache_db.close()
+        sys.exit(0 if success else 1)
 
     # Output results
     if getattr(args, "json", False):
@@ -2282,6 +2593,119 @@ def _get_row_end_ts(row):
     if "end_timestamp" in row:
         return row["end_timestamp"]
     return row.get("timestamp_seconds", 0)
+
+
+def _stitch_grid(videos, output_path, grid_cols=2, grid_rows=2, fps=30):
+    """Stitch multiple videos into a single video with a grid layout.
+
+    Uses ffmpeg's hstack+vstack filters to arrange N videos in a grid.
+    If there are fewer videos than grid cells, the remaining cells
+    are filled with black.
+
+    Args:
+        videos: list of video file paths (up to grid_cols * grid_rows)
+        output_path: path for the output video
+        grid_cols: number of columns in the grid (default 2)
+        grid_rows: number of rows in the grid (default 2)
+        fps: frame rate for the output video (default 30)
+    """
+    import subprocess
+    import os
+
+    total_cells = grid_cols * grid_rows
+    actual_videos = list(videos)[:total_cells]
+    num_inputs = len(actual_videos)
+
+    # Probe first video for resolution to use as grid cell size
+    probe = subprocess.run(
+        ["ffprobe", "-v", "error",
+         "-select_streams", "v:0",
+         "-show_entries", "stream=width,height",
+         "-of", "csv=p=0", actual_videos[0]],
+        capture_output=True, text=True
+    )
+    parts = probe.stdout.strip().split(",")
+    if len(parts) == 2 and parts[0].isdigit() and parts[1].isdigit():
+        cell_w, cell_h = int(parts[0]), int(parts[1])
+    else:
+        cell_w, cell_h = 1920, 1080
+
+    # Build ffmpeg command
+    cmd = ["ffmpeg", "-y"]
+
+    # Add each video input
+    for v in actual_videos:
+        cmd.extend(["-i", v])
+
+    # Add black dummy inputs for remaining cells
+    # Probe the longest real video duration so black inputs match
+    max_dur = 0
+    for v in actual_videos:
+        dprobe = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+             "-of", "default=noprint_wrappers=1:nokey=1", v],
+            capture_output=True, text=True
+        )
+        try:
+            max_dur = max(max_dur, float(dprobe.stdout.strip()))
+        except (ValueError, TypeError):
+            pass
+
+    if num_inputs < total_cells:
+        for _ in range(total_cells - num_inputs):
+            cmd.extend(["-f", "lavfi", "-i", f"color=c=black:s={cell_w}x{cell_h}:d={max_dur}:r={fps}"])
+
+    # Build filter chain: scale each input, then hstack rows, then vstack rows
+    # Example for 2x2: [s0][s1]hstack[top]; [s2][s3]hstack[bottom]; [top][bottom]vstack
+    filter_parts = []
+    for i in range(total_cells):
+        filter_parts.append(f"[{i}:v]scale={cell_w}:{cell_h}[s{i}]")
+
+    # Build row-by-row hstack
+    for row in range(grid_rows):
+        row_start = row * grid_cols
+        row_labels = "".join(f"[s{row_start + c}]" for c in range(grid_cols))
+        row_out = f"[row{row}]"
+        if grid_cols == 1:
+            filter_parts.append(f"{row_labels}{row_out}copy{row_out}")
+        else:
+            filter_parts.append(f"{row_labels}hstack=inputs={grid_cols}{row_out}")
+
+    # Stack all rows vertically
+    row_labels = "".join(f"[row{r}]" for r in range(grid_rows))
+    if grid_rows == 1:
+        filter_parts.append(f"{row_labels}copy")
+    else:
+        filter_parts.append(f"{row_labels}vstack=inputs={grid_rows}")
+
+    filter_str = ";".join(filter_parts)
+
+    cmd.extend(["-filter_complex", filter_str])
+    cmd.extend(["-c:v", "libx264", "-preset", "fast", "-crf", "23"])
+    cmd.extend(["-pix_fmt", "yuv420p", "-r", str(fps)])
+    cmd.append("-shortest")
+    cmd.append(output_path)
+
+    print(f"Grid stitch: {num_inputs} video(s) -> {grid_cols}x{grid_rows} grid ({cell_w}x{cell_h} per cell) -> {output_path}", file=sys.stderr)
+    for i, v in enumerate(actual_videos):
+        print(f"  panel {i}: {v}", file=sys.stderr)
+
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        print(f"ffmpeg grid stitch error: {result.stderr[-500:]}", file=sys.stderr)
+        return False
+
+    if os.path.exists(output_path):
+        dur = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+             "-of", "default=noprint_wrappers=1:nokey=1", output_path],
+            capture_output=True, text=True
+        )
+        print(f"Stitched grid video: {output_path} (duration: {float(dur.stdout.strip()):.1f}s)", file=sys.stderr)
+        return True
+    else:
+        print(f"Error: output file not created: {output_path}", file=sys.stderr)
+        return False
 
 
 def _build_stitch_sections(by_video, threshold_sec, isolated_padding_sec):
@@ -2804,6 +3228,36 @@ def cmd_isearch(args):
             run_id = row.get("run_id")
             if run_id and run_id in run_to_path:
                 by_video[run_to_path[run_id]].append(row)
+
+        # Pre-fetch all question data for each frame (run_id, frame_index)
+        frame_keys = set()
+        for row in rows:
+            fi = row.get("frame_index")
+            if fi is not None:
+                frame_keys.add((row.get("run_id"), fi))
+
+        all_questions_for_frame = {}
+        if frame_keys:
+            placeholders = ",".join(["(?,?)"] * len(frame_keys))
+            qparams = []
+            for rk, fi in frame_keys:
+                qparams.append(rk)
+                qparams.append(fi)
+            qrows = cache_db.execute_sql(
+                f"SELECT run_id, frame_index, question_name, top_choice, top_probability, confidence, probabilities_json "
+                f"FROM frame_answers WHERE (run_id, frame_index) IN ({placeholders})",
+                qparams,
+            )
+            for qr in qrows:
+                key = (qr["run_id"], qr["frame_index"])
+                all_questions_for_frame.setdefault(key, []).append({
+                    "question_name": qr["question_name"],
+                    "top_choice": qr["top_choice"],
+                    "top_probability": qr["top_probability"],
+                    "confidence": qr["confidence"],
+                    "probabilities_json": qr["probabilities_json"],
+                })
+
         os.makedirs(args.save_frame, exist_ok=True)
         saved = 0
         fmt = "jpg"
@@ -2830,10 +3284,12 @@ def cmd_isearch(args):
                 fname = f"{video_name}_f{fi:06d}_{ts:.1f}s_{q_name}_{choice}.{fmt}"
                 out_path = os.path.join(args.save_frame, fname)
 
+                # Collect all questions for this frame
+                run_id = frame_info.get("run_id")
+                questions_data = all_questions_for_frame.get((run_id, fi), [])
+
                 # Draw result overlay on frame
-                probs_json = frame_info.get("probabilities_json")
-                top_prob = frame_info.get("top_probability", 0.0)
-                frame = _draw_result_on_frame(frame, q_name, choice, top_prob, probs_json)
+                frame = _draw_result_on_frame(frame, questions_data)
 
                 if fmt == "jpg":
                     cv2.imwrite(out_path, frame, [int(cv2.IMWRITE_JPEG_QUALITY), quality])
@@ -2894,6 +3350,36 @@ def cmd_isearch(args):
         else:
             print("(no rows)")
 
+    # ---- stitch-grid: 2x2 grid layout from multiple videos ----
+    if getattr(args, "stitch_grid", None):
+        grid_videos = args.stitch_grid  # list of video paths (nargs="+")
+        output_path = getattr(args, "stitch_grid_output", None)
+
+        # Resolve video paths
+        resolved_videos, missing = _resolve_video_paths(grid_videos)
+        for m in missing:
+            print(f"Warning: no video matched input '{m}'", file=sys.stderr)
+
+        if not resolved_videos:
+            print("Error: no valid video sources for grid stitch.", file=sys.stderr)
+            cache_db.close()
+            sys.exit(1)
+
+        if not output_path:
+            base = os.path.splitext(os.path.basename(resolved_videos[0]))[0]
+            output_path = f"{base}_grid.mp4"
+
+        # Get FPS from first video
+        cap_first = cv2.VideoCapture(resolved_videos[0])
+        fps = cap_first.get(cv2.CAP_PROP_FPS)
+        if not fps or fps <= 0:
+            fps = 30.0
+        cap_first.release()
+
+        success = _stitch_grid(resolved_videos, output_path, grid_cols=2, grid_rows=2, fps=fps)
+        cache_db.close()
+        sys.exit(0 if success else 1)
+
     cache_db.close()
     sys.exit(0)
 
@@ -2940,7 +3426,7 @@ def main():
     # ---- search ----
     p_search = sub.add_parser("search", help="Search cached frame answers by question")
     p_search.add_argument("video", type=str, nargs="+", help="One or more video files/directories (e.g., video.mp4 video2/*.mp4)")
-    p_search.add_argument("--q", dest="q_values", action="append", default=[], help="Filter condition. Compact: 'question=choice:field>=val[&&field>=val...]' (AND) or 'field>=val||field>=val' (OR). Grouped: '(question=choice:field>=val)||(question=choice:field>=val)' for complex OR/AND combinations. Groups allow independent qname+choice with nested ||/&& operators. Fields: prob, conf, prob:<choice>, rank:<choice>. Operator: >= only (or 'ge' word). E.g., activity=yes:prob>=0.8&&conf>=0.7, or (activity=yes:prob>=0.8||conf>=0.5)||(scene=couple:prob>=0.9). Word 'ge' avoids shell escaping. Multiple --q flags are AND'd together.")
+    p_search.add_argument("--list", "-l", action="store_true", default=False, help="List all available questions and their choices for the given video(s). Use this to discover what questions exist before constructing filters.")
     p_search.add_argument("--top", "-t", type=int, default=None, help="Limit to top N frames (or ranges) by probability; results are sorted by timestamp ascending.")
     p_search.add_argument(
         "--top-per-video", "-tpv", type=int, default=None,
@@ -2953,6 +3439,8 @@ def main():
     p_search.add_argument("--model", "-m", type=str, default=None, help="Filter results by decision model name (e.g., clef-flash:9b, d1:3b, perplexity/pplx-decider-v1.3)")
     p_search.add_argument("--run-id", "-ri", type=int, default=None, help="Filter results to a specific analysis run ID")
     p_search.add_argument("--stitch", "-st", nargs="?", const=True, default=None, metavar="PATH", help="Stitch matched frames into a single video using ffmpeg. Default threshold is 1 second unless --merge-same-threshold/-mst or --merge-threshold/-mt is provided.")
+    p_search.add_argument("--stitch-grid", "-sg", nargs="+", default=None, metavar="VIDEOS", help="Stitch multiple videos into a 2x2 grid layout (4 panels side by side). Provide up to 4 video file paths. Output goes to {first_video}_grid.mp4 by default, or use --stitch-grid-output to specify.")
+    p_search.add_argument("--stitch-grid-output", "-sg-o", type=str, default=None, metavar="PATH", help="Output path for --stitch-grid mode.")
     p_search.add_argument("--json", "-j", action="store_true", default=False, help="Output results as JSON array (for AI agents / programmatic use). Overrides table output on stdout. Merged ranges include start/end timestamps and frame lists.")
     p_search.set_defaults(func=cmd_search)
 
@@ -2971,6 +3459,8 @@ def main():
     p_isearch.add_argument("--model", "-m", type=str, default=None, help="Filter results by decision model name (e.g., clef-flash:9b, d1:3b, perplexity/pplx-decider-v1.3)")
     p_isearch.add_argument("--run-id", "-ri", type=int, default=None, help="Filter results to a specific analysis run ID")
     p_isearch.add_argument("--stitch", "-st", nargs="?", const=True, default=None, metavar="PATH", help="Stitch matched frames into a single video using ffmpeg. Default threshold is 1 second unless --merge-same-threshold/-mst or --merge-threshold/-mt is provided.")
+    p_isearch.add_argument("--stitch-grid", "-sg", nargs="+", default=None, metavar="VIDEOS", help="Stitch multiple videos into a 2x2 grid layout (4 panels side by side). Provide up to 4 video file paths.")
+    p_isearch.add_argument("--stitch-grid-output", "-sg-o", type=str, default=None, metavar="PATH", help="Output path for --stitch-grid mode.")
     p_isearch.set_defaults(func=cmd_isearch)
 
     # ---- cache ----
@@ -2984,7 +3474,7 @@ def main():
     p_cache.add_argument("--yes", action="store_true", help="Confirm clear")
     p_cache.set_defaults(func=cmd_cache)
 
-    args = parser.parse_args()
+    args, unknown = parser.parse_known_args()
 
     # Extract cache command args for cmd_cache
     if hasattr(args, 'cache_cmd'):
@@ -3002,6 +3492,10 @@ def main():
     if hasattr(args, "stitch"):
         args.stitch = args.stitch
 
+    # For non-search commands, reject unknown args
+    if args.command != "search" and unknown:
+        parser.error(f"unrecognized arguments: {' '.join(unknown)}")
+
     def _global_sigint_handler(signum, frame):
         print("\nInterrupted — saving partial progress before exit...", file=sys.stderr)
         sys.exit(130)
@@ -3009,7 +3503,11 @@ def main():
     signal.signal(signal.SIGINT, _global_sigint_handler)
     signal.signal(signal.SIGTERM, _global_sigint_handler)
 
-    args.func(args)
+    if args.command == "search":
+        args.unknown_args = unknown
+        args.func(args)
+    else:
+        args.func(args)
 
 
 if __name__ == "__main__":
