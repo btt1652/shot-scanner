@@ -102,32 +102,38 @@ class CacheDB:
 
     def _execute_schema(self):
         """Initialize schema if not exists, migrate if needed."""
-        # Drop old tables if schema is incompatible (version check)
-        cur = self.conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='frame_answers'")
-        if cur.fetchone():
-            # Check if frame_answers has run_id column (new schema)
-            cols = self.conn.execute("PRAGMA table_info(frame_answers)")
-            col_names = [row[1] for row in cols.fetchall()]
-            if "run_id" not in col_names:
-                # Old schema - drop and recreate
-                self.conn.executescript("""
-                    DROP TABLE IF EXISTS frame_answers;
-                    DROP TABLE IF EXISTS videos;
-                """)
+        SCHEMA_VERSION = 7  # Increment when we drop/recreate due to mismatches
+        expected_ar_cols = {"id", "video_id", "params_hash", "model", "cache_status", "created_at", "updated_at", "questions_json"}
+        expected_fa_cols = {"id", "run_id", "frame_index", "timestamp_seconds", "question_name", "question_instructions", "criteria_json", "top_choice", "top_probability", "confidence", "probabilities_json", "raw_response", "created_at"}
+
+        # Check if any key table has unexpected columns (e.g. old content_hash left over)
+        # If so, drop all data tables to get a fresh start via SCHEMA_SQL.
+        should_drop_all = False
+        for tbl, expected in [("analysis_runs", expected_ar_cols), ("frame_answers", expected_fa_cols)]:
+            try:
+                cols = self.conn.execute(f"PRAGMA table_info({tbl})")
+                actual = {row[1] for row in cols.fetchall()}
+                if actual != expected:
+                    print(f"Schema mismatch on {tbl}: expected {sorted(expected)}, got {sorted(actual)}. Dropping all tables for clean rebuild.", file=sys.stderr)
+                    should_drop_all = True
+                    break
+            except Exception:
+                pass
+
+        if should_drop_all:
+            self.conn.executescript("""
+                DROP TABLE IF EXISTS frame_answers;
+                DROP TABLE IF EXISTS analysis_runs;
+                DROP TABLE IF EXISTS videos;
+            """)
+
         self.conn.executescript(SCHEMA_SQL)
-        # Ensure analysis_runs has model column (migration for existing DBs)
-        ar_cols = self.conn.execute("PRAGMA table_info(analysis_runs)")
-        ar_col_names = [row[1] for row in ar_cols.fetchall()]
-        if "model" not in ar_col_names:
-            self.conn.execute("ALTER TABLE analysis_runs ADD COLUMN model TEXT NOT NULL DEFAULT ''")
-        # Ensure analysis_runs has questions_json column (migration for schema v5)
-        if "questions_json" not in ar_col_names:
-            self.conn.execute("ALTER TABLE analysis_runs ADD COLUMN questions_json TEXT NOT NULL DEFAULT '[]'")
-        # Ensure frame_answers has confidence column (migration for schema v6)
-        fa_cols = self.conn.execute("PRAGMA table_info(frame_answers)")
-        fa_col_names = [row[1] for row in fa_cols.fetchall()]
-        if "confidence" not in fa_col_names:
-            self.conn.execute("ALTER TABLE frame_answers ADD COLUMN confidence REAL")
+        # Ensure cache_stats gets recreated if dropped above
+        self.conn.execute("CREATE TABLE IF NOT EXISTS cache_stats (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL,
+            updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )")
 
     def set_stat(self, key: str, value: str):
         """Set a cache statistics entry."""
