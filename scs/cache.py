@@ -182,7 +182,7 @@ class CacheDB:
         if not video:
             return []
         cur = self.conn.execute(
-            """SELECT ar.id, ar.content_hash, ar.params_hash, ar.model, ar.cache_status,
+            """SELECT ar.id, ar.params_hash, ar.model, ar.cache_status,
                       ar.created_at, ar.updated_at,
                       COUNT(fa.id) AS answer_count
                FROM analysis_runs ar
