@@ -262,17 +262,23 @@ class CacheDB:
         if not answers:
             return 0
         with self.conn:
-            # Delete existing answers for this run to avoid conflicts
-            self.conn.execute(
-                "DELETE FROM frame_answers WHERE run_id = ?", (run_id,)
-            )
             for a in answers:
                 self.conn.execute(
                     """INSERT INTO frame_answers (
                            run_id, frame_index, timestamp_seconds, question_name,
                            question_instructions, criteria_json, top_choice, top_probability,
                            confidence, probabilities_json, raw_response)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                       ON CONFLICT(run_id, frame_index, question_name) DO UPDATE SET
+                           timestamp_seconds=excluded.timestamp_seconds,
+                           question_instructions=excluded.question_instructions,
+                           criteria_json=excluded.criteria_json,
+                           top_choice=excluded.top_choice,
+                           top_probability=excluded.top_probability,
+                           confidence=excluded.confidence,
+                           probabilities_json=excluded.probabilities_json,
+                           raw_response=excluded.raw_response,
+                           created_at=datetime('now')""",
                     (
                         run_id,
                         a.get("frame_index"),
