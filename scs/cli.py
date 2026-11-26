@@ -2384,9 +2384,10 @@ def _image_to_b64(image_path: Path, frame_scale: float) -> str:
     try:
         img = Image.open(str(image_path)).convert("RGB")
         scale = frame_scale if frame_scale else 0.1
-        new_w = max(1, int(img.width * scale))
-        new_h = max(1, int(img.height * scale))
-        img = img.resize((new_w, new_h), Image.LANCZOS)
+        if scale != 1.0:
+            new_w = max(1, int(img.width * scale))
+            new_h = max(1, int(img.height * scale))
+            img = img.resize((new_w, new_h), Image.LANCZOS)
         buffered = io.BytesIO()
         img.save(buffered, format="JPEG", quality=80)
         return base64.b64encode(buffered.getvalue()).decode("utf-8")
