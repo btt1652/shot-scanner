@@ -1107,8 +1107,8 @@ def cmd_analyze(args):
         # Flush remaining batch for this video
         _flush_batch()
 
-        # Save cache for this video
-        if save_cache:
+        # Save cache for this video (only if not interrupted)
+        if save_cache and not _shutdown_saving:
             video_results = [r for r in all_results if r.get("source_video_path") == vp]
             if video_results:
                 video_results.sort(key=lambda x: x["timestamp_seconds"])

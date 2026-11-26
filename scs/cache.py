@@ -201,16 +201,25 @@ class CacheDB:
         model: str = '',
         questions_json: str = '[]',
     ) -> int:
-        """Insert or update an analysis run. Returns run_id."""
+        """Insert or update an analysis run. Returns run_id (reuses existing)."""
         with self.conn:
-            # Delete existing row if it exists
-            self.conn.execute(
-                "DELETE FROM analysis_runs WHERE video_id = ? AND params_hash = ?",
+            # First check if run already exists — reuse it to preserve frame_answers
+            cur = self.conn.execute(
+                "SELECT id FROM analysis_runs WHERE video_id = ? AND params_hash = ?",
                 (video_id, params_hash),
             )
+            existing = cur.fetchone()
+            if existing:
+                # Update in-place without deleting frame_answers
+                self.conn.execute(
+                    "UPDATE analysis_runs SET model = ?, questions_json = ?, cache_status = ?, updated_at = datetime('now') WHERE id = ?",
+                    (model, questions_json, 'partial', existing['id']),
+                )
+                return existing['id']
+            # New run
             self.conn.execute(
-                """INSERT INTO analysis_runs (video_id, params_hash, model, questions_json, updated_at)
-                   VALUES (?, ?, ?, ?, datetime('now'))""",
+                """INSERT INTO analysis_runs (video_id, params_hash, model, questions_json, cache_status, updated_at)
+                   VALUES (?, ?, ?, ?, 'partial', datetime('now'))""",
                 (video_id, params_hash, model, questions_json),
             )
         cur = self.conn.execute(
