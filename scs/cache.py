@@ -129,11 +129,13 @@ class CacheDB:
 
         self.conn.executescript(SCHEMA_SQL)
         # Ensure cache_stats gets recreated if dropped above
-        self.conn.execute("CREATE TABLE IF NOT EXISTS cache_stats (
-            key TEXT PRIMARY KEY,
-            value TEXT NOT NULL,
-            updated_at TEXT NOT NULL DEFAULT (datetime('now'))
-        )")
+        self.conn.executescript("""
+            CREATE TABLE IF NOT EXISTS cache_stats (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL,
+                updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+        """)
 
     def set_stat(self, key: str, value: str):
         """Set a cache statistics entry."""
