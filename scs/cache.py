@@ -127,18 +127,26 @@ class CacheDB:
         video_path: str,
         content_hash: str,
     ) -> int:
-        """Insert or update video metadata. Returns video_id."""
+        """Insert or update video metadata. Returns video_id (reuses existing)."""
         with self.conn:
-            # Delete existing row if it exists
-            self.conn.execute(
-                "DELETE FROM videos WHERE video_path = ?", (video_path,)
+            # Check if video already exists — update in-place to preserve runs/answers
+            cur = self.conn.execute(
+                "SELECT id, content_hash FROM videos WHERE video_path = ?", (video_path,)
             )
+            existing = cur.fetchone()
+            if existing:
+                # Update in-place without deleting runs/answers
+                self.conn.execute(
+                    "UPDATE videos SET content_hash = ?, updated_at = datetime('now') WHERE id = ?",
+                    (content_hash, existing['id']),
+                )
+                return existing['id']
+            # New video
             self.conn.execute(
                 """INSERT INTO videos (video_path, content_hash, updated_at)
                    VALUES (?, ?, datetime('now'))""",
                 (video_path, content_hash),
             )
-        # Return the video_id
         cur = self.conn.execute(
             "SELECT id FROM videos WHERE video_path = ?", (video_path,)
         )
