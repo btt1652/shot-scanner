@@ -493,16 +493,19 @@ def _validate_batch_classify(frames_batch, model, state_template, questions, oll
             body = "(unable to read error body)"
         label = "OpenRouter" if provider == "openrouter" else "Ollama"
         if e.code == 401 and not api_key:
-            print(f"{label} request failed (401 Unauthorized): no API key set. Set OPENROUTER_API_KEY env var or add openrouter_api_key to config.toml. Discarding batch.", file=sys.stderr)
+            print(f"{label} request failed (401 Unauthorized): no API key set. Set OPENROUTER_API_KEY env var or add openrouter_api_key to config.toml.", file=sys.stderr)
+        elif e.code == 404:
+            print(f"{label} request failed (404 Not Found): {body}", file=sys.stderr)
         else:
-            print(f"{label} request failed ({e.code}): {body}. Discarding batch.", file=sys.stderr)
-        return [], batch_id
+            print(f"{label} request failed ({e.code}): {body}", file=sys.stderr)
+        print(f"Check your provider settings and model name, then try again.", file=sys.stderr)
+        sys.exit(1)
     except urllib.error.URLError as e:
-        print(f"Classify request failed: {e}. Discarding batch.", file=sys.stderr)
-        return [], batch_id
+        print(f"Classify request failed: {e}. Check your provider settings and network connectivity.", file=sys.stderr)
+        sys.exit(1)
     except Exception as e:
-        print(f"Classify request error: {e}. Discarding batch.", file=sys.stderr)
-        return [], batch_id
+        print(f"Classify request error: {e}", file=sys.stderr)
+        sys.exit(1)
 
     answer_rows = []
     for frame_index, ts, _b64, vp in frames_batch:
@@ -700,9 +703,12 @@ def _send_decision_request(endpoint, payload, timeout, provider, api_key=""):
             body = "(unable to read error body)"
         if e.code == 401 and not api_key:
             print(f"OpenRouter request failed (401 Unauthorized): no API key set. Set OPENROUTER_API_KEY env var or add openrouter_api_key to config.toml.", file=sys.stderr)
+        elif e.code == 404:
+            print(f"OpenRouter request failed (404 Not Found): {body}", file=sys.stderr)
         else:
             print(f"OpenRouter request failed ({e.code}): {body}", file=sys.stderr)
-        raise
+        print(f"Check your provider settings and model name, then try again.", file=sys.stderr)
+        sys.exit(1)
 
 
 def cmd_analyze(args):
