@@ -21,7 +21,7 @@ import urllib.request
 from pathlib import Path
 import cv2
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFont
 
 from .config import load_config, get_config_value, get_questions
 from .cache import CacheDB, _content_hash, _params_hash
@@ -51,6 +51,89 @@ _BUILTIN_MODEL_LIMITS = {
     "baseten/groundhog-1": 16,
     "baseten/bison-1": 16,
 }
+
+
+def _draw_result_on_frame(frame, question_name, top_choice, top_probability, probabilities_json):
+    """Draw a minimal result overlay on a frame image.
+
+    Shows question name, top choice with score, and all choices with probabilities.
+    Returns the modified frame (numpy array).
+    """
+    try:
+        pil_img = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+    except Exception:
+        return frame
+
+    draw = ImageDraw.Draw(pil_img)
+
+    # Try to use a TrueType font, fall back to default
+    font = None
+    font_path = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
+    if os.path.exists(font_path):
+        try:
+            font = ImageFont.truetype(font_path, 14)
+            font_small = ImageFont.truetype(font_path, 12)
+        except Exception:
+            font = ImageFont.load_default()
+            font_small = ImageFont.load_default()
+    else:
+        font = ImageFont.load_default()
+        font_small = ImageFont.load_default()
+
+    # Parse probabilities
+    probs = {}
+    if probabilities_json:
+        try:
+            probs = json.loads(probabilities_json) if isinstance(probabilities_json, str) else probabilities_json
+        except (json.JSONDecodeError, TypeError):
+            probs = {}
+
+    # Build overlay lines
+    lines = []
+    lines.append(f"{question_name}")
+    if top_choice:
+        lines.append(f"> {top_choice} ({top_probability:.0%})")
+    for choice, prob in sorted(probs.items(), key=lambda x: x[1], reverse=True):
+        if choice == top_choice:
+            continue
+        lines.append(f"  {choice} ({prob:.0%})")
+
+    # Calculate text block size
+    line_heights = []
+    for line in lines:
+        bbox = draw.textbbox((0, 0), line, font=font)
+        line_heights.append(bbox[3] - bbox[1] + 4)
+
+    total_height = sum(line_heights) + 16
+    padding = 8
+    max_line_width = max(draw.textbbox((0, 0), line, font=font)[2] for line in lines)
+    box_width = max_line_width + padding * 2
+    box_height = total_height + padding * 2
+
+    # Position: top-right corner
+    x = pil_img.width - box_width - 10
+    y = 10
+
+    # Draw semi-transparent background
+    bg = Image.new("RGBA", pil_img.size, (0, 0, 0, 0))
+    bg_draw = ImageDraw.Draw(bg)
+    bg_draw.rectangle(
+        [x, y, x + box_width, y + box_height],
+        fill=(0, 0, 0, 180),
+    )
+    pil_img = Image.alpha_composite(pil_img.convert("RGBA"), bg)
+    draw = ImageDraw.Draw(pil_img)
+
+    # Draw text lines
+    text_y = y + padding
+    for i, line in enumerate(lines):
+        color = "#00FF00" if i == 1 else "#FFFFFF"  # Green for top choice, white for others
+        draw.text((x + padding, text_y), line, fill=color, font=font)
+        text_y += line_heights[i]
+
+    # Convert back to numpy array (BGR)
+    result = cv2.cvtColor(np.array(pil_img.convert("RGB")), cv2.COLOR_RGB2BGR)
+    return result
 
 
 def _get_max_batch_size(provider, model, config=None):
@@ -1121,6 +1204,11 @@ def cmd_query(args):
                 fname = f"{video_name}_f{fi:06d}_{ts:.1f}s_{q_name}_{choice}.{fmt}"
                 out_path = os.path.join(save_frame_dir, fname)
 
+                # Draw result overlay on frame
+                probs_json = frame_info.get("probabilities_json")
+                top_prob = frame_info.get("top_probability", 0.0)
+                frame = _draw_result_on_frame(frame, q_name, choice, top_prob, probs_json)
+
                 if fmt == "jpg":
                     cv2.imwrite(out_path, frame, [int(cv2.IMWRITE_JPEG_QUALITY), quality])
                 elif fmt == "png":
@@ -1283,7 +1371,7 @@ def cmd_search(args):
 
     # Build query with self-joins for multiple conditions
     # First condition uses fa (main frame_answers), subsequent use fa1, fa2, etc.
-    select_cols = "fa.run_id, fa.frame_index, fa.timestamp_seconds, fa.question_name, fa.top_choice, fa.top_probability, fa.confidence, v.id AS video_id"
+    select_cols = "fa.run_id, fa.frame_index, fa.timestamp_seconds, fa.question_name, fa.top_choice, fa.top_probability, fa.confidence, fa.probabilities_json, v.id AS video_id"
     from_clause = "frame_answers fa JOIN analysis_runs ar1 ON fa.run_id = ar1.id"
     where_clauses = []
     params = []
@@ -1720,6 +1808,11 @@ def cmd_search(args):
                 ts = frame_info.get("timestamp_seconds") or frame_info.get("start_timestamp") or 0
                 fname = f"{video_name}_f{fi:06d}_{ts:.1f}s_{q_name}_{choice}.jpg"
                 out_path = os.path.join(save_frame_dir, fname)
+
+                # Draw result overlay on frame
+                probs_json = frame_info.get("probabilities_json")
+                top_prob = frame_info.get("top_probability", 0.0)
+                frame = _draw_result_on_frame(frame, q_name, choice, top_prob, probs_json)
 
                 cv2.imwrite(out_path, frame, [int(cv2.IMWRITE_JPEG_QUALITY), quality])
                 saved += 1
@@ -2712,6 +2805,12 @@ def cmd_isearch(args):
                 ts = frame_info.get("timestamp_seconds") or frame_info.get("start_timestamp") or 0
                 fname = f"{video_name}_f{fi:06d}_{ts:.1f}s_{q_name}_{choice}.{fmt}"
                 out_path = os.path.join(args.save_frame, fname)
+
+                # Draw result overlay on frame
+                probs_json = frame_info.get("probabilities_json")
+                top_prob = frame_info.get("top_probability", 0.0)
+                frame = _draw_result_on_frame(frame, q_name, choice, top_prob, probs_json)
+
                 if fmt == "jpg":
                     cv2.imwrite(out_path, frame, [int(cv2.IMWRITE_JPEG_QUALITY), quality])
                 else:

@@ -409,7 +409,7 @@ scs search video.mp4 --q "activity=yes:prob>=0.8" --top 3 --json
 
 This is designed for easy consumption by LLM agents, CI pipelines, or any tool that needs structured data.
 
-- `--save-frame DIR` (`-sf`): Save extracted frames to directory (JPG only)
+- `--save-frame DIR` (`-sf`): Save extracted frames to directory (JPG only). Each frame image has a result overlay showing the question name, top choice with score, and all choice probabilities
 - `--model MODEL` (`-m`): Filter results by decision model name (e.g., clef-flash:9b, d1:3b, perplexity/pplx-decider-v1.3)
 - `--run-id RUN_ID` (`-ri`): Filter results to a specific analysis run ID
 - `--cache CACHE` (`-c`): Path to SQLite cache file (default: ./.cache.db)
@@ -575,7 +575,7 @@ scs isearch <image> [--question Q] [-qr RUN_ID|VIDEO] [--top N] [--top-per-video
 - `--merge-result-threshold SEC`: Timestamp difference threshold (seconds) to merge adjacent frames with same score
 - `--model MODEL`: Filter results by decision model name (e.g., clef-flash:9b, d1:3b, perplexity/pplx-decider-v1.3)
 - `--run-id RUN_ID`: Filter results to a specific analysis run ID
-- `--save-frame DIR`: Directory to save extracted frames (JPG only)
+- `--save-frame DIR`: Directory to save extracted frames (JPG only). Each frame image has a result overlay showing the question name, top choice with score, and all choice probabilities
 - `--stitch [PATH]`: Stitch matched frames into a single video using ffmpeg. Uses `--merge-result-threshold` (default 1 sec) to group consecutive frames with same score into ranges before stitching
 - `--cache PATH`: Path to SQLite cache file (default: ./.cache.db)
 
