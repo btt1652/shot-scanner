@@ -18,7 +18,7 @@ Set the `provider` key in `config.toml` or use `--provider ollama` / `--provider
 | Setting | Ollama (default) | OpenRouter |
 |---|---|---|
 | **Where model runs** | Local machine | Cloud (openrouter.ai) |
-| **Config key** | `ollama_host`, `ollama_decision_model` | `openrouter_api_key`, `openrouter_model` |
+| **Config key** | `ollama_host`, `ollama_timeout` | `openrouter_api_key`, `openrouter_model` |
 | **Endpoint** | `http://host:11434/v1/systemone` | `https://openrouter.ai/api/alpha/decisions` |
 | **Auth** | None | `Authorization: Bearer <key>` |
 | **API key env var** | N/A | `OPENROUTER_API_KEY` |
@@ -30,8 +30,9 @@ All other settings (`frame_scale`, `state_template`, `frame_history`, questions,
 
 ```toml
 provider = "ollama"
-ollama_host = "192.168.1.190"
-ollama_decision_model = "clef-flash:9b"
+
+[ollama]
+host = "192.168.1.190"
 ```
 
 ```bash
@@ -66,37 +67,39 @@ Both providers use the [Decisions API](https://openrouter.ai/docs/guides/feature
 
 ## Configuration (`config.toml`)
 
-The `config.toml` file uses a flat structure — no section headers except for `[[questions]]` and `[model_image_limits]`. It provides default values; command-line arguments always override them at runtime.
+The `config.toml` file uses a structured format with `[ollama]` and `[openrouter]` sections for provider-specific settings. Provider-agnostic settings live at the top level. It provides default values; command-line arguments always override them at runtime.
 
 ```toml
 # Decision engine: "ollama" (local) or "openrouter" (cloud API)
 provider = "ollama"
 
-# --- Ollama settings ---
-ollama_host = "192.168.1.190"        # Ollama server address
-ollama_frame_scale = 0.1              # Scale factor for frames sent to model (0.0–1.0)
-ollama_decision_model = "d1:3b"       # Model name
-ollama_timeout = 60                   # Request timeout in seconds
-ollama_state_template = ""            # Context string prepended to every request
+# --- Provider-agnostic settings (used by both Ollama and OpenRouter) ---
+frame_scale = 0.1                # Scale factor for frames sent to model (0.0–1.0)
+decision_model = "d1:3b"         # Model name
+state_template = ""               # Context string prepended to every request
+frame_history = 5                 # Number of prior frames to include as context
 
-# --- OpenRouter settings ---
-openrouter_api_key = ""               # Set here or via OPENROUTER_API_KEY env var
-openrouter_model = "perplexity/pplx-decider-v1.3"
-openrouter_endpoint = "https://openrouter.ai/api/alpha/decisions"
-openrouter_timeout = 60
+# --- Ollama-specific settings ---
+[ollama]
+host = "192.168.1.190"           # Ollama server address
+timeout = 60                      # Request timeout in seconds
+
+# --- OpenRouter-specific settings ---
+[openrouter]
+api_key = ""                      # Set here or via OPENROUTER_API_KEY env var
+model = "perplexity/pplx-decider-v1.3"
+endpoint = "https://openrouter.ai/api/alpha/decisions"
+timeout = 60
 
 # --- Batch sizing ---
-max_images_per_request = -1           # -1 = auto from model; >0 overrides (capped by model limit)
+max_images_per_request = -1       # -1 = auto from model; >0 overrides (capped by model limit)
 
 # --- Scene detection & caching ---
-decision_model_sample_rate = 1
+frame_sample_rate = 1
 cache = "./.cache.db"
 still_frame_threshold = 0.95
 same_scene_threshold = 0.80
 recursive = false
-
-# --- Temporal anchoring (previous frame context) ---
-ollama_frame_history = 5              # Number of prior frames to include as context
 
 # --- Merge thresholds (search output grouping) ---
 merge_same_threshold = 0     # >0 enables -mst (merge same-score frames)
@@ -140,17 +143,18 @@ Command-line arguments take precedence over `config.toml`:
 | Flag | Overrides | Example |
 |---|---|---|
 | `--provider` | Provider selection | `--provider openrouter` |
-| `--ollama-model MODEL` | Decision model name | `--ollama-model clef-flash:9b` |
+| `--decision-model MODEL` | Decision model name | `--decision-model clef-flash:9b` |
 | `--ollama-host HOST` | Ollama server address | `--ollama-host localhost` |
 | `--ollama-timeout N` | Request timeout | `--ollama-timeout 120` |
-| `--ollama-state TEXT` | State context string | `--ollama-state "frame from X"` |
-| `--ollama-frame-history N` | Frame context window | `--ollama-frame-history 10` |
+| `--state-template TEXT` | State context string | `--state-template "frame from X"` |
+| `--frame-history N` | Frame context window | `--frame-history 10` |
+| `--frame-scale SCALE` | Frame scale factor | `--frame-scale 0.1` |
 | `--openrouter-api-key SK` | OpenRouter API key | `--openrouter-api-key sk-...` |
 | `--openrouter-model MODEL` | OpenRouter model | `--openrouter-model typesafe/jev-1.14` |
 | `--openrouter-endpoint URL` | OpenRouter endpoint | `--openrouter-endpoint https://...` |
 | `--openrouter-timeout N` | OpenRouter timeout | `--openrouter-timeout 120` |
 | `--max-images-per-request N, -mipr N` | Batch size limit | `--mipr 6` |
-| `--decision-model-sample-rate N` | Frame sampling rate | `--dmsr 2` |
+| `--frame-sample-rate N` | Frame sampling rate | `--fsr 2` |
 | `--model MODEL` | Cache query filter | `--model clef-flash:9b` |
 | `--q "question=choice:prob"` | Search filter | `--q "activity=yes:0.8"` |
 | `--run-id RUN_ID` | Target specific run | `--run-id 42` |
@@ -271,11 +275,11 @@ Filename format: `{video_name}_f{frame_index:06d}_{ts:.1f}s_{question_name}_{cho
 
 ## Frame History Context
 
-By default, `scs analyze` sends independent batches of frames to the decision model — each batch has no knowledge of what happened in previous scenes. The `ollama_frame_history` setting enables **temporal anchoring**: including recent previous frames' question answers as context for each new request.
+By default, `scs analyze` sends independent batches of frames to the decision model — each batch has no knowledge of what happened in previous scenes. The `frame_history` setting enables **temporal anchoring**: including recent previous frames' question answers as context for each new request.
 
 ### How it works
 
-- Set `ollama_frame_history = N` (default: 5) in `config.toml`, or use `--ollama-frame-history N` on the CLI
+- Set `frame_history = N` (default: 5) in `config.toml`, or use `--frame-history N` on the CLI
 - Before sending each batch, the system builds a context string listing the N most recent processed frames with their timestamps and question answers
 - Still frames detected between processed frames are tracked as `[still_frame]` (no model call was made), so the model knows about processing gaps
 - This context is appended to the `state` field sent to the model, giving it temporal awareness without adding extra images

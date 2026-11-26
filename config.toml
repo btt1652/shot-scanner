@@ -4,31 +4,39 @@
 
 # provider: "ollama" (local) or "openrouter" (cloud API)
 # When provider="openrouter", openrouter_api_key and openrouter_model are used.
-# When provider="ollama", ollama_host and ollama_decision_model are used.
+# When provider="ollama", ollama_host is used for the server address.
 
 # feed prob score of last N request into the current request context
 # prob >= 75 or confident >= 75
 
-decision_model_sample_rate = 1
-provider = "ollama"
-ollama_host = "192.168.1.190"
-ollama_frame_scale = 0.1
-ollama_decision_model = "clef-flash:9b"
-ollama_timeout = 60
-ollama_state_template = "frame from an adult video"
-openrouter_api_key = ""
-openrouter_model = "perplexity/pplx-decider-v1.3"
-openrouter_endpoint = "https://openrouter.ai/api/alpha/decisions"
-openrouter_timeout = 60
+
+
 max_images_per_request = -1    # -1 = auto-detect from model; >0 overrides (always capped by model limit)
 cache = "./.cache.db"
 still_frame_threshold = 0.95
 same_scene_threshold = 0.80
 recursive = false
-ollama_frame_history = 5
 isolated_frame_time = 2
 merge_same_threshold = 0    # >0 enables -mst (same-score merging)
 merge_threshold = 0         # >0 enables -mt (all-mode merging)
+
+# Frame processing settings used by both Ollama and OpenRouter providers.
+provider = "openrouter"
+frame_sample_rate = 1
+frame_scale = 0.1
+decision_model = "clef-flash:9b"
+state_template = "frame from an adult video"
+frame_history = 5
+
+[ollama]
+host = "192.168.1.190"
+timeout = 60
+
+[openrouter]
+api_key = ""  # Set via OPENROUTER_API_KEY env var or paste key here
+model = "perplexity/pplx-decider-v1.3"
+endpoint = "https://openrouter.ai/api/alpha/decisions"
+timeout = 60
 
 # Per-model image limits for OpenRouter Decisions API.
 # Override defaults here. Key = full model name (e.g. "perplexity/pplx-decider-v1.3")

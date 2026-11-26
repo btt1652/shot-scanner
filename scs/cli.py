@@ -613,13 +613,13 @@ def cmd_analyze(args):
         return get_config_value(cfg, key, getattr(args, cli_arg, None))
 
     # Read config values (removed: top_k, global_k, json_output, decision_model_floor, merge_range, top_choice)
-    decision_model_sample_rate = cfg_val("decision_model_sample_rate", "decision_model_sample_rate")
+    frame_sample_rate = cfg_val("frame_sample_rate", "frame_sample_rate")
     provider = cfg_val("provider", "provider") or "ollama"
     ollama_endpoint = cfg_val("ollama_host", "ollama_host")
-    ollama_model = cfg_val("ollama_decision_model", "ollama_model")
-    frame_scale = cfg_val("ollama_frame_scale", "ollama_frame_scale")
+    ollama_model = cfg_val("decision_model", "decision_model")
+    frame_scale = cfg_val("frame_scale", "frame_scale")
     recursive = cfg_val("recursive", "recursive")
-    state_template = cfg_val("ollama_state_template", "ollama_state")
+    state_template = cfg_val("state_template", "state_template")
     cache = cfg_val("cache", "cache")
     still_frame_threshold = cfg_val("still_frame_threshold", "still_frame_threshold") or 0.95
     same_scene_threshold = cfg_val("same_scene_threshold", "same_scene_threshold") or 0.80
@@ -670,11 +670,11 @@ def cmd_analyze(args):
     max_batch_size = _get_max_batch_size(provider, model, cfg)
     print(f"Batch limit: {max_batch_size} images/request (provider={provider}, model={model})", file=sys.stderr, flush=True)
 
-    print(f"Config: sample_rate={decision_model_sample_rate}, frame_scale={frame_scale:.2f}", file=sys.stderr)
+    print(f"Config: sample_rate={frame_sample_rate}, frame_scale={frame_scale:.2f}", file=sys.stderr)
     print(f"        provider={provider}, model={model}, host={endpoint}, state={state_template!r}, timeout={timeout}", file=sys.stderr)
     print(f"        questions={[q['name'] for q in questions]}", file=sys.stderr)
 
-    sample_rate = decision_model_sample_rate if decision_model_sample_rate else 1
+    sample_rate = frame_sample_rate if frame_sample_rate else 1
     # model already set above based on provider
 
     # Build params_hash for duplicate detection (includes model, thresholds, etc.)
@@ -713,13 +713,13 @@ def cmd_analyze(args):
 
     # History tracking: store last N processed frames' results for context injection
     # Each entry: (timestamp_seconds, frame_index, question_results_dict, was_still=False)
-    history_window_size = cfg_val("ollama_frame_history", "ollama_frame_history") or 5
+    history_window_size = cfg_val("frame_history", "frame_history") or 5
 
     # History tracking: store last N processed frames' results for context injection
     # Each entry: (timestamp_seconds, frame_index, entries_list_or_None, was_still)
     #   entries_list = [{"question_name": ..., "top_choice": ..., "top_probability": ..., "raw_response": ...}, ...]
     #   was_still = True means a still_frame was detected (no model call made)
-    history_window_size = cfg_val("ollama_frame_history", "ollama_frame_history") or 5
+    history_window_size = cfg_val("frame_history", "frame_history") or 5
 
     def _format_history_context():
         """Build context string of previous frames' results for Ollama state field.
@@ -2323,8 +2323,8 @@ def _classify_image_with_ollama_impl(image_path: Path, question_name: str, cfg: 
         }
 
     # determine model and state
-    model = cfg.get("ollama_decision_model", "typesafe/jev-1.14")
-    state = cfg.get("ollama_state_template", "")
+    model = cfg.get("decision_model", "typesafe/jev-1.14")
+    state = cfg.get("state_template", "")
     if not state:
         state = ""
 
@@ -2332,7 +2332,7 @@ def _classify_image_with_ollama_impl(image_path: Path, question_name: str, cfg: 
     endpoint = resolve_ollama_endpoint(cfg.get("ollama_host", "localhost"))
 
     # encode image
-    b64 = _image_to_b64(image_path, cfg.get("ollama_frame_scale", 0.1))
+    b64 = _image_to_b64(image_path, cfg.get("frame_scale", 0.1))
 
     # build payload
     payload = {
@@ -2392,7 +2392,7 @@ def _classify_image_with_openrouter(image_path: Path, question_name: str, cfg: d
 
     # determine model and state
     model = cfg.get("openrouter_model", "perplexity/pplx-decider-v1.3")
-    state = cfg.get("ollama_state_template", "")
+    state = cfg.get("state_template", "")
     if not state:
         state = ""
 
@@ -2402,7 +2402,7 @@ def _classify_image_with_openrouter(image_path: Path, question_name: str, cfg: d
     timeout = cfg.get("openrouter_timeout", 60)
 
     # encode image
-    b64 = _image_to_b64(image_path, cfg.get("ollama_frame_scale", 0.1))
+    b64 = _image_to_b64(image_path, cfg.get("frame_scale", 0.1))
 
     # build OpenRouter payload (images embedded in state array)
     state_arr = []
@@ -2786,17 +2786,17 @@ def main():
     p_classify = sub.add_parser("analyze", help="Analyze video frames using an Ollama or OpenRouter decision model")
     p_classify.add_argument("video_paths", nargs="+", help="One or more video files, directories, or glob patterns (e.g., video1.mp4 video2/*.mp4)")
     p_classify.add_argument("--questions", "-qs", type=str, default=None, help="JSON array of questions: [{\"name\":..., \"instructions\":..., \"criteria\":{...}}, ...]")
-    p_classify.add_argument("--decision-model-sample-rate", "-dmsr", type=int, default=None, help="Frame sampling interval in seconds (default: 3)")
+    p_classify.add_argument("--frame-sample-rate", "-fsr", type=int, default=None, help="Frame sampling interval in seconds (default: 3)")
     p_classify.add_argument("--ollama-host", "-oh", default=None, help="Ollama server address (default: 192.168.1.190). Falls back to localhost if unreachable")
-    p_classify.add_argument("--ollama-frame-scale", "-ofs", type=float, default=None, help="Scale factor for frames sent to Ollama (0.0-1.0, default: 0.1). Lower = faster")
-    p_classify.add_argument("--ollama-model", "-dm", default=None, help="Ollama model name (default: typesafe/jev-1.14)")
+    p_classify.add_argument("--frame-scale", "-fs", type=float, default=None, help="Scale factor for frames sent to the model (0.0-1.0, default: 0.1). Lower = faster")
+    p_classify.add_argument("--decision-model", "-dm", default=None, help="Decision model name (default: typesafe/jev-1.14)")
     p_classify.add_argument("--ollama-timeout", "-ot", type=int, default=None, help="Ollama request timeout in seconds (default: 60)")
     p_classify.add_argument("--still-frame-threshold", "-sft", type=float, default=None, help="Similarity (0-1) above which a frame is considered still (default: 0.95)")
     p_classify.add_argument("--same-scene-threshold", "-sst", type=float, default=None, help="Similarity (0-1) above which frames are considered same scene (default: 0.80)")
     p_classify.add_argument("--recursive", "-R", action="store_true", default=False, help="Recursively scan directories for video files")
     p_classify.add_argument("--cache", "-c", type=str, default=None, help="Path to SQLite cache file (default: ./.cache.db)")
-    p_classify.add_argument("--ollama-state", "-s", type=str, default=None, help="State context string for Ollama (default: 'sample frame from a video')")
-    p_classify.add_argument("--ollama-frame-history", "-fh", type=int, default=None, help="Number of previous processed frames to include as context (default: 5). Set to 0 to disable.")
+    p_classify.add_argument("--state-template", "-s", type=str, default=None, help="State context string prepended to every request (default: 'sample frame from a video')")
+    p_classify.add_argument("--frame-history", "-fh", type=int, default=None, help="Number of previous processed frames to include as context (default: 5). Set to 0 to disable.")
 
     # ---- OpenRouter options ----
     p_classify.add_argument("--provider", type=str, default=None, help="Decision provider: 'ollama' (default) or 'openrouter'")

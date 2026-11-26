@@ -22,13 +22,16 @@ def get_config_path() -> Path:
 
 def default_config() -> dict:
     return {
-        "decision_model_sample_rate": 3,
+        "frame_sample_rate": 1,
+        "provider": "ollama",
+        # Provider-agnostic frame processing settings (used by both Ollama and OpenRouter)
+        "frame_scale": 0.1,
+        "decision_model": "typesafe/jev-1.14",
+        "state_template": "sample frame from a video",
+        "frame_history": 5,
+        # Ollama-specific settings
         "ollama_host": "192.168.1.190",
-        "ollama_frame_scale": 0.1,
-        "ollama_decision_model": "typesafe/jev-1.14",
         "ollama_timeout": 60,
-        "ollama_state_template": "sample frame from a video",
-        "ollama_frame_history": 5,
         "provider": "ollama",
         "openrouter_api_key": "",
         "openrouter_model": "perplexity/pplx-decider-v1.3",
@@ -59,6 +62,25 @@ def default_config() -> dict:
     }
 
 
+def _flatten_config(user_cfg: dict) -> dict:
+    """Flatten nested [ollama] and [openrouter] TOML sections into flat keys.
+
+    TOML sections like [ollama] produce nested dicts, but the rest of the
+    code expects flat keys like "ollama_host".  This helper bridges that gap.
+    """
+    flat = {}
+    for section in ("ollama", "openrouter"):
+        section_data = user_cfg.get(section)
+        if isinstance(section_data, dict):
+            for key, value in section_data.items():
+                flat[f"{section}_{key}"] = value
+    # Copy top-level keys (provider, cache, questions, model_image_limits, etc.)
+    for key, value in user_cfg.items():
+        if key not in ("ollama", "openrouter"):
+            flat[key] = value
+    return flat
+
+
 def load_config() -> dict:
     """Load configuration from file or return defaults if file doesn't exist."""
     config_path = get_config_path()
@@ -68,7 +90,7 @@ def load_config() -> dict:
         try:
             with open(config_path, "rb") as f:
                 user_cfg = tomllib.load(f)
-            config.update(user_cfg)
+            config.update(_flatten_config(user_cfg))
         except Exception as e:
             print(f"Warning: Could not parse config file {config_path}: {e}", file=sys.stderr)
 
