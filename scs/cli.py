@@ -487,9 +487,15 @@ def _validate_batch_classify(frames_batch, model, state_template, questions, oll
             res_json = json.loads(response.read().decode("utf-8"))
         answers = res_json.get("answers", {})
     except urllib.error.HTTPError as e:
-        body = e.read().decode("utf-8", errors="replace")
+        try:
+            body = e.read().decode("utf-8", errors="replace")
+        except Exception:
+            body = "(unable to read error body)"
         label = "OpenRouter" if provider == "openrouter" else "Ollama"
-        print(f"{label} request failed ({e.code}): {body}. Discarding batch.", file=sys.stderr)
+        if e.code == 401 and not api_key:
+            print(f"{label} request failed (401 Unauthorized): no API key set. Set OPENROUTER_API_KEY env var or add openrouter_api_key to config.toml. Discarding batch.", file=sys.stderr)
+        else:
+            print(f"{label} request failed ({e.code}): {body}. Discarding batch.", file=sys.stderr)
         return [], batch_id
     except urllib.error.URLError as e:
         print(f"Classify request failed: {e}. Discarding batch.", file=sys.stderr)
@@ -684,8 +690,19 @@ def _send_decision_request(endpoint, payload, timeout, provider, api_key=""):
     if provider == "openrouter" and api_key:
         headers["Authorization"] = f"Bearer {api_key}"
     req = urllib.request.Request(endpoint, data=json.dumps(payload).encode("utf-8"), headers=headers)
-    with urllib.request.urlopen(req, timeout=timeout) as response:
-        return json.loads(response.read().decode("utf-8"))
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as response:
+            return json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        try:
+            body = e.read().decode("utf-8", errors="replace")
+        except Exception:
+            body = "(unable to read error body)"
+        if e.code == 401 and not api_key:
+            print(f"OpenRouter request failed (401 Unauthorized): no API key set. Set OPENROUTER_API_KEY env var or add openrouter_api_key to config.toml.", file=sys.stderr)
+        else:
+            print(f"OpenRouter request failed ({e.code}): {body}", file=sys.stderr)
+        raise
 
 
 def cmd_analyze(args):
