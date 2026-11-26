@@ -101,14 +101,7 @@ class CacheDB:
         return self._conn
 
     def _execute_schema(self):
-        """Ensure database schema matches SCHEMA_SQL by dropping all tables and recreating."""
-        # Drop all user tables so SCHEMA_SQL creates them fresh from the current spec.
-        # No backward compatibility — stale DBs always get wiped.
-        self.conn.executescript("""
-            DROP TABLE IF EXISTS frame_answers;
-            DROP TABLE IF EXISTS analysis_runs;
-            DROP TABLE IF EXISTS videos;
-        """)
+        """Create tables if they don't exist. Never wipes existing data."""
         self.conn.executescript(SCHEMA_SQL)
 
     def set_stat(self, key: str, value: str):
