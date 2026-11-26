@@ -1,97 +1,127 @@
 # scs — SCeneScan — Semantic Video Frame Analysis
 
-A lightweight CLI that analyzes video frames using an Ollama decision model as the sole judge.
+A lightweight CLI that analyzes video frames using a decision model as the sole judge. Supports **Ollama** (local) or **OpenRouter** (cloud API).
 
 ## CLI Subcommands
 
 | Command | Description |
 |---------|-------------|
-| `scs analyze <video>` | Analyze video frames using Ollama choice-question model |
+| `scs analyze <video>` | Analyze video frames using a decision model (Ollama or OpenRouter) |
 | `scs query "<sql>" [--cache CACHE] [--save-frame DIR]` | Query the cache or extract matching frames |
-| `scs search <video> [--q "(group)"]* [--top N] [--top-per-video N] [--merge-result-threshold SEC] [--model MODEL] [--run-id RUN_ID] [--save-frame DIR] [--stitch]` | Human-friendly search with compact or grouped filter syntax (see below) |
+| `scs search <video> [--q "(group)"]* [--top N] [--top-per-video N] [--merge-result-threshold SEC] [--model MODEL] [--run-id RUN_ID] [--save-frame DIR] [--stitch]` | Human-friendly search with compact or grouped filter syntax |
 | `scs cache <cmd>` | Cache management: list, delete, prune, clear, clean |
 
-## isearch - Experimental Image-Based Search
+## Provider: Ollama vs OpenRouter
 
-Search cached frame answers by reference image (single image). Uses a single reference image to find semantically similar frames across cached analysis runs.
+Set the `provider` key in `config.toml` or use `--provider ollama` / `--provider openrouter` on the CLI:
 
-### Usage
-```bash
-scs isearch <image> [--question Q] [-qr RUN_ID|VIDEO] [--top N] [--top-per-video N] [--merge-result-threshold SEC] [--model MODEL] [--run-id RUN_ID] [--save-frame DIR] [--stitch] [--cache PATH]
+| Setting | Ollama (default) | OpenRouter |
+|---|---|---|
+| **Where model runs** | Local machine | Cloud (openrouter.ai) |
+| **Config key** | `ollama_host`, `ollama_decision_model` | `openrouter_api_key`, `openrouter_model` |
+| **Endpoint** | `http://host:11434/v1/systemone` | `https://openrouter.ai/api/alpha/decisions` |
+| **Auth** | None | `Authorization: Bearer <key>` |
+| **API key env var** | N/A | `OPENROUTER_API_KEY` |
+| **Image count limit** | 4 per request | Varies by model (see below) |
+
+All other settings (`frame_scale`, `state_template`, `frame_history`, questions, etc.) are shared.
+
+### Ollama Quick Start
+
+```toml
+provider = "ollama"
+ollama_host = "192.168.1.190"
+ollama_decision_model = "clef-flash:9b"
 ```
 
-### Parameters
-- `image`: Path to reference image (jpg, png, webp, bmp …)
-- `--question Q` or `-Q`: Question name to score the reference image against (optional if `--question-ref` is given)
-- `-qr RUN_ID|VIDEO` or `--question-ref`: Use the question set from a run_id (integer) or latest run of a video path (string)
-- `--top N`: Limit to top N frames by probability
-- `--top-per-video N`: Limit number of top results per video by probability
-- `--merge-result-threshold SEC`: Timestamp difference threshold (seconds) to merge adjacent frames with same score
-- `--model MODEL`: Filter results by Ollama model name (e.g., clef-flash:9b, d1:3b)
-- `--run-id RUN_ID`: Filter results to a specific analysis run ID
-- `--save-frame DIR`: Directory to save extracted frames (JPG only)
-- `--stitch [PATH]`: Stitch matched frames into a single video using ffmpeg. Uses --merge-result-threshold (default 1 sec) to group consecutive frames with same score into ranges before stitching
-- `--cache PATH`: Path to SQLite cache file (default: ./.cache.db)
-
-### Example
 ```bash
-# Search using run_id (integer)
-scs isearch frames/hddJUR-091_cut_f020677_689.9s_activity_standing.jpg --question-ref 1 --top 1
-
-# Search using video path (string)
-scs isearch frames/hddJUR-091_cut_f020677_689.9s_activity_standing.jpg -qr /mnt/hdd/hddJUR-091_cut.mp4 --top 1
-
-# Search with explicit question name
-scs isearch frames/hddJUR-091_cut_f020677_689.9s_activity_standing.jpg --question activity --top 1
+scs analyze video.mp4          # uses local Ollama at 192.168.1.190
+scs analyze video.mp4 -oh localhost   # override host for this run
 ```
-### Query Subcommand (`scs query`)
+
+### OpenRouter Quick Start
+
+```toml
+provider = "openrouter"
+openrouter_api_key = "sk-..."      # or set OPENROUTER_API_KEY env var
+openrouter_model = "perplexity/pplx-decider-v1.3"
+```
 
 ```bash
-# List all cached videos (by id and path)
-scs query "SELECT id, video_path FROM videos" --cache ./.cache.db
+# Via config.toml
+scs analyze video.mp4
 
-# Show cache statistics
-scs query "SELECT COUNT(*) AS total_videos, SUM(answer_count) AS total_frames FROM (SELECT v.id, COUNT(fa.id) AS answer_count FROM videos v LEFT JOIN analysis_runs ar ON v.id = ar.video_id LEFT JOIN frame_answers fa ON ar.id = fa.run_id GROUP BY v.id)" --cache ./.cache.db
-
-# Prune entries older than N days (default 30)
-scs query "DELETE FROM analysis_runs WHERE updated_at < datetime('now', '-30 day')" --cache ./.cache.db
-
-# Execute custom SQL query
-scs query "SELECT * FROM frame_answers WHERE question_name='activity'" --cache ./.cache.db
-
-# Extract and save frame images from videos based on cached answer filters
-scs query "SELECT fa.run_id, fa.frame_index, fa.timestamp_seconds, fa.top_choice FROM frame_answers fa JOIN analysis_runs ar ON fa.run_id = ar.id WHERE fa.question_name='activity'" --save-frame ./activity_frames
-
-# Filter by question + choice
-scs query "SELECT fa.run_id, fa.frame_index, fa.timestamp_seconds, fa.top_choice FROM frame_answers fa JOIN analysis_runs ar ON fa.run_id = ar.id WHERE fa.question_name='activity' AND fa.top_choice='walking'" --save-frame ./walking_frames
-
-# Only high-confidence frames
-scs query "SELECT fa.run_id, fa.frame_index, fa.timestamp_seconds, fa.top_choice FROM frame_answers fa JOIN analysis_runs ar ON fa.run_id = ar.id WHERE fa.question_name='activity' AND fa.top_probability > 0.8" --save-frame ./high_conf_activity
-
-# Filename format: video_name_f000001_12.3s_activity_walking.jpg
+# Or via CLI flags (overrides config)
+scs analyze video.mp4 \
+  --provider openrouter \
+  --openrouter-api-key sk-or-v1-xxx \
+  --openrouter-model perplexity/pplx-decider-v1.3
 ```
+
+The `OPENROUTER_API_KEY` environment variable is supported as a fallback when `openrouter_api_key` is not set in `config.toml`.
+
+### How It Works
+
+Both providers use the [Decisions API](https://openrouter.ai/docs/guides/features/decisions): they accept images + text `state` and return typed question answers (`choice`, `noul`, `score`) with probabilities and confidence scores. The response format is identical, so all downstream processing (caching, merging, search) works the same regardless of provider.
 
 ## Configuration (`config.toml`)
 
-The `config.toml` file uses a **flat** structure — no section headers. It provides default values; command-line arguments always override them at runtime.
+The `config.toml` file uses a flat structure — no section headers except for `[[questions]]` and `[model_image_limits]`. It provides default values; command-line arguments always override them at runtime.
 
 ```toml
-# Global defaults
+# Decision engine: "ollama" (local) or "openrouter" (cloud API)
+provider = "ollama"
+
+# --- Ollama settings ---
+ollama_host = "192.168.1.190"        # Ollama server address
+ollama_frame_scale = 0.1              # Scale factor for frames sent to model (0.0–1.0)
+ollama_decision_model = "d1:3b"       # Model name
+ollama_timeout = 60                   # Request timeout in seconds
+ollama_state_template = ""            # Context string prepended to every request
+
+# --- OpenRouter settings ---
+openrouter_api_key = ""               # Set here or via OPENROUTER_API_KEY env var
+openrouter_model = "perplexity/pplx-decider-v1.3"
+openrouter_endpoint = "https://openrouter.ai/api/alpha/decisions"
+openrouter_timeout = 60
+
+# --- Batch sizing ---
+max_images_per_request = -1           # -1 = auto from model; >0 overrides (capped by model limit)
+
+# --- Scene detection & caching ---
 decision_model_sample_rate = 1
-ollama_host = "192.168.1.190"
-ollama_frame_scale = 0.1
-ollama_decision_model = "d1:3b"
-ollama_timeout = 60
-ollama_state_template = "sample frame from a video"
-ollama_frame_history = 5
-merge_same_threshold = 0     # >0 enables -mst (same-score merging)
-merge_threshold = 0          # >0 enables -mt (all-mode merging, mutually exclusive with -mst)
 cache = "./.cache.db"
 still_frame_threshold = 0.95
 same_scene_threshold = 0.80
 recursive = false
 
-# Question definitions (one [[questions]] entry per question)
+# --- Temporal anchoring (previous frame context) ---
+ollama_frame_history = 5              # Number of prior frames to include as context
+
+# --- Merge thresholds (search output grouping) ---
+merge_same_threshold = 0     # >0 enables -mst (merge same-score frames)
+merge_threshold = 0          # >0 enables -mt (merge adjacent frames)
+
+isolated_frame_time = 2        # Padding for stitching isolated frame groups
+
+# Per-model image limits for OpenRouter Decisions API.
+# Edit to override defaults or add new models. Unlisted models fall back
+# to built-in defaults (_BUILTIN_MODEL_LIMITS in scs/cli.py).
+[model_image_limits]
+  "perplexity/pplx-decider-v1.3" = 8
+  "perplexity/pplx-decider-flash-v1.3" = 8
+  "typesafe/jev-1.14" = 4
+  "typesafe/jev-1.13" = 4
+  "cloudflare/clef-flash" = 4
+  "cloudflare/clef-omni" = 4
+  "microsoft/microsoft-decision-1.1" = 8
+  "google/gemini-decision-1" = 128
+  "heygen/heygen-decision-1" = 100
+  "liquid/d1.2" = 16
+  "inception/mercury-decide" = 16
+  "baseten/groundhog-1" = 16
+
+# --- Question definitions (one [[questions]] entry per question) ---
 [[questions]]
 name = "activity"
 instructions = "What activity is happening in this frame?"
@@ -104,20 +134,136 @@ criteria = { morning = "Morning light", afternoon = "Afternoon light", evening =
 ```
 
 ### Override Precedence
-Command-line arguments take precedence over `config.toml`:
-- `--ollama-model MODEL` → overrides `ollama_decision_model` used for new analysis runs (analyze only)
-- `--ollama-frame-history N` → number of previous frames to use as context for current analysis (default: 5). Always uses **full JSON** format including all probabilities and confidence scores.
-- `--model MODEL` → filters results by model name when querying cache (search only)
-- `--q "question=choice:prob"` → adds filter criteria (search only)
-- `--run-id RUN_ID` → targets a specific analysis run ID (search only)
-- `--cache PATH` → overrides the default `.cache.db` location
 
-**Example**: Running `scs analyze video.mp4 --ollama-model clef-flash:9b` uses `clef-flash:9b` for new frames; running `scs search video.mp4 --model clef-flash:9b` filters existing cached answers to that model.
+Command-line arguments take precedence over `config.toml`:
+
+| Flag | Overrides | Example |
+|---|---|---|
+| `--provider` | Provider selection | `--provider openrouter` |
+| `--ollama-model MODEL` | Decision model name | `--ollama-model clef-flash:9b` |
+| `--ollama-host HOST` | Ollama server address | `--ollama-host localhost` |
+| `--ollama-timeout N` | Request timeout | `--ollama-timeout 120` |
+| `--ollama-state TEXT` | State context string | `--ollama-state "frame from X"` |
+| `--ollama-frame-history N` | Frame context window | `--ollama-frame-history 10` |
+| `--openrouter-api-key SK` | OpenRouter API key | `--openrouter-api-key sk-...` |
+| `--openrouter-model MODEL` | OpenRouter model | `--openrouter-model typesafe/jev-1.14` |
+| `--openrouter-endpoint URL` | OpenRouter endpoint | `--openrouter-endpoint https://...` |
+| `--openrouter-timeout N` | OpenRouter timeout | `--openrouter-timeout 120` |
+| `--max-images-per-request N, -mipr N` | Batch size limit | `--mipr 6` |
+| `--decision-model-sample-rate N` | Frame sampling rate | `--dmsr 2` |
+| `--model MODEL` | Cache query filter | `--model clef-flash:9b` |
+| `--q "question=choice:prob"` | Search filter | `--q "activity=yes:0.8"` |
+| `--run-id RUN_ID` | Target specific run | `--run-id 42` |
+| `--cache PATH` | Cache database path | `--cache ./custom.cache.db` |
+
+**Example**: Running `scs analyze video.mp4 --provider openrouter --openrouter-model typesafe/jev-1.14` uses OpenRouter with Jev for this run; running `scs search video.mp4 --model typesafe/jev-1.14` filters cached results to that model.
+
+## Max Images Per Request
+
+Batches are grouped by scene similarity and capped at a maximum number of images per request.
+
+### Auto-detection (default)
+
+When `max_images_per_request = -1` (the default), the system auto-detects the limit based on the active model:
+
+| Model | Max Images |
+|---|---|
+| `perplexity/pplx-decider-v1.3`, `-flash-v1.3` | 8 |
+| `typesafe/jev-*`, `cloudflare/clef-flash`, `clef-omni` | 4 |
+| `microsoft/microsoft-decision-1.1` | 8 |
+| `liquid/d1.*`, `inception/mercury-decide` | 16 |
+| `heygen/heygen-decision-*` | 100 |
+| `google/gemini-decision-1` | 128 |
+| Ollama (any model) | 4 |
+| Unknown / custom | 4 (safe fallback) |
+
+### Configurable in `[model_image_limits]`
+
+Edit `config.toml` under `[model_image_limits]` to override any model's limit or add new ones:
+
+```toml
+[model_image_limits]
+  "perplexity/pplx-decider-v1.3" = 8
+  "my-custom-model:latest" = 10    # new model
+```
+
+Unlisted models still fall back to the built-in defaults. You can also set a single global cap for all models:
+
+```toml
+# Cap ALL models at 5 frames per batch
+max_images_per_request = 5
+```
+
+### Hard override via CLI
+
+Force a specific limit for one run (still capped by the model's native provider limit):
+
+```bash
+scs analyze video.mp4 --mipr 6
+```
+
+**Priority chain** (highest wins):
+1. `--max-images-per-request N` flag
+2. `max_images_per_request = N` in `config.toml`
+3. Auto-detection from `[model_image_limits]` + built-in defaults
+4. Fallback to 4
+
+The value is always **capped** by the model's native provider limit — you cannot exceed what the API allows.
+
+## Using OpenRouter as Decision Provider
+
+Instead of a local Ollama instance, you can use OpenRouter's cloud API. OpenRouter provides access to dozens of decision models including `perplexity/pplx-decider-v1.3`, `typesafe/jev-1.14`, `google/gemini-decision-1`, and many more.
+
+### Setup
+
+```toml
+provider = "openrouter"
+openrouter_api_key = "sk-or-v1-..."   # Create one at https://openrouter.ai/settings/keys
+openrouter_model = "perplexity/pplx-decider-v1.3"
+```
+
+Or set the env var instead:
+```bash
+export OPENROUTER_API_KEY=sk-or-v1-...
+```
+
+### Endpoint
+
+Requests go to `POST https://openrouter.ai/api/alpha/decisions` with:
+- `Authorization: Bearer <api_key>` header
+- Images embedded in the `state` array as `image_url` objects
+- Same `answers` response format with `probabilities` and `confidence` fields
 
 ## Working Examples
 
-- `python3 -m scs query "SELECT frame_index, timestamp_seconds, top_choice, top_probability FROM frame_answers WHERE top_probability > 0.9"`
-- `python3 -m scs query "SELECT fa.frame_index, fa.timestamp_seconds, fa.top_choice FROM frame_answers fa WHERE fa.top_choice='walking' AND fa.top_probability > 0.8" --save-frame ./walking_frames`
+```bash
+# Analyze with Ollama (local, default)
+python3 -m scs analyze video.mp4
+
+# Analyze with OpenRouter
+python3 -m scs analyze video.mp4 --provider openrouter --openrouter-api-key sk-...
+
+# Analyze with specific OpenRouter model
+python3 -m scs analyze video.mp4 --provider openrouter --openrouter-model typesafe/jev-1.14
+
+# Search with filters
+scs search video.mp4 --q "activity=yes:0.8" --q "time_of_day=evening:0.9"
+
+# Search with JSON output
+scs search video.mp4 --q "activity=yes:0.8" --top 3 --json
+
+# Extract frames meeting criteria
+scs search video.mp4 --q "activity=walking:0.8" --top 5 --save-frame ./walking_frames
+
+# Stitch matched frames into a video
+scs search video.mp4 --q "activity=sitting:0.95" --stitch
+
+# Custom SQL query
+python3 -m scs query "SELECT frame_index, timestamp_seconds, top_choice FROM frame_answers WHERE top_probability > 0.9" --save-frame ./high_confidence
+
+# Image-based search
+scs isearch reference.jpg --question activity --top 10
+```
 
 ## Frame Filenames
 
@@ -125,19 +271,16 @@ Filename format: `{video_name}_f{frame_index:06d}_{ts:.1f}s_{question_name}_{cho
 
 ## Frame History Context
 
-By default, `scs analyze` sends independent batches of frames to the Ollama model — each batch has no knowledge of what happened in previous scenes. The `ollama_frame_history` setting enables **temporal anchoring**: including recent previous frames' question answers as context for each new request.
+By default, `scs analyze` sends independent batches of frames to the decision model — each batch has no knowledge of what happened in previous scenes. The `ollama_frame_history` setting enables **temporal anchoring**: including recent previous frames' question answers as context for each new request.
 
 ### How it works
 
 - Set `ollama_frame_history = N` (default: 5) in `config.toml`, or use `--ollama-frame-history N` on the CLI
-- By default, the system always uses **full JSON format** to dump complete raw response body per question — including all probabilities, confidence scores, and metadata from the Ollama response for maximum fidelity
 - Before sending each batch, the system builds a context string listing the N most recent processed frames with their timestamps and question answers
 - Still frames detected between processed frames are tracked as `[still_frame]` (no model call was made), so the model knows about processing gaps
-- This context is appended to the `state` field sent to Ollama, giving the model temporal awareness without adding extra images
+- This context is appended to the `state` field sent to the model, giving it temporal awareness without adding extra images
 
 ### Example context output
-
-The system always uses **full JSON format** to provide maximum visibility into previous frame results:
 
 ```
 Recent context (3 frames):
@@ -164,6 +307,7 @@ The full JSON response gives the model complete visibility into previous decisio
 For interactive use, use the `search` command with simple key-value filters instead of raw SQL.
 
 ### Basic Search
+
 ```bash
 # Find frames where activity is "yes" with probability >= 0.8
 scs search video.mp4 --q "activity=yes:0.8"
@@ -171,7 +315,7 @@ scs search video.mp4 --q "activity=yes:0.8"
 # Find frames where time_of_day is "evening" with probability >= 0.9
 scs search video.mp4 --q "time_of_day=evening:0.9"
 
-# Multiple filters (AND logic - all must match)
+# Multiple filters (AND logic — all must match)
 scs search video.mp4 \
   --q "activity=yes:0.8" \
   --q "time_of_day=evening:0.9" \
@@ -180,11 +324,12 @@ scs search video.mp4 \
 ```
 
 ### Parameters
+
 - `<video>`: Video path (or glob/directory pattern)
 - `--q "question=choice:prob[:confidence]"` (`-q`): Filter condition (repeatable).
 
   **Compact syntax** (legacy): `question=choice:field>=val[&&field>=val...]`
-  - Within a single `--q`, use `&&` for AND, `||` for OR: `activity=yes:prob>=0.8&&conf>=0.5` or `act_category=oral_on_female:prob>=0.6||conf>=0.7`
+  - Within a single `--q`, use `&&` for AND, `\|\|` for OR: `activity=yes:prob>=0.8&&conf>=0.5` or `act_category=oral_on_female:prob>=0.6\|\|conf>=0.7`
   - Multiple `--q` flags are AND'd together.
 
   **Grouped syntax**: Wrap complex conditions in parentheses to group independent questions:
@@ -199,7 +344,7 @@ scs search video.mp4 \
   scs search video.mp4 --q '(act_category=oral_on_female:prob ge 0.6||conf ge 0.7)'
   ```
   
-  Group syntax lets each group specify its own `question=choice` prefix with independent field filters combined via `&&`/`||`. Groups at the same `--q` level are joined by `||` (OR); multiple `--q` flags are AND'd. Use `ge` (word operator) instead of `>=` to avoid shell escaping issues.
+  Group syntax lets each group specify its own `question=choice` prefix with independent field filters combined via `&&`/`\|\|`. Groups at the same `--q` level are joined by `\|\|` (OR); multiple `--q` flags are AND'd. Use `ge` (word operator) instead of `>=` to avoid shell escaping issues.
 - `--top N` (`-t`): Limit to top N frames (or ranges with merge) by highest probability, then results are re‑ordered chronologically.
 - `--top-per-video N` (`-tpv`): Limit number of top results per video by highest probability, then results are re‑ordered chronologically per video. When both `--top` and `--top-per-video` are supplied, `--top-per-video` takes precedence.
 - `--merge-same-threshold SEC` (`-mst`): Merge consecutive frames **with the SAME probability score** within `SEC` seconds into a single time-range. Only merges rows sharing an identical `top_probability`. Default from `config.toml`: `merge_same_threshold = 0` (disabled). Set `> 0` to enable, or override via CLI.
@@ -259,13 +404,15 @@ scs search video.mp4 --q "activity=yes:prob>=0.8" --top 3 --json
 ```
 
 This is designed for easy consumption by LLM agents, CI pipelines, or any tool that needs structured data.
+
 - `--save-frame DIR` (`-sf`): Save extracted frames to directory (JPG only)
-- `--model MODEL` (`-m`): Filter results by Ollama model name (e.g., clef-flash:9b, d1:3b)
+- `--model MODEL` (`-m`): Filter results by decision model name (e.g., clef-flash:9b, d1:3b, perplexity/pplx-decider-v1.3)
 - `--run-id RUN_ID` (`-ri`): Filter results to a specific analysis run ID
 - `--cache CACHE` (`-c`): Path to SQLite cache file (default: ./.cache.db)
 - `--stitch [PATH]` (`-st`): Stitch matched frames into a single video using ffmpeg. Default threshold is 1 second unless `--merge-same-threshold/-mst` or `--merge-threshold/-mt` is provided.
 
 #### Quick Reference — Shorthand Flags
+
 | Long Flag | Short | Default in config.toml | Description |
 |-----------|-------|------------------------|-------------|
 | `--top` | `-t` | — | Limit to top N results |
@@ -274,12 +421,13 @@ This is designed for easy consumption by LLM agents, CI pipelines, or any tool t
 | `--merge-threshold` | `-mt` | `merge_threshold = 0` | Merge all frames by time (mutually exclusive with -mst) |
 | `--json` | `-j` | — | Output JSON array for AI agents / programmatic use (overrides table) |
 | `--save-frame` | `-sf` | — | Extract frame images |
-| `--model` | `-m` | — | Filter by model |
+| `--model` | `-m` | — | Filter by decision model name |
 | `--run-id` | `-ri` | — | Filter by run ID |
 | `--cache` | `-c` | — | Cache path |
-| `--stitch` | `-st` | — | Video stitching
+| `--stitch` | `-st` | — | Video stitching |
 
 ### Frame Extraction via Search
+
 ```bash
 # Search and save frames
 scs search video.mp4 \
@@ -296,6 +444,7 @@ This will extract frames meeting all criteria and return them **sorted by timest
 Understanding the table structure helps you write better custom SQL queries. Below is a visual representation of each table's columns and their purposes.
 
 ### 📋 `videos` Table
+
 | Column | Type | Description |
 |--------|------|-------------|
 | `id` | INTEGER | Primary key |
@@ -304,18 +453,20 @@ Understanding the table structure helps you write better custom SQL queries. Bel
 | `created_at` | TEXT | Timestamp when video was first cached |
 
 ### 📊 `analysis_runs` Table
+
 | Column | Type | Description |
 |--------|------|-------------|
 | `id` | INTEGER | Primary key (run ID) |
 | `video_id` | INTEGER | FK → videos.id |
 | `params_hash` | TEXT | Hash of model+config params (question_name+params) |
-| `model` | TEXT | Ollama model name (e.g., `clef-flash:9b`) |
+| `model` | TEXT | Decision model name (e.g., `clef-flash:9b`, `perplexity/pplx-decider-v1.3`) |
 | `questions_json` | TEXT | Full questions array as JSON (for reproducibility) |
 | `cache_status` | TEXT | `empty`/`partial`/`complete` |
 | `created_at` | TEXT | Run creation timestamp |
 | `updated_at` | TEXT | Last update timestamp |
 
 ### 🖼️ `frame_answers` Table
+
 | Column | Type | Description |
 |--------|------|-------------|
 | `run_id` | INTEGER | FK → analysis_runs.id |
@@ -324,10 +475,11 @@ Understanding the table structure helps you write better custom SQL queries. Bel
 | `question_name` | TEXT | Question key (e.g., `activity`, `time_of_day`) |
 | `top_choice` | TEXT | Best answer (e.g., `walking`, `sitting`) |
 | `top_probability` | REAL | Top choice probability (0.0–1.0) |
-| `confidence` | REAL | Model confidence/certainty (0.0–1.0, from Ollama) |
-| `raw_response` | TEXT | Raw Ollama response JSON |
+| `confidence` | REAL | Model confidence/certainty (0.0–1.0) |
+| `raw_response` | TEXT | Raw decision model response JSON |
 
 ### 📈 `cache_stats` Table
+
 | Column | Type | Description |
 |--------|------|-------------|
 | `key` | TEXT | Statistic key |
@@ -398,3 +550,67 @@ merge_same_threshold = 2  # Max gap for direct grouping (optional)
 ```
 
 With both set above, the stitching logic allows merging groups with gaps up to 5 seconds (2 + 3). Setting `isolated_frame_time = 0` disables padding — only exact threshold matching applies.
+
+## isearch — Experimental Image-Based Search
+
+Search cached frame answers by reference image (single image). Uses a single reference image to find semantically similar frames across cached analysis runs.
+
+### Usage
+
+```bash
+scs isearch <image> [--question Q] [-qr RUN_ID|VIDEO] [--top N] [--top-per-video N] [--merge-result-threshold SEC] [--model MODEL] [--run-id RUN_ID] [--save-frame DIR] [--stitch] [--cache PATH]
+```
+
+### Parameters
+
+- `image`: Path to reference image (jpg, png, webp, bmp …)
+- `--question Q` or `-Q`: Question name to score the reference image against (optional if `--question-ref` is given)
+- `-qr RUN_ID|VIDEO` or `--question-ref`: Use the question set from a run_id (integer) or latest run of a video path (string)
+- `--top N`: Limit to top N frames by probability
+- `--top-per-video N`: Limit number of top results per video by probability
+- `--merge-result-threshold SEC`: Timestamp difference threshold (seconds) to merge adjacent frames with same score
+- `--model MODEL`: Filter results by decision model name (e.g., clef-flash:9b, d1:3b, perplexity/pplx-decider-v1.3)
+- `--run-id RUN_ID`: Filter results to a specific analysis run ID
+- `--save-frame DIR`: Directory to save extracted frames (JPG only)
+- `--stitch [PATH]`: Stitch matched frames into a single video using ffmpeg. Uses `--merge-result-threshold` (default 1 sec) to group consecutive frames with same score into ranges before stitching
+- `--cache PATH`: Path to SQLite cache file (default: ./.cache.db)
+
+### Example
+
+```bash
+# Search using run_id (integer)
+scs isearch frames/hddJUR-091_cut_f020677_689.9s_activity_standing.jpg --question-ref 1 --top 1
+
+# Search using video path (string)
+scs isearch frames/hddJUR-091_cut_f020677_689.9s_activity_standing.jpg -qr /mnt/hdd/hddJUR-091_cut.mp4 --top 1
+
+# Search with explicit question name
+scs isearch frames/hddJUR-091_cut_f020677_689.9s_activity_standing.jpg --question activity --top 1
+```
+
+## Query Subcommand (`scs query`)
+
+```bash
+# List all cached videos (by id and path)
+scs query "SELECT id, video_path FROM videos" --cache ./.cache.db
+
+# Show cache statistics
+scs query "SELECT COUNT(*) AS total_videos, SUM(answer_count) AS total_frames FROM (SELECT v.id, COUNT(fa.id) AS answer_count FROM videos v LEFT JOIN analysis_runs ar ON v.id = ar.video_id LEFT JOIN frame_answers fa ON ar.id = fa.run_id GROUP BY v.id)" --cache ./.cache.db
+
+# Prune entries older than N days (default 30)
+scs query "DELETE FROM analysis_runs WHERE updated_at < datetime('now', '-30 day')" --cache ./.cache.db
+
+# Execute custom SQL query
+scs query "SELECT * FROM frame_answers WHERE question_name='activity'" --cache ./.cache.db
+
+# Extract and save frame images from videos based on cached answer filters
+scs query "SELECT fa.run_id, fa.frame_index, fa.timestamp_seconds, fa.top_choice FROM frame_answers fa JOIN analysis_runs ar ON fa.run_id = ar.id WHERE fa.question_name='activity'" --save-frame ./activity_frames
+
+# Filter by question + choice
+scs query "SELECT fa.run_id, fa.frame_index, fa.timestamp_seconds, fa.top_choice FROM frame_answers fa JOIN analysis_runs ar ON fa.run_id = ar.id WHERE fa.question_name='activity' AND fa.top_choice='walking'" --save-frame ./walking_frames
+
+# Only high-confidence frames
+scs query "SELECT fa.run_id, fa.frame_index, fa.timestamp_seconds, fa.top_choice FROM frame_answers fa JOIN analysis_runs ar ON fa.run_id = ar.id WHERE fa.question_name='activity' AND fa.top_probability > 0.8" --save-frame ./high_conf_activity
+
+# Filename format: video_name_f000001_12.3s_activity_walking.jpg
+```

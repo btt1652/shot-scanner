@@ -2,23 +2,54 @@
 # Uses an Ollama decision model as the sole judge for classification.
 # Multiple questions are defined in the [[questions]] array.
 
+# provider: "ollama" (local) or "openrouter" (cloud API)
+# When provider="openrouter", openrouter_api_key and openrouter_model are used.
+# When provider="ollama", ollama_host and ollama_decision_model are used.
+
 # feed prob score of last N request into the current request context
 # prob >= 75 or confident >= 75
 
 decision_model_sample_rate = 1
+provider = "ollama"
 ollama_host = "192.168.1.190"
 ollama_frame_scale = 0.1
 ollama_decision_model = "clef-flash:9b"
 ollama_timeout = 60
 ollama_state_template = "frame from an adult video"
+openrouter_api_key = ""
+openrouter_model = "perplexity/pplx-decider-v1.3"
+openrouter_endpoint = "https://openrouter.ai/api/alpha/decisions"
+openrouter_timeout = 60
+max_images_per_request = -1    # -1 = auto-detect from model; >0 overrides (always capped by model limit)
 cache = "./.cache.db"
 still_frame_threshold = 0.95
 same_scene_threshold = 0.80
 recursive = false
 ollama_frame_history = 5
-isolated_frame_time = 3
+isolated_frame_time = 2
 merge_same_threshold = 0    # >0 enables -mst (same-score merging)
 merge_threshold = 0         # >0 enables -mt (all-mode merging)
+
+# Per-model image limits for OpenRouter Decisions API.
+# Override defaults here. Key = full model name (e.g. "perplexity/pplx-decider-v1.3")
+# Value = max images per request. Not listed models fall back to built-in defaults.
+[model_image_limits]
+  # Default model — 8 images per request
+  "perplexity/pplx-decider-v1.3" = 8
+  "perplexity/pplx-decider-flash-v1.3" = 8
+  "typesafe/jev-1.14" = 4
+  "typesafe/jev-1.13" = 4
+  "cloudflare/clef-flash" = 4
+  "cloudflare/clef-omni" = 4
+  "microsoft/microsoft-decision-1.1" = 8
+  "google/gemini-decision-1" = 128
+  "heygen/heygen-decision-1" = 100
+  "heygen/heygen-decision-1-turbo" = 100
+  "liquid/d1.2" = 16
+  "liquid/d1.2-ultra" = 16
+  "inception/mercury-decide" = 16
+  "baseten/groundhog-1" = 16
+  "baseten/bison-1" = 16
 
 [[questions]]
 name = "female_nudity"

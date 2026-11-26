@@ -29,6 +29,15 @@ def default_config() -> dict:
         "ollama_timeout": 60,
         "ollama_state_template": "sample frame from a video",
         "ollama_frame_history": 5,
+        "provider": "ollama",
+        "openrouter_api_key": "",
+        "openrouter_model": "perplexity/pplx-decider-v1.3",
+        "openrouter_endpoint": "https://openrouter.ai/api/alpha/decisions",
+        "openrouter_timeout": 60,
+        "max_images_per_request": -1,
+        # Override specific models in config.toml under [model_image_limits]
+        # Unlisted models fall back to built-in defaults (see scs/cli.py _BUILTIN_MODEL_LIMITS)
+        "model_image_limits": {},
         "merge_same_threshold": 0,
         "isolated_frame_time": 3,
         "merge_threshold": 0,

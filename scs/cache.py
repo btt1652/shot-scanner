@@ -55,9 +55,9 @@ CREATE TABLE IF NOT EXISTS frame_answers (
     criteria_json TEXT,
     top_choice TEXT,
     top_probability REAL,
-    confidence REAL,  -- confidence from Ollama response (e.g., model certainty)
+    confidence REAL,  -- confidence from decision model response (e.g., model certainty)
     probabilities_json TEXT,
-    raw_response TEXT,
+    raw_response TEXT,  -- raw decision model response JSON
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     UNIQUE(run_id, frame_index, question_name)
 );

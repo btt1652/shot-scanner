@@ -1,6 +1,6 @@
 """Command-line interface for scs (decision-model-only mode).
 
-This CLI classifies video frames using an Ollama decision model as the sole judge.
+This CLI classifies video frames using an Ollama or OpenRouter decision model as the sole judge.
 No CLIP embeddings or .npz caches are required.
 
 Questions are defined as a JSON array (via CLI or config.toml) and each frame gets
@@ -28,8 +28,60 @@ from .cache import CacheDB, _content_hash, _params_hash
 
 DEFAULT_VIDEO_EXTENSIONS = [".mp4", ".avi", ".mov", ".mkv", ".webm", ".flv", ".wmv"]
 
-# Ollama supports at most 4 images per multi-image request, so scene batches are fixed at 4.
-MAX_SCENE_BATCH_SIZE = 4
+# Per-model limits for images per request (OpenRouter Decisions API).
+# Ollama is limited to 4; OpenRouter limits vary by model.
+# Built-in default model image limits — loaded into config._model_limits_builtin.
+# Users can override any of these in config.toml under [model_image_limits].
+_BUILTIN_MODEL_LIMITS = {
+    "perplexity/pplx-decider-v1.3": 8,
+    "perplexity/pplx-decider-v1.2": 8,
+    "perplexity/pplx-decider-flash-v1.3": 8,
+    "perplexity/pplx-decider-flash-v1.2": 8,
+    "typesafe/jev-1.14": 4,
+    "typesafe/jev-1.13": 4,
+    "cloudflare/clef-flash": 4,
+    "cloudflare/clef-omni": 4,
+    "microsoft/microsoft-decision-1.1": 8,
+    "google/gemini-decision-1": 128,
+    "heygen/heygen-decision-1": 100,
+    "heygen/heygen-decision-1-turbo": 100,
+    "liquid/d1.2": 16,
+    "liquid/d1.2-ultra": 16,
+    "inception/mercury-decide": 16,
+    "baseten/groundhog-1": 16,
+    "baseten/bison-1": 16,
+}
+
+
+def _get_max_batch_size(provider, model, config=None):
+    """Return the max images per request for the given provider and model.
+
+    If config is provided and config["max_images_per_request"] > 0, that value
+    is used (capped by the model limit). Otherwise the model limit is looked up:
+      1. From config.toml [model_image_limits] table (user overrides)
+      2. Merged with built-in defaults (_BUILTIN_MODEL_LIMITS)
+      3. Falls back to 4 for unknown models or Ollama.
+    """
+    if provider != "openrouter":
+        return 4  # Ollama always 4
+
+    # Get the effective limits map: user overrides + built-in defaults
+    builtin_map = dict(_BUILTIN_MODEL_LIMITS)
+    if config:
+        user_limits = config.get("model_image_limits")
+        if isinstance(user_limits, dict):
+            builtin_map.update(user_limits)
+
+    # Look up model limit
+    model_limit = builtin_map.get(model, 4)
+
+    # Respect explicit CLI/config override if set
+    if isinstance(config, dict):
+        cfg_override = config.get("max_images_per_request", -1)
+        if isinstance(cfg_override, int) and cfg_override > 0:
+            model_limit = min(cfg_override, model_limit)
+
+    return model_limit
 
 _COLORS = {
     "reset": "\033[0m",
@@ -303,7 +355,7 @@ def _sql_with_params(sql: str, params: list) -> str:
     return result
 
 
-def _validate_batch_classify(frames_batch, model, state_template, questions, ollama_timeout, ollama_endpoint, batch_id_counter=None, history_state=None):
+def _validate_batch_classify(frames_batch, model, state_template, questions, ollama_timeout, ollama_endpoint, batch_id_counter=None, history_state=None, provider="ollama", api_key=""):
     """Validate a batch of frames using multiple choice questions.
 
     frames_batch: list of tuples (frame_index, timestamp_seconds, b64_image, video_path)
@@ -323,17 +375,39 @@ def _validate_batch_classify(frames_batch, model, state_template, questions, oll
             "instructions": q["instructions"],
             "criteria": q["criteria"],
         }
-    payload = {
-        "model": model,
-        "state": (state_template or "") + ("\n\n" + history_state if history_state else ""),
-        "images": images,
-        "questions": questions_payload,
-    }
+
+    # Build provider-specific payload
+    if provider == "openrouter":
+        state_arr = []
+        if state_template:
+            state_arr.append(state_template)
+        if history_state:
+            state_arr.append("\n\n" + history_state)
+        for img in images:
+            state_arr.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{img}"}})
+        payload = {"model": model, "state": state_arr, "questions": questions_payload}
+    else:
+        payload = {
+            "model": model,
+            "state": (state_template or "") + ("\n\n" + history_state if history_state else ""),
+            "images": images,
+            "questions": questions_payload,
+        }
+
     try:
-        req = urllib.request.Request(ollama_endpoint, data=json.dumps(payload).encode("utf-8"), headers={"Content-Type": "application/json"})
+        req = urllib.request.Request(
+            ollama_endpoint,
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json", **({"Authorization": f"Bearer {api_key}"} if provider == "openrouter" and api_key else {})},
+        )
         with urllib.request.urlopen(req, timeout=ollama_timeout) as response:
             res_json = json.loads(response.read().decode("utf-8"))
         answers = res_json.get("answers", {})
+    except urllib.error.HTTPError as e:
+        body = e.read().decode("utf-8", errors="replace")
+        label = "OpenRouter" if provider == "openrouter" else "Ollama"
+        print(f"{label} request failed ({e.code}): {body}. Discarding batch.", file=sys.stderr)
+        return [], batch_id
     except urllib.error.URLError as e:
         print(f"Classify request failed: {e}. Discarding batch.", file=sys.stderr)
         return [], batch_id
@@ -493,8 +567,46 @@ def resolve_ollama_endpoint(primary_endpoint):
     return fallback
 
 
+def _build_decision_payload(provider, model, state, images_b64, questions_payload):
+    """Build the decision request payload for the given provider.
+
+    Ollama uses separate 'state', 'images' fields; OpenRouter embeds images in 'state' array.
+    """
+    if provider == "openrouter":
+        state_array = []
+        if state:
+            state_array.append(state)
+        for img in images_b64:
+            state_array.append({
+                "type": "image_url",
+                "image_url": {"url": f"data:image/jpeg;base64,{img}"},
+            })
+        return {
+            "model": model,
+            "state": state_array,
+            "questions": questions_payload,
+        }
+    else:
+        return {
+            "model": model,
+            "state": state,
+            "images": images_b64,
+            "questions": questions_payload,
+        }
+
+
+def _send_decision_request(endpoint, payload, timeout, provider, api_key=""):
+    """Send a decision request and return parsed JSON response."""
+    headers = {"Content-Type": "application/json"}
+    if provider == "openrouter" and api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    req = urllib.request.Request(endpoint, data=json.dumps(payload).encode("utf-8"), headers=headers)
+    with urllib.request.urlopen(req, timeout=timeout) as response:
+        return json.loads(response.read().decode("utf-8"))
+
+
 def cmd_analyze(args):
-    """Classify video frames using an Ollama choice-question model."""
+    """Classify video frames using an Ollama or OpenRouter decision model."""
     cfg = load_config()
 
     def cfg_val(key, cli_arg):
@@ -502,6 +614,7 @@ def cmd_analyze(args):
 
     # Read config values (removed: top_k, global_k, json_output, decision_model_floor, merge_range, top_choice)
     decision_model_sample_rate = cfg_val("decision_model_sample_rate", "decision_model_sample_rate")
+    provider = cfg_val("provider", "provider") or "ollama"
     ollama_endpoint = cfg_val("ollama_host", "ollama_host")
     ollama_model = cfg_val("ollama_decision_model", "ollama_model")
     frame_scale = cfg_val("ollama_frame_scale", "ollama_frame_scale")
@@ -511,6 +624,10 @@ def cmd_analyze(args):
     still_frame_threshold = cfg_val("still_frame_threshold", "still_frame_threshold") or 0.95
     same_scene_threshold = cfg_val("same_scene_threshold", "same_scene_threshold") or 0.80
     ollama_timeout = cfg_val("ollama_timeout", "ollama_timeout")
+    openrouter_api_key = cfg_val("openrouter_api_key", "openrouter_api_key") or os.environ.get("OPENROUTER_API_KEY", "")
+    openrouter_model = cfg_val("openrouter_model", "openrouter_model")
+    openrouter_endpoint = cfg_val("openrouter_endpoint", "openrouter_endpoint")
+    openrouter_timeout = cfg_val("openrouter_timeout", "openrouter_timeout")
 
     if not state_template:
         state_template = ""
@@ -537,14 +654,28 @@ def cmd_analyze(args):
     for m in missing:
         print(f"Warning: no video matched input '{m}'", file=sys.stderr)
 
-    ollama_endpoint = resolve_ollama_endpoint(ollama_endpoint)
+    # Resolve endpoint based on provider
+    if provider == "openrouter":
+        endpoint = openrouter_endpoint or "https://openrouter.ai/api/alpha/decisions"
+        model = openrouter_model or "perplexity/pplx-decider-v1.3"
+        timeout = openrouter_timeout or 60
+        api_key = openrouter_api_key
+    else:
+        endpoint = resolve_ollama_endpoint(ollama_endpoint)
+        model = ollama_model if ollama_model else "typesafe/jev-1.14"
+        timeout = ollama_timeout
+        api_key = ""
+
+    # max_images_per_request > 0 means explicit override from config.toml or CLI; -1 means auto-detect from model.
+    max_batch_size = _get_max_batch_size(provider, model, cfg)
+    print(f"Batch limit: {max_batch_size} images/request (provider={provider}, model={model})", file=sys.stderr, flush=True)
 
     print(f"Config: sample_rate={decision_model_sample_rate}, frame_scale={frame_scale:.2f}", file=sys.stderr)
-    print(f"        model={ollama_model}, host={ollama_endpoint}, state={state_template!r}, timeout={ollama_timeout}", file=sys.stderr)
+    print(f"        provider={provider}, model={model}, host={endpoint}, state={state_template!r}, timeout={timeout}", file=sys.stderr)
     print(f"        questions={[q['name'] for q in questions]}", file=sys.stderr)
 
     sample_rate = decision_model_sample_rate if decision_model_sample_rate else 1
-    model = ollama_model if ollama_model else "typesafe/jev-1.14"
+    # model already set above based on provider
 
     # Build params_hash for duplicate detection (includes model, thresholds, etc.)
     params_hash = _params_hash(**_cache_params(
@@ -633,7 +764,7 @@ def cmd_analyze(args):
         history_state = _format_history_context()
         
         out, batch_id_counter = _validate_batch_classify(
-            batch, model, state_template, questions, ollama_timeout, ollama_endpoint, batch_id_counter, history_state
+            batch, model, state_template, questions, timeout, endpoint, batch_id_counter, history_state, provider=provider, api_key=api_key
         )
         all_results.extend(out)
         total_validated += len(batch)
@@ -818,13 +949,13 @@ def cmd_analyze(args):
                         total_skipped += 1
                         # Track still frame in history for context
                         video_history.append((ts, frame_index, None, True))
-                    elif similarity >= same_scene_threshold and len(batch) < MAX_SCENE_BATCH_SIZE:
+                    elif similarity >= same_scene_threshold and len(batch) < max_batch_size:
                         print(f"sim check {ts_cur_formatted} <-> {ts_prev_formatted} sim={similarity:.2f} (same scene)", file=sys.stderr)
                         batch.append((frame_index, ts, b64, vp))
                         total_extracted += 1
                         batch_ts = ", ".join(f"{int(t)//3600:02d}:{int(t)%3600//60:02d}:{int(t)%60:02d}" for _, t, _, _ in batch)
                         print(f"add {ts_cur_formatted} to request [{batch_ts}]", file=sys.stderr)
-                        if len(batch) >= MAX_SCENE_BATCH_SIZE:
+                        if len(batch) >= max_batch_size:
                             _flush_batch()
                         skip_frame = False
                     else:
@@ -2164,6 +2295,17 @@ def _get_question_def(cfg: dict, question_name: str):
 
 def _classify_image_with_ollama(image_path: Path, question_name: str, cfg: dict) -> float:
     """
+    Send a single image to the configured decision provider (Ollama or OpenRouter)
+    and return the top probability for the given question.
+    """
+    provider = cfg.get("provider", "ollama")
+    if provider == "openrouter":
+        return _classify_image_with_openrouter(image_path, question_name, cfg)
+    return _classify_image_with_ollama_impl(image_path, question_name, cfg)
+
+
+def _classify_image_with_ollama_impl(image_path: Path, question_name: str, cfg: dict) -> float:
+    """
     Send a single image to Ollama and return the top probability for the given question.
     """
     question_def = _get_question_def(cfg, question_name)
@@ -2211,6 +2353,83 @@ def _classify_image_with_ollama(image_path: Path, question_name: str, cfg: dict)
             res_json = json.loads(response.read().decode("utf-8"))
     except Exception as e:
         print(f"Error calling Ollama: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    # extract top probability for the requested question
+    answers = res_json.get("answers", {})
+    q_ans = answers.get(question_name, {})
+    probs = q_ans.get("probabilities", {}) if isinstance(q_ans, dict) else {}
+    if not isinstance(probs, dict):
+        probs = {}
+    top_prob = 0.0
+    for ch, p in probs.items():
+        try:
+            pv = float(p)
+        except (TypeError, ValueError):
+            pv = 0.0
+        if pv > top_prob:
+            top_prob = pv
+    return top_prob
+
+
+def _classify_image_with_openrouter(image_path: Path, question_name: str, cfg: dict) -> float:
+    """
+    Send a single image to OpenRouter Decisions API and return the top probability.
+    """
+    question_def = _get_question_def(cfg, question_name)
+    if question_def is None:
+        print(f"Error: question '{question_name}' not found in config.", file=sys.stderr)
+        sys.exit(1)
+
+    # build questions payload (same structure as Ollama)
+    questions_payload = {}
+    for q in cfg.get("questions", []):
+        questions_payload[q["name"]] = {
+            "type": "choice",
+            "instructions": q.get("instructions", ""),
+            "criteria": q.get("criteria", {}),
+        }
+
+    # determine model and state
+    model = cfg.get("openrouter_model", "perplexity/pplx-decider-v1.3")
+    state = cfg.get("ollama_state_template", "")
+    if not state:
+        state = ""
+
+    # resolve endpoint
+    endpoint = cfg.get("openrouter_endpoint", "https://openrouter.ai/api/alpha/decisions")
+    api_key = cfg.get("openrouter_api_key", "") or os.environ.get("OPENROUTER_API_KEY", "")
+    timeout = cfg.get("openrouter_timeout", 60)
+
+    # encode image
+    b64 = _image_to_b64(image_path, cfg.get("ollama_frame_scale", 0.1))
+
+    # build OpenRouter payload (images embedded in state array)
+    state_arr = []
+    if state:
+        state_arr.append(state)
+    state_arr.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}})
+    payload = {"model": model, "state": state_arr, "questions": questions_payload}
+
+    # send request
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {api_key}",
+    }
+    try:
+        req = urllib.request.Request(
+            endpoint,
+            data=json.dumps(payload).encode("utf-8"),
+            headers=headers,
+        )
+        with urllib.request.urlopen(req, timeout=timeout) as response:
+            res_json = json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        body = e.read().decode("utf-8", errors="replace")
+        print(f"OpenRouter request failed ({e.code}): {body}", file=sys.stderr)
+        sys.exit(1)
+    except Exception as e:
+        print(f"Error calling OpenRouter: {e}", file=sys.stderr)
         sys.exit(1)
 
     # extract top probability for the requested question
@@ -2559,12 +2778,12 @@ def cmd_isearch(args):
 def main():
     parser = argparse.ArgumentParser(
         prog="scs",
-        description="Semantic video frame classification using an Ollama decision model."
+        description="Semantic video frame classification using an Ollama or OpenRouter decision model."
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
     # ---- analyze ----
-    p_classify = sub.add_parser("analyze", help="Analyze video frames using Ollama choice-question model")
+    p_classify = sub.add_parser("analyze", help="Analyze video frames using an Ollama or OpenRouter decision model")
     p_classify.add_argument("video_paths", nargs="+", help="One or more video files, directories, or glob patterns (e.g., video1.mp4 video2/*.mp4)")
     p_classify.add_argument("--questions", "-qs", type=str, default=None, help="JSON array of questions: [{\"name\":..., \"instructions\":..., \"criteria\":{...}}, ...]")
     p_classify.add_argument("--decision-model-sample-rate", "-dmsr", type=int, default=None, help="Frame sampling interval in seconds (default: 3)")
@@ -2578,6 +2797,14 @@ def main():
     p_classify.add_argument("--cache", "-c", type=str, default=None, help="Path to SQLite cache file (default: ./.cache.db)")
     p_classify.add_argument("--ollama-state", "-s", type=str, default=None, help="State context string for Ollama (default: 'sample frame from a video')")
     p_classify.add_argument("--ollama-frame-history", "-fh", type=int, default=None, help="Number of previous processed frames to include as context (default: 5). Set to 0 to disable.")
+
+    # ---- OpenRouter options ----
+    p_classify.add_argument("--provider", type=str, default=None, help="Decision provider: 'ollama' (default) or 'openrouter'")
+    p_classify.add_argument("--openrouter-api-key", type=str, default=None, help="OpenRouter API key (required when provider=openrouter)")
+    p_classify.add_argument("--openrouter-model", type=str, default=None, help="OpenRouter model name (default: perplexity/pplx-decider-v1.3)")
+    p_classify.add_argument("--openrouter-endpoint", type=str, default=None, help="OpenRouter API endpoint (default: https://openrouter.ai/api/alpha/decisions)")
+    p_classify.add_argument("--openrouter-timeout", type=int, default=None, help="OpenRouter request timeout in seconds (default: 60)")
+    p_classify.add_argument("--max-images-per-request", "-mipr", type=int, default=None, help="Max images per batch request. >0 overrides auto-detection (default: -1 = auto from model). Capped by model's native limit.")
     p_classify.set_defaults(func=cmd_analyze)
 
     # ---- query ----
@@ -2600,7 +2827,7 @@ def main():
     p_search.add_argument("--merge-threshold", "-mt", type=float, default=None, help="Timestamp difference threshold (seconds) to merge ALL adjacent query results into ranges based on timestamp proximity alone (regardless of score differences). Produces continuous time-range blocks from any matching frames. Default from config.toml: merge_threshold = 0 (disabled). Set > 0 to enable. Can be overridden via CLI. Mutually exclusive with -mst.")
     p_search.add_argument("--save-frame", "-sf", type=str, default=None, help="Directory to save extracted frames")
     p_search.add_argument("--cache", "-c", type=str, default=None, help="Path to SQLite cache file (default: ./.cache.db)")
-    p_search.add_argument("--model", "-m", type=str, default=None, help="Filter results by Ollama model name (e.g., clef-flash:9b, d1:3b)")
+    p_search.add_argument("--model", "-m", type=str, default=None, help="Filter results by decision model name (e.g., clef-flash:9b, d1:3b, perplexity/pplx-decider-v1.3)")
     p_search.add_argument("--run-id", "-ri", type=int, default=None, help="Filter results to a specific analysis run ID")
     p_search.add_argument("--stitch", "-st", nargs="?", const=True, default=None, metavar="PATH", help="Stitch matched frames into a single video using ffmpeg. Default threshold is 1 second unless --merge-same-threshold/-mst or --merge-threshold/-mt is provided.")
     p_search.add_argument("--json", "-j", action="store_true", default=False, help="Output results as JSON array (for AI agents / programmatic use). Overrides table output on stdout. Merged ranges include start/end timestamps and frame lists.")
@@ -2618,7 +2845,7 @@ def main():
     p_isearch.add_argument("--merge-threshold", "-mt", type=float, default=None, help="Timestamp difference threshold (seconds) to merge ALL adjacent query results into ranges based on timestamp proximity alone (regardless of score differences). Mutually exclusive with -mst. Default from config.toml: merge_threshold = 0 (disabled).")
     p_isearch.add_argument("--save-frame", "-sf", type=str, default=None, help="Directory to save extracted frames (JPG only).")
     p_isearch.add_argument("--cache", "-c", type=str, default=None, help="Path to SQLite cache file (default: ./.cache.db)")
-    p_isearch.add_argument("--model", "-m", type=str, default=None, help="Filter results by Ollama model name (e.g., clef-flash:9b, d1:3b)")
+    p_isearch.add_argument("--model", "-m", type=str, default=None, help="Filter results by decision model name (e.g., clef-flash:9b, d1:3b, perplexity/pplx-decider-v1.3)")
     p_isearch.add_argument("--run-id", "-ri", type=int, default=None, help="Filter results to a specific analysis run ID")
     p_isearch.add_argument("--stitch", "-st", nargs="?", const=True, default=None, metavar="PATH", help="Stitch matched frames into a single video using ffmpeg. Default threshold is 1 second unless --merge-same-threshold/-mst or --merge-threshold/-mt is provided.")
     p_isearch.set_defaults(func=cmd_isearch)
