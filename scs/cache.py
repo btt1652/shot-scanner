@@ -154,12 +154,13 @@ class CacheDB:
     ) -> int:
         """Insert or update video metadata. Returns video_id."""
         with self.conn:
+            # Delete existing row if it exists
+            self.conn.execute(
+                "DELETE FROM videos WHERE video_path = ?", (video_path,)
+            )
             self.conn.execute(
                 """INSERT INTO videos (video_path, content_hash, updated_at)
-                   VALUES (?, ?, datetime('now'))
-                   ON CONFLICT(video_path) DO UPDATE SET
-                       content_hash=excluded.content_hash,
-                       updated_at=datetime('now')""",
+                   VALUES (?, ?, datetime('now'))""",
                 (video_path, content_hash),
             )
         # Return the video_id
@@ -227,14 +228,14 @@ class CacheDB:
     ) -> int:
         """Insert or update an analysis run. Returns run_id."""
         with self.conn:
+            # Delete existing row if it exists
+            self.conn.execute(
+                "DELETE FROM analysis_runs WHERE video_id = ? AND params_hash = ?",
+                (video_id, params_hash),
+            )
             self.conn.execute(
                 """INSERT INTO analysis_runs (video_id, params_hash, model, questions_json, updated_at)
-                   VALUES (?, ?, ?, ?, datetime('now'))
-                   ON CONFLICT(video_id, params_hash) DO UPDATE SET
-                       cache_status=excluded.cache_status,
-                       model=excluded.model,
-                       questions_json=excluded.questions_json,
-                       updated_at=datetime('now')""",
+                   VALUES (?, ?, ?, ?, datetime('now'))""",
                 (video_id, params_hash, model, questions_json),
             )
         cur = self.conn.execute(
