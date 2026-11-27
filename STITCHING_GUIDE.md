@@ -263,5 +263,4 @@ scs search video.mp4 --q "activity=yes:prob>=0.8" --stitch-grid --stitch-grid-ou
 - Output duration matches the longest clip
 - FPS is taken from the first input video
 
-**Configuration:**
-- `clip_duration` (default: 3) — duration of each extracted clip in seconds
+

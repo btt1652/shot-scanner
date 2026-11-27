@@ -16,9 +16,9 @@ cache = "./.cache.db"
 still_frame_threshold = 0.95
 same_scene_threshold = 0.80
 recursive = false
-isolated_frame_time = 2
-merge_same_threshold = 0    # >0 enables -mst (same-score merging)
-merge_threshold = 1         # >0 enables -mt (all-mode merging)
+merge_threshold = 3         # >0 enables -mt (all-mode merging)
+stitch_min_duration = 3     # Minimum duration (seconds) for each stitched section, including isolated frames
+
 
 # Frame processing settings used by both Ollama and OpenRouter providers.
 provider = "openrouter"

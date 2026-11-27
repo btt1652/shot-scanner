@@ -1623,7 +1623,7 @@ def cmd_search(args):
     """Search cached frame answers by question name, choice, and probability.
 
     Usage:
-        scs search <video> [--list] [--top N] [--top-per-video N] [--merge-same-threshold SEC|-mst] [--merge-threshold SEC|-mt] [--model MODEL] [--run-id RUN_ID] [--save-frame DIR] [--stitch [PATH]] [--stitch-grid] [--stitch-grid-output PATH] [--json|-j] [--cache PATH|-c]
+        scs search <video> [--list] [--top N] [--top-per-video N] [--merge-threshold SEC|-mt] [--model MODEL] [--run-id RUN_ID] [--save-frame DIR] [--stitch [PATH]] [--stitch-grid] [--stitch-grid-output PATH] [--json|-j] [--cache PATH|-c]
         scs search <video> [--activity walking] [--scene couple] [--prob 0.8] [--conf 0.7] [--rank walking 1]
 
     Named-argument filter syntax (AND logic, one question per flag):
@@ -1655,9 +1655,8 @@ def cmd_search(args):
     def cfg_val(key, cli_arg):
         return get_config_value(cfg, key, getattr(args, cli_arg, None))
 
-    # Merge threshold defaults from config; <= 0 means disabled
-    merge_same_threshold_default = cfg_val("merge_same_threshold", "merge_same_threshold") or 0
-    merge_all_threshold_default = cfg_val("merge_threshold", "merge_threshold") or 0
+    # Merge threshold from config; <= 0 means disabled
+    merge_threshold_default = cfg_val("merge_threshold", "merge_threshold") or 0
 
     # Handle --list flag: show available questions and choices for the video(s)
     if getattr(args, "list", False):
@@ -1914,38 +1913,23 @@ def cmd_search(args):
 
     top_per_video = getattr(args, "top_per_video", None)
     
-    # Merge thresholds: CLI flag overrides config default
+    # Merge threshold: CLI flag overrides config default
     # Config values <= 0 mean disabled; CLI value of 0 explicitly disables
-    _cli_same = getattr(args, "merge_same_threshold", None)
     _cli_all = getattr(args, "merge_threshold", None)
     
-    # Resolve final values (None from CLI means use config default)
-    if _cli_same is not None:
-        merge_same_threshold = float(_cli_same) if _cli_same != 0 else 0
-    else:
-        merge_same_threshold = float(merge_same_threshold_default) if merge_same_threshold_default and merge_same_threshold_default > 0 else 0
-    
+    # Resolve final value (None from CLI means use config default)
     if _cli_all is not None:
         merge_threshold = float(_cli_all) if _cli_all != 0 else 0
     else:
-        merge_threshold = float(merge_all_threshold_default) if merge_all_threshold_default and merge_all_threshold_default > 0 else 0
+        merge_threshold = float(merge_threshold_default) if merge_threshold_default and merge_threshold_default > 0 else 0
     
-    # Validate: both modes cannot be enabled simultaneously
-    if merge_same_threshold > 0 and merge_threshold > 0:
-        print("Error: --merge-same-threshold/-mst and --merge-threshold/-mt are mutually exclusive. Enable only one.", file=sys.stderr)
-        cache_db.close()
-        sys.exit(1)
-    
-    # Determine which merge mode is active
-    use_merge_same = merge_same_threshold > 0
-    use_merge_all = merge_threshold > 0
-    use_merge = use_merge_same or use_merge_all
+    use_merge = merge_threshold > 0
 
-    def _merge_frame_rows_into_ranges(rows, threshold, group_by_score=True):
-        """Merge consecutive rows into timestamp ranges.
-        
-        If group_by_score=True (same-mode): only merge rows with identical probability score.
-        If group_by_score=False (all-mode): merge ALL adjacent rows by timestamp proximity.
+    def _merge_frame_rows_into_ranges(rows, threshold):
+        """Merge consecutive rows into timestamp ranges by timestamp proximity.
+
+        Merges ALL adjacent rows within the threshold regardless of score differences,
+        producing continuous time-range blocks from any matching frames.
         """
         from collections import defaultdict
         groups = defaultdict(list)
@@ -1964,20 +1948,12 @@ def cmd_search(args):
                 prob = r.get("top_probability")
                 ts = r.get("timestamp_seconds") or 0
                 fid = r.get("frame_index") or 0
-                
-                if group_by_score:
-                    # Same-mode: merge only when score matches AND within threshold
-                    should_merge = (
-                        current is not None
-                        and prob == current.get("top_probability")
-                        and (ts - current.get("end_timestamp")) <= threshold
-                    )
-                else:
-                    # All-mode: merge whenever within threshold regardless of score
-                    should_merge = (
-                        current is not None
-                        and (ts - current.get("end_timestamp")) <= threshold
-                    )
+
+                # Merge whenever within threshold regardless of score
+                should_merge = (
+                    current is not None
+                    and (ts - current.get("end_timestamp")) <= threshold
+                )
                 
                 if should_merge:
                     current["end_timestamp"] = ts
@@ -2018,12 +1994,8 @@ def cmd_search(args):
         print(f"{_sql_with_params(query_sql, params)}\n", file=sys.stderr)
         rows = cache_db.execute_sql(query_sql, params)
 
-        if use_merge_all:
-            # All-mode: merge all adjacent rows by timestamp proximity regardless of score
-            results = _merge_frame_rows_into_ranges(rows, merge_threshold, group_by_score=False)
-        else:
-            # Same-mode: merge only rows with identical probability score
-            results = _merge_frame_rows_into_ranges(rows, merge_same_threshold, group_by_score=True)
+        # Merge all adjacent rows by timestamp proximity regardless of score
+        results = _merge_frame_rows_into_ranges(rows, merge_threshold)
 
         if top_n is not None:
             results = sorted(results, key=lambda r: (r.get("top_probability") or 0), reverse=True)[:top_n]
@@ -2225,39 +2197,19 @@ def cmd_search(args):
 
         cfg = load_config()
         
-        # Merge threshold defaults from config; <= 0 means disabled
-        _cfg_same = cfg.get("merge_same_threshold", 0) or 0
+        # Merge threshold from config; <= 0 means disabled
         _cfg_all = cfg.get("merge_threshold", 0) or 0
         
         # CLI flag overrides config default
         stitch_merge_all = getattr(args, "merge_threshold", None)
-        stitch_merge_same = getattr(args, "merge_same_threshold", None)
         
         if stitch_merge_all is not None:
-            threshold_all = float(stitch_merge_all) if stitch_merge_all != 0 else 0
+            threshold = float(stitch_merge_all) if stitch_merge_all != 0 else 0
         else:
-            threshold_all = float(_cfg_all) if _cfg_all > 0 else 0
+            threshold = float(_cfg_all) if _cfg_all > 0 else 0
         
-        if stitch_merge_same is not None:
-            threshold_same = float(stitch_merge_same) if stitch_merge_same != 0 else 0
-        else:
-            threshold_same = float(_cfg_same) if _cfg_same > 0 else 0
-        
-        # Validate: both modes cannot be enabled simultaneously in stitch either
-        if threshold_all > 0 and threshold_same > 0:
-            print("Error: --merge-same-threshold/-mst and --merge-threshold/-mt are mutually exclusive.", file=sys.stderr)
-            cache_db.close()
-            sys.exit(1)
-        
-        if threshold_all > 0:
-            threshold = threshold_all
-        elif threshold_same > 0:
-            threshold = threshold_same
-        else:
+        if threshold <= 0:
             threshold = 1.0  # Default fallback
-
-        # Isolated frame padding time (configurable via config.toml, default 3 sec)
-        isolated_frame_time_sec = cfg.get("isolated_frame_time", 3) or 3
 
         # Build mapping run_id -> video_path and add source_video_path to each row
         run_to_path = {}
@@ -2285,8 +2237,8 @@ def cmd_search(args):
             cache_db.close()
             sys.exit(0)
 
-        # Build sections from rows with isolated-frame-time padding
-        all_sections_by_video = _build_stitch_sections(by_video, threshold, isolated_frame_time_sec)
+        # Build sections from rows
+        all_sections_by_video = _build_stitch_sections(by_video, threshold)
 
         # Determine output paths
         if args.stitch and isinstance(args.stitch, str):
@@ -2303,65 +2255,51 @@ def cmd_search(args):
             fps = cap.get(cv2.CAP_PROP_FPS)
             if not fps or fps <= 0:
                 fps = 25.0
+            cap.release()
+
+
             out_path = output_paths[min(vid_idx, len(output_paths)-1)]
+            # Minimum duration per section from config (default 0.5s)
+            min_duration = cfg.get("stitch_min_duration", 0.5) or 0.5
             tmpdir = tempfile.mkdtemp(prefix="scs_stitch_")
-            segment_files = []
+            clip_files = []
             try:
                 for sec_idx, section in enumerate(sections):
-                    img_paths = []
-                    seg_frame_counter = 0
-                    for f_idx, row in enumerate(section):
-                        # Get all frame indices from this row (ranges may have multiple)
-                        fi_list = row.get("frame_indices", None)
-                        if fi_list:
-                            # Range: extract each individual frame
-                            for fi in fi_list:
-                                cap.set(cv2.CAP_PROP_POS_FRAMES, int(fi))
-                                ret, frame = cap.read()
-                                if ret:
-                                    img_path = os.path.join(tmpdir, f"seg_{seg_frame_counter:04d}.jpg")
-                                    cv2.imwrite(img_path, frame)
-                                    img_paths.append(img_path)
-                                    seg_frame_counter += 1
-                        else:
-                            # Non-range: single timestamp
-                            fi = int(row.get("frame_index", 0))
-                            cap.set(cv2.CAP_PROP_POS_FRAMES, fi)
-                            ret, frame = cap.read()
-                            if ret:
-                                img_path = os.path.join(tmpdir, f"seg_{seg_frame_counter:04d}.jpg")
-                                cv2.imwrite(img_path, frame)
-                                img_paths.append(img_path)
-                                seg_frame_counter += 1
-                    if img_paths:
-                        seg_file = os.path.join(tmpdir, f"segment_{sec_idx:04d}.mp4")
-                        pattern = os.path.join(tmpdir, "seg_%04d.jpg")
-                        subprocess.run([
-                            "ffmpeg", "-y",
-                            "-framerate", str(fps),
-                            "-i", pattern,
-                            "-c:v", "libx264",
-                            "-pix_fmt", "yuv420p",
-                            "-r", str(fps),
-                            seg_file,
-                        ], capture_output=True)
-                        if os.path.exists(seg_file):
-                            segment_files.append(seg_file)
-                    cap.release()
-                    cap = cv2.VideoCapture(vid)
-                if segment_files:
+                    # Use the section's actual timestamp range
+                    first_row = section[0]
+                    start_ts = first_row.get("timestamp_seconds") or first_row.get("start_timestamp") or 0
+                    last_row = section[-1]
+                    end_ts = last_row.get("timestamp_seconds") or last_row.get("end_timestamp") or last_row.get("start_timestamp") or start_ts
+                    duration = max(end_ts - start_ts, min_duration)
+
+                    seg_file = os.path.join(tmpdir, f"clip_{sec_idx:04d}.mp4")
+                    subprocess.run([
+                        "ffmpeg", "-y", "-loglevel", "verbose",
+                        "-ss", str(start_ts),
+                        "-i", vid,
+                        "-t", str(duration),
+                        "-c:v", "libx264", "-preset", "fast", "-crf", "23",
+                        "-pix_fmt", "yuv420p",
+                        "-r", str(fps),
+                        "-an",
+                        seg_file,
+                    ], capture_output=True)
+                    if os.path.exists(seg_file) and os.path.getsize(seg_file) > 0:
+                        clip_files.append(seg_file)
+
+                if clip_files:
                     concat_file = os.path.join(tmpdir, "concat.txt")
                     with open(concat_file, "w") as cf:
-                        for sf in segment_files:
-                            cf.write("file '" + sf + "'\n")
+                        for cf_file in clip_files:
+                            cf.write("file '" + cf_file + "'\n")
                     subprocess.run([
-                        "ffmpeg", "-y",
+                        "ffmpeg", "-y", "-loglevel", "verbose",
                         "-f", "concat", "-safe", "0", "-i", concat_file,
                         "-c", "copy", out_path,
                     ], capture_output=True)
-                    print(f"Stitched {vid} -> {out_path} ({len(segment_files)} section(s))", file=sys.stderr)
+                    print(f"Stitched {vid} -> {out_path} ({len(clip_files)} section(s))", file=sys.stderr)
                 else:
-                    print(f"No frames could be extracted from {vid}", file=sys.stderr)
+                    print(f"No clips could be extracted from {vid}", file=sys.stderr)
             finally:
                 shutil.rmtree(tmpdir)
         cache_db.close()
@@ -2390,10 +2328,8 @@ def cmd_search(args):
         else:
             fps = 30.0
 
-        # Get clip duration from config
-        clip_duration = cfg.get("clip_duration", 3) or 3
 
-        success = _stitch_grid_from_search(rows, by_video, output_path, grid_cols=2, grid_rows=2, fps=fps, clip_duration=clip_duration)
+        success = _stitch_grid_from_search(rows, by_video, output_path, grid_cols=2, grid_rows=2, fps=fps)
         cache_db.close()
         sys.exit(0 if success else 1)
 
@@ -2680,11 +2616,12 @@ def _get_row_end_ts(row):
     return row.get("timestamp_seconds", 0)
 
 
-def _stitch_grid_from_search(rows, by_video, output_path, grid_cols=2, grid_rows=2, fps=30, clip_duration=3):
+def _stitch_grid_from_search(rows, by_video, output_path, grid_cols=2, grid_rows=2, fps=30):
     """Stitch search results into a grid video.
 
     Extracts clips from source videos at the search result timestamps,
     then arranges them in a grid layout using ffmpeg's hstack+vstack filters.
+    Each clip duration is determined by the section's actual timestamp range.
 
     Args:
         rows: list of row dicts from search results (with source_video_path, frame_index, etc.)
@@ -2693,7 +2630,6 @@ def _stitch_grid_from_search(rows, by_video, output_path, grid_cols=2, grid_rows
         grid_cols: number of columns in the grid (default 2)
         grid_rows: number of rows in the grid (default 2)
         fps: frame rate for the output video (default 30)
-        clip_duration: duration of each clip in seconds (default 3)
     """
     import subprocess
     import tempfile
@@ -2707,10 +2643,12 @@ def _stitch_grid_from_search(rows, by_video, output_path, grid_cols=2, grid_rows
         print("Error: no videos found in search results for grid stitch.", file=sys.stderr)
         return False
 
-    # Build sections from rows with isolated-frame-time padding
+    # Build sections from rows
     threshold = 1.0  # Default threshold for grouping
-    isolated_frame_time_sec = 3
-    all_sections_by_video = _build_stitch_sections(by_video, threshold, isolated_frame_time_sec)
+    all_sections_by_video = _build_stitch_sections(by_video, threshold)
+
+    # Minimum duration per section from config (default 0.5s)
+    min_duration = cfg.get("stitch_min_duration", 0.5) or 0.5
 
     # Collect all clips from all videos, up to total_cells
     tmpdir = tempfile.mkdtemp(prefix="scs_stitch_grid_")
@@ -2723,16 +2661,18 @@ def _stitch_grid_from_search(rows, by_video, output_path, grid_cols=2, grid_rows
             for section in sections:
                 if len(clip_files) >= total_cells:
                     break
-                # Use the first frame's timestamp as the clip start
+                # Use the section's actual timestamp range
                 first_row = section[0]
                 start_ts = first_row.get("timestamp_seconds") or first_row.get("start_timestamp") or 0
-                # Extract a clip of clip_duration starting from start_ts
+                last_row = section[-1]
+                end_ts = last_row.get("timestamp_seconds") or last_row.get("end_timestamp") or last_row.get("start_timestamp") or start_ts
+                duration = max(end_ts - start_ts, min_duration)
                 seg_file = os.path.join(tmpdir, f"clip_{len(clip_files):02d}.mp4")
                 subprocess.run([
-                    "ffmpeg", "-y",
+                    "ffmpeg", "-y", "-loglevel", "verbose",
                     "-ss", str(start_ts),
                     "-i", vid,
-                    "-t", str(clip_duration),
+                    "-t", str(duration),
                     "-c:v", "libx264", "-preset", "fast", "-crf", "23",
                     "-pix_fmt", "yuv420p",
                     "-r", str(fps),
@@ -2767,15 +2707,15 @@ def _stitch_grid_from_search(rows, by_video, output_path, grid_cols=2, grid_rows
             for _ in range(total_cells - len(clip_files)):
                 black_clip = os.path.join(tmpdir, f"black_{len(clip_files):02d}.mp4")
                 subprocess.run([
-                    "ffmpeg", "-y",
-                    "-f", "lavfi", "-i", f"color=c=black:s={cell_w}x{cell_h}:d={clip_duration}:r={fps}",
+                    "ffmpeg", "-y", "-loglevel", "verbose",
+                    "-f", "lavfi", "-i", f"color=c=black:s={cell_w}x{cell_h}:d=3:r={fps}",
                     "-c:v", "libx264", "-pix_fmt", "yuv420p", "-r", str(fps),
                     black_clip,
                 ], capture_output=True)
                 clip_files.append(black_clip)
 
         # Build ffmpeg command for grid
-        cmd = ["ffmpeg", "-y"]
+        cmd = ["ffmpeg", "-y", "-loglevel", "verbose"]
         for c in clip_files:
             cmd.extend(["-i", c])
 
@@ -2831,19 +2771,15 @@ def _stitch_grid_from_search(rows, by_video, output_path, grid_cols=2, grid_rows
         shutil.rmtree(tmpdir, ignore_errors=True)
 
 
-def _build_stitch_sections(by_video, threshold_sec, isolated_padding_sec):
-    """Build stitch sections from query results, applying isolated-frame-time padding.
+def _build_stitch_sections(by_video, threshold_sec):
+    """Build stitch sections from query results by grouping frames within threshold.
     
-    For both range and non-range rows: when an isolated gap is detected between groups,
-    pad forward from the group's end timestamp by isolated_padding_sec. If the next
-    result falls within that padded window, it merges into the same section.
-    
-    This prevents isolated moments from being cut off from nearby results during stitching.
+    Frames within threshold_sec of each other are grouped into the same section.
+    Gaps larger than threshold_sec start a new section.
     
     Args:
         by_video: dict mapping video_path -> list of row dicts (sorted by ts ascending)
         threshold_sec: max gap for direct grouping (e.g., 1.0 sec)
-        isolated_padding_sec: extra seconds to pad after isolated group (e.g., 3 sec)
     
     Returns:
         dict mapping video_path -> list of sections, where each section is a list of row dicts
@@ -2863,7 +2799,6 @@ def _build_stitch_sections(by_video, threshold_sec, isolated_padding_sec):
             sections = []
             cur_section = [sorted_frames[0]]
             prev_end = _get_row_end_ts(sorted_frames[0])
-            was_isolated = False
             
             for i in range(1, len(sorted_frames)):
                 curr_frame = sorted_frames[i]
@@ -2871,24 +2806,15 @@ def _build_stitch_sections(by_video, threshold_sec, isolated_padding_sec):
                 curr_end = _get_row_end_ts(curr_frame)
                 gap = curr_start - prev_end
                 
-                max_gap_allowed = threshold_sec + isolated_padding_sec
-                
                 if gap <= threshold_sec:
                     # Close enough — keep merging directly
                     cur_section.append(curr_frame)
                     prev_end = curr_end
-                    was_isolated = False
-                elif gap < max_gap_allowed:
-                    # Within padding zone — isolate but still merge into same section
-                    cur_section.append(curr_frame)
-                    prev_end = curr_end
-                    was_isolated = True
                 else:
-                    # Truly too far — finalize current, start new section
+                    # Too far — finalize current, start new section
                     sections.append(cur_section)
                     cur_section = [curr_frame]
                     prev_end = curr_end
-                    was_isolated = True
             
             # Don't forget last section
             sections.append(cur_section)
@@ -2905,14 +2831,8 @@ def _build_stitch_sections(by_video, threshold_sec, isolated_padding_sec):
                 curr_end = _get_row_end_ts(curr_range)
                 gap = curr_start - prev_range_end
                 
-                max_gap_allowed = threshold_sec + isolated_padding_sec
-                
                 if gap <= threshold_sec:
                     # Close enough — keep in same section
-                    cur_section.append(curr_range)
-                    prev_range_end = curr_end
-                elif gap < max_gap_allowed:
-                    # Within padding zone — merge despite isolation
                     cur_section.append(curr_range)
                     prev_range_end = curr_end
                 else:
@@ -3129,9 +3049,8 @@ def cmd_isearch(args):
     def cfg_val(key, cli_arg):
         return get_config_value(cfg, key, getattr(args, cli_arg, None))
 
-    # Merge threshold defaults from config; <= 0 means disabled
-    merge_same_threshold_default = cfg_val("merge_same_threshold", "merge_same_threshold") or 0
-    merge_all_threshold_default = cfg_val("merge_threshold", "merge_threshold") or 0
+    # Merge threshold from config; <= 0 means disabled
+    merge_threshold_default = cfg_val("merge_threshold", "merge_threshold") or 0
 
     # Resolve video set if provided
     video_set = None
@@ -3251,30 +3170,16 @@ def cmd_isearch(args):
     top_n = args.top
     top_per_video = args.top_per_video
     
-    # Merge thresholds: CLI flag overrides config default
-    _cli_same = getattr(args, "merge_same_threshold", None)
+    # Merge threshold: CLI flag overrides config default
     _cli_all = getattr(args, "merge_threshold", None)
     
-    # Resolve final values (None from CLI means use config default)
-    if _cli_same is not None:
-        merge_same_threshold = float(_cli_same) if _cli_same != 0 else 0
-    else:
-        merge_same_threshold = float(merge_same_threshold_default) if merge_same_threshold_default > 0 else 0
-    
+    # Resolve final value (None from CLI means use config default)
     if _cli_all is not None:
-        merge_all_threshold = float(_cli_all) if _cli_all != 0 else 0
+        merge_threshold = float(_cli_all) if _cli_all != 0 else 0
     else:
-        merge_all_threshold = float(merge_all_threshold_default) if merge_all_threshold_default > 0 else 0
+        merge_threshold = float(merge_threshold_default) if merge_threshold_default and merge_threshold_default > 0 else 0
     
-    # Validate: both modes cannot be enabled simultaneously
-    if merge_same_threshold > 0 and merge_all_threshold > 0:
-        print("Error: --merge-same-threshold/-mst and --merge-threshold/-mt are mutually exclusive. Enable only one.", file=sys.stderr)
-        cache_db.close()
-        sys.exit(1)
-    
-    use_merge_same = merge_same_threshold > 0
-    use_merge_all = merge_all_threshold > 0
-    use_merge = use_merge_same or use_merge_all
+    use_merge = merge_threshold > 0
 
     if use_merge:
         # Fetch all matching rows; limits applied to merged ranges in Python.
@@ -3287,10 +3192,8 @@ def cmd_isearch(args):
         print(f"{_sql_with_params(query_sql, params)}\n", file=sys.stderr)
         rows = cache_db.execute_sql(query_sql, params)
 
-        if use_merge_all:
-            results = _merge_frame_rows_into_ranges(rows, merge_all_threshold, group_by_score=False)
-        else:
-            results = _merge_frame_rows_into_ranges(rows, merge_same_threshold, group_by_score=True)
+        # Merge all adjacent rows by timestamp proximity regardless of score
+        results = _merge_frame_rows_into_ranges(rows, merge_threshold)
 
         if top_n is not None:
             results = sorted(results, key=lambda r: (r.get("top_probability") or 0), reverse=True)[:top_n]
@@ -3520,10 +3423,8 @@ def cmd_isearch(args):
         else:
             fps = 30.0
 
-        # Get clip duration from config
-        clip_duration = cfg.get("clip_duration", 3) or 3
 
-        success = _stitch_grid_from_search(rows, by_video, output_path, grid_cols=2, grid_rows=2, fps=fps, clip_duration=clip_duration)
+        success = _stitch_grid_from_search(rows, by_video, output_path, grid_cols=2, grid_rows=2, fps=fps)
         cache_db.close()
         sys.exit(0 if success else 1)
 
@@ -3579,13 +3480,12 @@ def main():
         "--top-per-video", "-tpv", type=int, default=None,
         help="Limit number of top results per video by probability; results are sorted by timestamp ascending per video (overrides --top if both given)",
     )
-    p_search.add_argument("--merge-same-threshold", "-mst", type=float, default=None, help="Timestamp difference threshold (seconds) to merge adjacent frames with the SAME score into a single range. Only merges rows sharing an identical top_probability. Default from config.toml: merge_same_threshold = 0 (disabled). Set > 0 to enable. Can be overridden via CLI.")
-    p_search.add_argument("--merge-threshold", "-mt", type=float, default=None, help="Timestamp difference threshold (seconds) to merge ALL adjacent query results into ranges based on timestamp proximity alone (regardless of score differences). Produces continuous time-range blocks from any matching frames. Default from config.toml: merge_threshold = 0 (disabled). Set > 0 to enable. Can be overridden via CLI. Mutually exclusive with -mst.")
+    p_search.add_argument("--merge-threshold", "-mt", type=float, default=None, help="Timestamp difference threshold (seconds) to merge ALL adjacent query results into ranges based on timestamp proximity alone (regardless of score differences). Produces continuous time-range blocks from any matching frames. Default from config.toml: merge_threshold = 0 (disabled). Set > 0 to enable. Can be overridden via CLI.")
     p_search.add_argument("--save-frame", "-sf", type=str, default=None, help="Directory to save extracted frames")
     p_search.add_argument("--cache", "-c", type=str, default=None, help="Path to SQLite cache file (default: ./.cache.db)")
     p_search.add_argument("--model", "-m", type=str, default=None, help="Filter results by decision model name (e.g., clef-flash:9b, d1:3b, perplexity/pplx-decider-v1.3)")
     p_search.add_argument("--run-id", "-ri", type=int, default=None, help="Filter results to a specific analysis run ID")
-    p_search.add_argument("--stitch", "-st", nargs="?", const=True, default=None, metavar="PATH", help="Stitch matched frames into a single video using ffmpeg. Default threshold is 1 second unless --merge-same-threshold/-mst or --merge-threshold/-mt is provided.")
+    p_search.add_argument("--stitch", "-st", nargs="?", const=True, default=None, metavar="PATH", help="Stitch matched frames into a single video using ffmpeg. Default threshold is 1 second unless --merge-threshold/-mt is provided.")
     p_search.add_argument("--stitch-grid", "-sg", nargs="?", const=True, default=None, metavar="PATH", help="Use search results to create a 2x2 grid video. Use --stitch-grid-output to specify output path.")
     p_search.add_argument("--stitch-grid-output", "-sg-o", type=str, default=None, metavar="PATH", help="Output path for --stitch-grid mode.")
     p_search.add_argument("--json", "-j", action="store_true", default=False, help="Output results as JSON array (for AI agents / programmatic use). Overrides table output on stdout. Merged ranges include start/end timestamps and frame lists.")
@@ -3599,13 +3499,13 @@ def main():
     p_isearch.add_argument("--video", "-v", nargs="+", type=Path, default=None, help="One or more video paths to filter results by (space-separated).")
     p_isearch.add_argument("--top", "-t", type=int, default=None, help="Limit to top N frames by probability.")
     p_isearch.add_argument("--top-per-video", "-tpv", type=int, default=None, help="Limit number of top results per video by probability.")
-    p_isearch.add_argument("--merge-same-threshold", "-mst", type=float, default=None, help="Timestamp difference threshold (seconds) to merge adjacent frames with same score.")
-    p_isearch.add_argument("--merge-threshold", "-mt", type=float, default=None, help="Timestamp difference threshold (seconds) to merge ALL adjacent query results into ranges based on timestamp proximity alone (regardless of score differences). Mutually exclusive with -mst. Default from config.toml: merge_threshold = 0 (disabled).")
+
+    p_isearch.add_argument("--merge-threshold", "-mt", type=float, default=None, help="Timestamp difference threshold (seconds) to merge ALL adjacent query results into ranges based on timestamp proximity alone (regardless of score differences). Default from config.toml: merge_threshold = 0 (disabled).")
     p_isearch.add_argument("--save-frame", "-sf", type=str, default=None, help="Directory to save extracted frames (JPG only).")
     p_isearch.add_argument("--cache", "-c", type=str, default=None, help="Path to SQLite cache file (default: ./.cache.db)")
     p_isearch.add_argument("--model", "-m", type=str, default=None, help="Filter results by decision model name (e.g., clef-flash:9b, d1:3b, perplexity/pplx-decider-v1.3)")
     p_isearch.add_argument("--run-id", "-ri", type=int, default=None, help="Filter results to a specific analysis run ID")
-    p_isearch.add_argument("--stitch", "-st", nargs="?", const=True, default=None, metavar="PATH", help="Stitch matched frames into a single video using ffmpeg. Default threshold is 1 second unless --merge-same-threshold/-mst or --merge-threshold/-mt is provided.")
+    p_isearch.add_argument("--stitch", "-st", nargs="?", const=True, default=None, metavar="PATH", help="Stitch matched frames into a single video using ffmpeg. Default threshold is 1 second unless --merge-threshold/-mt is provided.")
     p_isearch.add_argument("--stitch-grid", "-sg", nargs="?", const=True, default=None, metavar="PATH", help="Use search results to create a 2x2 grid video.")
     p_isearch.add_argument("--stitch-grid-output", "-sg-o", type=str, default=None, metavar="PATH", help="Output path for --stitch-grid mode.")
     p_isearch.set_defaults(func=cmd_isearch)

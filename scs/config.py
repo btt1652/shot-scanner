@@ -45,8 +45,6 @@ def default_config() -> dict:
         # Override specific models in config.toml under [model_image_limits]
         # Unlisted models fall back to built-in defaults (see scs/cli.py _BUILTIN_MODEL_LIMITS)
         "model_image_limits": {},
-        "merge_same_threshold": 0,
-        "isolated_frame_time": 3,
         "merge_threshold": 0,
         "cache": "./.cache.db",
         "still_frame_threshold": 0.95,

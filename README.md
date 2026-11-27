@@ -8,7 +8,7 @@ A lightweight CLI that analyzes video frames using a decision model as the sole 
 |---------|-------------|
 | `scs analyze <video>` | Analyze video frames using a decision model (Ollama or OpenRouter) |
 | `scs query "<sql>" [--cache CACHE] [--save-frame DIR]` | Query the cache or extract matching frames |
-| `scs search <video> [--list] [--top N] [--top-per-video N] [--merge-same-threshold SEC|-mst] [--merge-threshold SEC|-mt] [--model MODEL] [--run-id RUN_ID] [--save-frame DIR] [--stitch [PATH]] [--stitch-grid] [--stitch-grid-output PATH] [--json|-j] [--cache PATH|-c]` | Human-friendly search with named-argument flags; `--stitch-grid` creates a 2x2 grid from search results |
+| `scs search <video> [--list] [--top N] [--top-per-video N] [--merge-threshold SEC|-mt] [--model MODEL] [--run-id RUN_ID] [--save-frame DIR] [--stitch [PATH]] [--stitch-grid] [--stitch-grid-output PATH] [--json|-j] [--cache PATH|-c]` | Human-friendly search with named-argument flags; `--stitch-grid` creates a 2x2 grid from search results |
 | `scs cache <cmd>` | Cache management: list, delete, prune, clear, clean |
 
 ## Provider: Ollama vs OpenRouter
@@ -106,10 +106,9 @@ same_scene_threshold = 0.80
 recursive = false
 
 # --- Merge thresholds (search output grouping) ---
-merge_same_threshold = 0     # >0 enables -mst (merge same-score frames)
+merge_threshold = 1          # >0 enables -mt (merge all frames by time)
 merge_threshold = 0          # >0 enables -mt (merge adjacent frames)
 
-isolated_frame_time = 2        # Padding for stitching isolated frame groups
 
 # Per-model image limits for OpenRouter Decisions API.
 # Edit to override defaults or add new models. Unlisted models fall back
@@ -396,12 +395,11 @@ scs search video.mp4 \
   - Multiple question flags are AND'd together
 - `--top N` (`-t`): Limit to top N frames (or ranges with merge) by highest probability, then results are re‑ordered chronologically.
 - `--top-per-video N` (`-tpv`): Limit number of top results per video by highest probability, then results are re‑ordered chronologically per video. When both `--top` and `--top-per-video` are supplied, `--top-per-video` takes precedence.
-- `--merge-same-threshold SEC` (`-mst`): Merge consecutive frames **with the SAME probability score** within `SEC` seconds into a single time-range. Only merges rows sharing an identical `top_probability`. Default from `config.toml`: `merge_same_threshold = 0` (disabled). Set `> 0` to enable, or override via CLI.
-- `--merge-threshold SEC` (`-mt`): Merge **ALL** adjacent query results into continuous time-ranges based on timestamp proximity alone (regardless of score differences). Produces time-range blocks spanning any probability scores as long as frames are within the threshold window. Default from `config.toml`: `merge_threshold = 0` (disabled). Set `> 0` to enable, or override via CLI. Mutually exclusive with `-mst` — both cannot be enabled simultaneously.
+- `--merge-threshold SEC` (`-mt`): Merge **ALL** adjacent query results into continuous time-ranges based on timestamp proximity alone (regardless of score differences). Produces time-range blocks spanning any probability scores as long as frames are within the threshold window. Default from `config.toml`: `merge_threshold = 0` (disabled). Set `> 0` to enable, or override via CLI.
 
   **Example — two merge modes:**
   Given frames at 10.0s (prob=0.85), 10.5s (prob=0.85), 11.0s (prob=0.72), 11.5s (prob=0.72):
-  - `-mst 1.0` → two ranges: `[10.0-10.5] prob=0.85` and `[11.0-11.5] prob=0.72` (score break at 11.0s)
+  - `-mt 1.0` → one continuous range: `[10.0-11.5] prob=0.85` (merges across score breaks)
   - `-mt 1.0` → one range: `[10.0-11.5]` best\_prob=0.85 (all merged by timestamp continuity)
 
   When used with `--top` or `--top-per-video`, the limit counts ranges (not individual frames).
@@ -432,7 +430,7 @@ scs search video.mp4 --activity yes --prob 0.8 --top 3 --json
 ]
 ```
 
-**Output format (merged ranges with `-mst`/`-mt`):**
+**Output format (merged ranges with `-mt`):**
 ```json
 [
   {
@@ -458,7 +456,7 @@ This is designed for easy consumption by LLM agents, CI pipelines, or any tool t
 - `--model MODEL` (`-m`): Filter results by decision model name (e.g., clef-flash:9b, d1:3b, perplexity/pplx-decider-v1.3)
 - `--run-id RUN_ID` (`-ri`): Filter results to a specific analysis run ID
 - `--cache CACHE` (`-c`): Path to SQLite cache file (default: ./.cache.db)
-- `--stitch [PATH]` (`-st`): Stitch matched frames into a single video using ffmpeg. Default threshold is 1 second unless `--merge-same-threshold/-mst` or `--merge-threshold/-mt` is provided.
+- `--stitch [PATH]` (`-st`): Stitch matched frames into a single video using ffmpeg. Default threshold is 1 second unless `--merge-threshold/-mt` is provided.
 
 #### Quick Reference — Shorthand Flags
 
@@ -467,8 +465,7 @@ This is designed for easy consumption by LLM agents, CI pipelines, or any tool t
 | `--<question> <choice>` | — | — | Named-argument filter: question + choice, with optional `--prob`, `--conf`, `--rank` modifiers |
 | `--top` | `-t` | — | Limit to top N results |
 | `--top-per-video` | `-tpv` | — | Limit per video |
-| `--merge-same-threshold` | `-mst` | `merge_same_threshold = 0` | Merge same-score frames (set >0 to enable) |
-| `--merge-threshold` | `-mt` | `merge_threshold = 0` | Merge all frames by time (mutually exclusive with -mst) |
+| `--merge-threshold` | `-mt` | `merge_threshold = 0` | Merge all frames by time proximity |
 | `--json` | `-j` | — | Output JSON array for AI agents / programmatic use (overrides table) |
 | `--save-frame` | `-sf` | — | Extract frame images |
 | `--model` | `-m` | — | Filter by decision model name |
@@ -583,27 +580,7 @@ scs search video.mp4 \
   --stitch custom_output.mp4
 ```
 
-### Isolated Frame Time Padding (`isolated_frame_time`)
 
-When stitching, frames are grouped into sections based on timestamp proximity. By default, any gap larger than `--merge-same-threshold` (or 1 sec if not set) creates a new section.
-
-The `isolated_frame_time` setting adds **extra padding seconds** around each group's end timestamp before checking for isolation. This helps bridge small gaps where you want related content stitched together even though they're slightly beyond the merge threshold.
-
-**How it works:**
-- If `isolated_frame_time = 3` and `threshold = 1`: maximum allowed gap between groups is 4 seconds
-- Gap ≤ 1 second → direct merge (clearly related)
-- Gap 1–4 seconds → pad and merge (possibly related, keep together)
-- Gap > 4 seconds → isolate (unrelated)
-
-**Configuration:** Set in `config.toml`:
-```toml
-isolated_frame_time = 3   # Seconds of padding after isolated groups (default: 3)
-merge_same_threshold = 2  # Max gap for direct grouping (optional)
-```
-
-With both set above, the stitching logic allows merging groups with gaps up to 5 seconds (2 + 3). Setting `isolated_frame_time = 0` disables padding — only exact threshold matching applies.
-
-## Grid Stitching (--stitch-grid)
 
 The `--stitch-grid` flag uses search results (timestamps/ranges from `--q` filters) to create a 2×2 grid video. Clips extracted at the matched timestamps are arranged in a grid instead of being concatenated sequentially like `--stitch`.
 
@@ -640,9 +617,6 @@ scs isearch ref.jpg --video v1.mp4 --stitch-grid
 - Output duration matches the longest clip
 - FPS is taken from the first input video
 
-**Configuration:**
-- `clip_duration` (default: 3) — duration of each extracted clip in seconds
-
 ## isearch — Experimental Image-Based Search
 
 Search cached frame answers by reference image (single image). Uses a single reference image to find semantically similar frames across cached analysis runs.
@@ -650,7 +624,7 @@ Search cached frame answers by reference image (single image). Uses a single ref
 ### Usage
 
 ```bash
-scs isearch <image> [--question Q] [-qr RUN_ID|VIDEO] [--top N] [--top-per-video N] [--merge-same-threshold SEC|-mst] [--merge-threshold SEC|-mt] [--model MODEL] [--run-id RUN_ID] [--save-frame DIR] [--stitch] [--stitch-grid] [--stitch-grid-output PATH] [--json|-j] [--cache PATH|-c]
+scs isearch <image> [--question Q] [-qr RUN_ID|VIDEO] [--top N] [--top-per-video N] [--merge-threshold SEC|-mt] [--model MODEL] [--run-id RUN_ID] [--save-frame DIR] [--stitch] [--stitch-grid] [--stitch-grid-output PATH] [--json|-j] [--cache PATH|-c]
 ```
 
 ### Parameters
@@ -660,12 +634,11 @@ scs isearch <image> [--question Q] [-qr RUN_ID|VIDEO] [--top N] [--top-per-video
 - `-qr RUN_ID|VIDEO` or `--question-ref`: Use the question set from a run_id (integer) or latest run of a video path (string)
 - `--top N`: Limit to top N frames by probability
 - `--top-per-video N`: Limit number of top results per video by probability
-- `--merge-same-threshold SEC` / `-mst`: Timestamp difference threshold (seconds) to merge adjacent frames with same score
-- `--merge-threshold SEC` / `-mt`: Timestamp difference threshold (seconds) to merge ALL adjacent query results into ranges by timestamp proximity (mutually exclusive with `-mst`)
+- `--merge-threshold SEC` / `-mt`: Timestamp difference threshold (seconds) to merge ALL adjacent query results into ranges by timestamp proximity
 - `--model MODEL`: Filter results by decision model name (e.g., clef-flash:9b, d1:3b, perplexity/pplx-decider-v1.3)
 - `--run-id RUN_ID`: Filter results to a specific analysis run ID
 - `--save-frame DIR`: Directory to save extracted frames (JPG only). Each frame image has a result overlay showing all questions with their top choice, probability scores, confidence score, and all choice probabilities
-- `--stitch [PATH]`: Stitch matched frames into a single video using ffmpeg. Uses `--merge-same-threshold`/`-mst` (default 1 sec) to group consecutive frames with same score into ranges before stitching
+- `--stitch [PATH]`: Stitch matched frames into a single video using ffmpeg. Uses `--merge-threshold`/`-mt` (default 1 sec) to group consecutive frames into ranges before stitching
 - `--stitch-grid`: Use search results to create a 2x2 grid video
 - `--stitch-grid-output PATH`: Output path for `--stitch-grid` mode
 - `--json` / `-j`: Output results as JSON array (for AI agents / programmatic use)
