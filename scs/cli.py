@@ -2661,6 +2661,9 @@ def _stitch_grid_from_search(rows, by_video, output_path, grid_cols=2, grid_rows
     threshold = 1.0  # Default threshold for grouping
     all_sections_by_video = _build_stitch_sections(by_video, threshold)
 
+    # Load config for stitch settings
+    cfg = load_config()
+
     # Minimum duration per section from config (default 0.5s)
     min_duration = cfg.get("stitch_min_duration", 0.5) or 0.5
 
