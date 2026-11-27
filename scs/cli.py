@@ -2240,6 +2240,10 @@ def cmd_search(args):
             cache_db.close()
             sys.exit(0)
 
+        print(f"Stitching {len(by_video)} video(s): {list(by_video.keys())}", file=sys.stderr)
+        for vid, frames in by_video.items():
+            print(f"  {vid}: {len(frames)} matching frame(s)", file=sys.stderr)
+
         # Build sections from rows
         all_sections_by_video = _build_stitch_sections(by_video, threshold)
 
