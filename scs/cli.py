@@ -2711,12 +2711,9 @@ def _stitch_grid_from_search(rows, by_video, output_path, grid_cols=2, grid_rows
     # Minimum duration per section from config (default 0.5s)
     min_duration = cfg.get("stitch_min_duration", 0.5) or 0.5
 
-    # Build grids showing all videos side-by-side concurrently
-    # Each grid frame shows one section from each video simultaneously
+    # Build a grid where each cell plays its video's sections concurrently
+    # Each video gets its own cell, and all cells play simultaneously
     tmpdir = tempfile.mkdtemp(prefix="scs_stitch_grid_")
-    grid_files = []
-    cell_w = 1920
-    cell_h = 1080
     try:
         # Probe resolution from the first available clip across all videos
         for vid, sections in all_sections_by_video.items():
@@ -2750,14 +2747,16 @@ def _stitch_grid_from_search(rows, by_video, output_path, grid_cols=2, grid_rows
                     cell_w, cell_h = int(parts[0]), int(parts[1])
                 break
 
-        # For each video, extract all sections as clips
-        all_vid_clips = {}  # vid -> [(clip_file, duration), ...]
+        # For each video, extract all sections as clips and build concat input
+        all_vid_concat_inputs = {}  # vid -> list of clip files
+        all_vid_durations = {}  # vid -> list of durations
         for vid_idx, (vid, sections) in enumerate(all_sections_by_video.items()):
             if not os.path.exists(vid):
                 print(f"Warning: video not found: {vid}", file=sys.stderr)
                 continue
 
             vid_clips = []
+            vid_durations = []
             for sec_idx, section in enumerate(sections):
                 first_row = section[0]
                 start_ts = first_row.get("timestamp_seconds") or first_row.get("start_timestamp") or 0
@@ -2777,124 +2776,82 @@ def _stitch_grid_from_search(rows, by_video, output_path, grid_cols=2, grid_rows
                     clip_file,
                 ])
                 if os.path.exists(clip_file) and os.path.getsize(clip_file) > 0:
-                    vid_clips.append((clip_file, duration))
+                    vid_clips.append(clip_file)
+                    vid_durations.append(duration)
 
             if vid_clips:
-                all_vid_clips[vid] = vid_clips
+                all_vid_concat_inputs[vid] = vid_clips
+                all_vid_durations[vid] = vid_durations
                 print(f"  Video {vid_idx+1}: {len(vid_clips)} section(s)", file=sys.stderr)
 
-        if not all_vid_clips:
+        if not all_vid_concat_inputs:
             print("Error: no clips could be extracted from search results.", file=sys.stderr)
             return False
 
-        # Determine max sections across all videos
-        max_sections = max(len(clips) for clips in all_vid_clips.values())
+        # Build concat file lists for each video cell
+        # Each video's clips are concatenated within its own cell using ffmpeg concat filter
+        # We use the concat demuxer per video, then scale each cell, then hstack/vstack
+        video_order = list(all_vid_concat_inputs.keys())
 
-        # For each section index, create a grid frame showing all videos' sections side-by-side
-        for sec_idx in range(max_sections):
-            inputs = []
-            filter_parts = []
-            cell_idx = 0
+        # Create concat files for each video
+        concat_files = []
+        for vid_idx, vid in enumerate(video_order):
+            concat_txt = os.path.join(tmpdir, f"concat_v{vid_idx}.txt")
+            with open(concat_txt, "w") as cf:
+                for clip_file in all_vid_concat_inputs[vid]:
+                    cf.write("file '" + clip_file + "'\n")
+            concat_files.append(concat_txt)
 
-            for vid, clips in all_vid_clips.items():
-                if sec_idx < len(clips):
-                    clip_file, duration = clips[sec_idx]
-                    inputs.append(clip_file)
-                    filter_parts.append(f"[{cell_idx}:v]scale={cell_w}:{cell_h}[s{cell_idx}]")
-                else:
-                    # No section for this video at this index - use black filler
-                    filler_duration = min_duration
-                    for other_vid, other_clips in all_vid_clips.items():
-                        if sec_idx < len(other_clips):
-                            filler_duration = other_clips[sec_idx][1]
-                            break
-                    black_file = os.path.join(tmpdir, f"black_v{list(all_vid_clips.keys()).index(vid)}_s{sec_idx:04d}.mp4")
-                    subprocess.run([
-                        "ffmpeg", "-y", "-loglevel", "warning",
-                        "-f", "lavfi", "-i", f"color=c=black:s={cell_w}x{cell_h}:d={filler_duration}:r={fps}",
-                        "-c:v", "libx264", "-pix_fmt", "yuv420p", "-r", str(fps),
-                        "-c:a", "aac", "-b:a", "192k",
-                        "-t", str(filler_duration),
-                        black_file,
-                    ], capture_output=True)
-                    inputs.append(black_file)
-                    filter_parts.append(f"[{cell_idx}:v]scale={cell_w}:{cell_h}[s{cell_idx}]")
-                cell_idx += 1
+        # Build ffmpeg command with concat demuxer per video input
+        # Each video gets its own concat input, then scaled to cell size
+        cmd = ["ffmpeg", "-y", "-loglevel", "warning"]
+        for cf in concat_files:
+            cmd.extend(["-f", "concat", "-safe", "0", "-i", cf])
 
-            # Pad remaining cells with black if fewer videos than cells
-            while cell_idx < total_cells:
-                filler_duration = min_duration
-                for other_vid, other_clips in all_vid_clips.items():
-                    if sec_idx < len(other_clips):
-                        filler_duration = other_clips[sec_idx][1]
-                        break
-                black_file = os.path.join(tmpdir, f"black_pad_{sec_idx:04d}_{cell_idx}.mp4")
-                subprocess.run([
-                    "ffmpeg", "-y", "-loglevel", "warning",
-                    "-f", "lavfi", "-i", f"color=c=black:s={cell_w}x{cell_h}:d={filler_duration}:r={fps}",
-                    "-c:v", "libx264", "-pix_fmt", "yuv420p", "-r", str(fps),
-                    "-c:a", "aac", "-b:a", "192k",
-                    "-t", str(filler_duration),
-                    black_file,
-                ], capture_output=True)
-                inputs.append(black_file)
-                filter_parts.append(f"[{cell_idx}:v]scale={cell_w}:{cell_h}[s{cell_idx}]")
-                cell_idx += 1
+        # Build filter complex: scale each input, then hstack/vstack
+        num_vids = len(video_order)
+        filter_parts = []
 
-            # Build row-by-row hstack
-            for row in range(grid_rows):
-                row_start = row * grid_cols
-                row_labels = "".join(f"[s{row_start + c}]" for c in range(grid_cols))
-                row_out = f"[row{row}]"
-                if grid_cols == 1:
-                    filter_parts.append(f"{row_labels}{row_out}copy{row_out}")
-                else:
-                    filter_parts.append(f"{row_labels}hstack=inputs={grid_cols}{row_out}")
+        # Scale each video input to cell size
+        for i in range(num_vids):
+            filter_parts.append(f"[{i}:v]scale={cell_w}:{cell_h}[s{i}]")
 
-            # Stack all rows vertically
-            row_labels = "".join(f"[row{r}]" for r in range(grid_rows))
-            if grid_rows == 1:
-                filter_parts.append(f"{row_labels}copy")
+        # Pad with black for remaining cells if fewer videos than grid cells
+        for i in range(num_vids, total_cells):
+            filter_parts.append(f"color=c=black:s={cell_w}x{cell_h}:d=999:r={fps}[s{i}]")
+
+        # Build row-by-row hstack
+        for row in range(grid_rows):
+            row_start = row * grid_cols
+            row_labels = "".join(f"[s{row_start + c}]" for c in range(grid_cols))
+            row_out = f"[row{row}]"
+            if grid_cols == 1:
+                filter_parts.append(f"{row_labels}{row_out}copy{row_out}")
             else:
-                filter_parts.append(f"{row_labels}vstack=inputs={grid_rows}")
+                filter_parts.append(f"{row_labels}hstack=inputs={grid_cols}{row_out}")
 
-            filter_str = ";".join(filter_parts)
+        # Stack all rows vertically
+        row_labels = "".join(f"[row{r}]" for r in range(grid_rows))
+        if grid_rows == 1:
+            filter_parts.append(f"{row_labels}copy")
+        else:
+            filter_parts.append(f"{row_labels}vstack=inputs={grid_rows}")
 
-            grid_frame = os.path.join(tmpdir, f"grid_{sec_idx:04d}.mp4")
-            cmd = ["ffmpeg", "-y", "-loglevel", "warning"]
-            for inp in inputs:
-                cmd.extend(["-i", inp])
-            cmd.extend(["-filter_complex", filter_str])
-            cmd.extend(["-c:v", "libx264", "-preset", "fast", "-crf", "23"])
-            cmd.extend(["-pix_fmt", "yuv420p", "-r", str(fps)])
-            cmd.extend(["-c:a", "aac", "-b:a", "192k"])
-            cmd.append("-shortest")
-            cmd.append(grid_frame)
+        filter_str = ";".join(filter_parts)
 
-            result = subprocess.run(cmd)
-            if result.returncode == 0 and os.path.exists(grid_frame) and os.path.getsize(grid_frame) > 0:
-                grid_files.append(grid_frame)
+        cmd.extend(["-filter_complex", filter_str])
+        cmd.extend(["-c:v", "libx264", "-preset", "fast", "-crf", "23"])
+        cmd.extend(["-pix_fmt", "yuv420p", "-r", str(fps)])
+        cmd.extend(["-c:a", "aac", "-b:a", "192k"])
+        cmd.append("-shortest")
+        cmd.append(output_path)
 
-        if not grid_files:
-            print("Error: no grid frames could be created from search results.", file=sys.stderr)
+        print(f"  Grid stitch: {num_vids} video(s), {sum(len(v) for v in all_vid_concat_inputs.values())} total section(s) -> {grid_cols}x{grid_rows} grid -> {output_path}", file=sys.stderr)
+
+        result = subprocess.run(cmd)
+        if result.returncode != 0:
+            print(f"  ffmpeg grid stitch error: return code {result.returncode}", file=sys.stderr)
             return False
-
-        # Concatenate all grid frames into one output
-        concat_file = os.path.join(tmpdir, "concat.txt")
-        with open(concat_file, "w") as cf:
-            for gf in grid_files:
-                cf.write("file '" + gf + "'\n")
-
-        print(f"Concatenating {len(grid_files)} grid frame(s) into {output_path}...", file=sys.stderr)
-        result = subprocess.run([
-            "ffmpeg", "-y", "-loglevel", "warning",
-            "-f", "concat", "-safe", "0", "-i", concat_file,
-            "-c:v", "libx264", "-preset", "fast", "-crf", "23",
-            "-pix_fmt", "yuv420p",
-            "-c:a", "aac", "-b:a", "192k",
-            "-fflags", "+genpts",
-            output_path,
-        ])
 
         if os.path.exists(output_path):
             dur = subprocess.run(
@@ -2902,12 +2859,11 @@ def _stitch_grid_from_search(rows, by_video, output_path, grid_cols=2, grid_rows
                  "-of", "default=noprint_wrappers=1:nokey=1", output_path],
                 capture_output=True, text=True
             )
-            print(f"Stitched grid video: {output_path} ({len(grid_files)} grid frame(s), duration: {float(dur.stdout.strip()):.1f}s)", file=sys.stderr)
+            print(f"Stitched grid video: {output_path} (duration: {float(dur.stdout.strip()):.1f}s)", file=sys.stderr)
+            return True
         else:
             print(f"Error: output file not created: {output_path}", file=sys.stderr)
             return False
-
-        return True
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
 
