@@ -230,3 +230,38 @@ After running the full pipeline on a search with 20 results:
 ```
 
 Each clip is ordered by search relevance score (highest first).
+
+## Grid Stitching — 2×2 Layout from Search Results
+
+Use `--stitch-grid` to create a 2×2 grid video from search results. Clips extracted at the matched timestamps are arranged in a grid instead of being concatenated sequentially like `--stitch`.
+
+```bash
+# Create a 2x2 grid from search results
+scs search video.mp4 --q "activity=yes:prob>=0.8" --stitch-grid
+
+# With custom output path
+scs search video.mp4 --q "activity=yes:prob>=0.8" --stitch-grid --stitch-grid-output my_grid.mp4
+```
+
+**Grid layout:**
+
+```
++----------+----------+
+| Clip 1   | Clip 2   |
+| (top-    | (top-    |
+|  left)   |  right)  |
++----------+----------+
+| Clip 3   | Clip 4   |
+| (bottom- | (bottom- |
+|  left)   |  right)  |
++----------+----------+
+```
+
+- Up to 4 clips are placed in the grid (fewer = some cells are black)
+- Each clip is extracted from the search result timestamps (same as `--stitch`)
+- Output resolution matches the input videos
+- Output duration matches the longest clip
+- FPS is taken from the first input video
+
+**Configuration:**
+- `clip_duration` (default: 3) — duration of each extracted clip in seconds

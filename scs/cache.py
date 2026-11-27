@@ -37,6 +37,7 @@ CREATE TABLE IF NOT EXISTS analysis_runs (
     params_hash TEXT NOT NULL,
     model TEXT NOT NULL DEFAULT '',
     questions_json TEXT NOT NULL DEFAULT '[]',
+    params_json TEXT NOT NULL DEFAULT '{}',
     cache_status TEXT NOT NULL DEFAULT 'empty', -- empty, partial, complete
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now')),
@@ -74,7 +75,7 @@ CREATE TABLE IF NOT EXISTS cache_stats (
 );
 """
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 # Keys for cache_stats
 STAT_TOTAL_VIDEOS = "total_videos"
@@ -101,8 +102,18 @@ class CacheDB:
         return self._conn
 
     def _execute_schema(self):
-        """Create tables if they don't exist. Never wipes existing data."""
+        """Create tables if they don't exist. Run migrations if needed. Never wipes existing data."""
         self.conn.executescript(SCHEMA_SQL)
+        # Handle schema migrations via user_version pragma
+        current_version = self.conn.execute("PRAGMA user_version").fetchone()[0]
+        if current_version < SCHEMA_VERSION:
+            if current_version < 7:
+                # Migration v7: add params_json column to analysis_runs
+                self.conn.execute(
+                    "ALTER TABLE analysis_runs ADD COLUMN params_json TEXT NOT NULL DEFAULT '{}'"
+                )
+            self.conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+            self.conn.commit()
 
     def set_stat(self, key: str, value: str):
         """Set a cache statistics entry."""
@@ -208,6 +219,7 @@ class CacheDB:
         params_hash: str,
         model: str = '',
         questions_json: str = '[]',
+        params_json: str = '{}',
     ) -> int:
         """Insert or update an analysis run. Returns run_id (reuses existing)."""
         with self.conn:
@@ -220,15 +232,15 @@ class CacheDB:
             if existing:
                 # Update in-place without deleting frame_answers
                 self.conn.execute(
-                    "UPDATE analysis_runs SET model = ?, questions_json = ?, cache_status = ?, updated_at = datetime('now') WHERE id = ?",
-                    (model, questions_json, 'partial', existing['id']),
+                    "UPDATE analysis_runs SET model = ?, questions_json = ?, params_json = ?, cache_status = ?, updated_at = datetime('now') WHERE id = ?",
+                    (model, questions_json, params_json, 'partial', existing['id']),
                 )
                 return existing['id']
             # New run
             self.conn.execute(
-                """INSERT INTO analysis_runs (video_id, params_hash, model, questions_json, cache_status, updated_at)
-                   VALUES (?, ?, ?, ?, 'partial', datetime('now'))""",
-                (video_id, params_hash, model, questions_json),
+                """INSERT INTO analysis_runs (video_id, params_hash, model, questions_json, params_json, cache_status, updated_at)
+                   VALUES (?, ?, ?, ?, ?, 'partial', datetime('now'))""",
+                (video_id, params_hash, model, questions_json, params_json),
             )
         cur = self.conn.execute(
             "SELECT id FROM analysis_runs WHERE video_id = ? AND params_hash = ?",

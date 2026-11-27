@@ -8,7 +8,7 @@ A lightweight CLI that analyzes video frames using a decision model as the sole 
 |---------|-------------|
 | `scs analyze <video>` | Analyze video frames using a decision model (Ollama or OpenRouter) |
 | `scs query "<sql>" [--cache CACHE] [--save-frame DIR]` | Query the cache or extract matching frames |
-| `scs search <video> [--list] [--top N] [--top-per-video N] [--merge-same-threshold SEC|-mst] [--merge-threshold SEC|-mt] [--model MODEL] [--run-id RUN_ID] [--save-frame DIR] [--stitch] [--stitch-grid VIDEOS...] [--stitch-grid-output PATH] [--json|-j] [--cache PATH|-c]` | Human-friendly search with named-argument flags; `--stitch-grid` arranges videos in a 2x2 grid |
+| `scs search <video> [--list] [--top N] [--top-per-video N] [--merge-same-threshold SEC|-mst] [--merge-threshold SEC|-mt] [--model MODEL] [--run-id RUN_ID] [--save-frame DIR] [--stitch [PATH]] [--stitch-grid] [--stitch-grid-output PATH] [--json|-j] [--cache PATH|-c]` | Human-friendly search with named-argument flags; `--stitch-grid` creates a 2x2 grid from search results |
 | `scs cache <cmd>` | Cache management: list, delete, prune, clear, clean |
 
 ## Provider: Ollama vs OpenRouter
@@ -475,7 +475,7 @@ This is designed for easy consumption by LLM agents, CI pipelines, or any tool t
 | `--run-id` | `-ri` | — | Filter by run ID |
 | `--cache` | `-c` | — | Cache path |
 | `--stitch` | `-st` | — | Video stitching (sequential concat of matched frames) |
-| `--stitch-grid` | `-sg` | — | Grid stitch (2x2 layout from multiple videos) |
+| `--stitch-grid` | `-sg` | — | Grid stitch from search results (2x2 layout) |
 | `--stitch-grid-output` | `-sg-o` | — | Output path for `--stitch-grid` |
 
 ### Frame Extraction via Search
@@ -605,41 +605,43 @@ With both set above, the stitching logic allows merging groups with gaps up to 5
 
 ## Grid Stitching (--stitch-grid)
 
-The `--stitch-grid` flag arranges multiple videos into a single output with a 2×2 grid layout (4 panels playing simultaneously). This is different from `--stitch` which concatenates clips sequentially.
+The `--stitch-grid` flag uses search results (timestamps/ranges from `--q` filters) to create a 2×2 grid video. Clips extracted at the matched timestamps are arranged in a grid instead of being concatenated sequentially like `--stitch`.
 
 **Usage:**
 
 ```bash
-# Stitch 4 videos into a 2x2 grid (auto-named output)
-scs search --stitch-grid video1.mp4 video2.mp4 video3.mp4 video4.mp4
+# Create a 2x2 grid from search results
+scs search video.mp4 --q "activity=yes:prob>=0.8" --stitch-grid
 
-# Stitch with custom output path
-scs search --stitch-grid video1.mp4 video2.mp4 video3.mp4 video4.mp4 --stitch-grid-output my_grid.mp4
+# With custom output path
+scs search video.mp4 --q "activity=yes:prob>=0.8" --stitch-grid --stitch-grid-output my_grid.mp4
 
-# Works with isearch too
-scs isearch ref.jpg --video v1.mp4 v2.mp4 v3.mp4 v4.mp4 --stitch-grid
+# With isearch
+scs isearch ref.jpg --video v1.mp4 --stitch-grid
 ```
 
 **Grid layout:**
 
 ```
 +----------+----------+
-| Video 1  | Video 2  |
+| Clip 1   | Clip 2   |
 | (top-    | (top-    |
 |  left)   |  right)  |
 +----------+----------+
-| Video 3  | Video 4  |
+| Clip 3   | Clip 4   |
 | (bottom- | (bottom- |
 |  left)   |  right)  |
 +----------+----------+
 ```
 
-- Up to 4 videos are placed in the grid (fewer = some cells are black)
+- Up to 4 clips are placed in the grid (fewer = some cells are black)
+- Each clip is extracted from the search result timestamps (same as `--stitch`)
 - Output resolution matches the input videos
-- Output duration matches the longest input video
+- Output duration matches the longest clip
 - FPS is taken from the first input video
 
-**Configuration:** No config.toml settings required. All parameters are CLI-only.
+**Configuration:**
+- `clip_duration` (default: 3) — duration of each extracted clip in seconds
 
 ## isearch — Experimental Image-Based Search
 
@@ -648,7 +650,7 @@ Search cached frame answers by reference image (single image). Uses a single ref
 ### Usage
 
 ```bash
-scs isearch <image> [--question Q] [-qr RUN_ID|VIDEO] [--top N] [--top-per-video N] [--merge-same-threshold SEC|-mst] [--merge-threshold SEC|-mt] [--model MODEL] [--run-id RUN_ID] [--save-frame DIR] [--stitch] [--stitch-grid VIDEOS...] [--stitch-grid-output PATH] [--json|-j] [--cache PATH|-c]
+scs isearch <image> [--question Q] [-qr RUN_ID|VIDEO] [--top N] [--top-per-video N] [--merge-same-threshold SEC|-mst] [--merge-threshold SEC|-mt] [--model MODEL] [--run-id RUN_ID] [--save-frame DIR] [--stitch] [--stitch-grid] [--stitch-grid-output PATH] [--json|-j] [--cache PATH|-c]
 ```
 
 ### Parameters
@@ -664,7 +666,7 @@ scs isearch <image> [--question Q] [-qr RUN_ID|VIDEO] [--top N] [--top-per-video
 - `--run-id RUN_ID`: Filter results to a specific analysis run ID
 - `--save-frame DIR`: Directory to save extracted frames (JPG only). Each frame image has a result overlay showing all questions with their top choice, probability scores, confidence score, and all choice probabilities
 - `--stitch [PATH]`: Stitch matched frames into a single video using ffmpeg. Uses `--merge-same-threshold`/`-mst` (default 1 sec) to group consecutive frames with same score into ranges before stitching
-- `--stitch-grid VIDEOS...`: Stitch multiple videos into a 2x2 grid layout (4 panels side by side)
+- `--stitch-grid`: Use search results to create a 2x2 grid video
 - `--stitch-grid-output PATH`: Output path for `--stitch-grid` mode
 - `--json` / `-j`: Output results as JSON array (for AI agents / programmatic use)
 - `--video` / `-v`: One or more video paths to filter results by

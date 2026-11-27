@@ -54,11 +54,15 @@ _BUILTIN_MODEL_LIMITS = {
 
 
 def _draw_result_on_frame(frame, questions_data):
-    """Draw a result overlay on a frame image showing question names and choices.
+    """Draw a result overlay on a frame image showing question names, choices, and run info.
 
     questions_data is a list of dicts with keys:
         question_name, top_choice, top_probability, confidence, probabilities_json
-    Each question is drawn as a section with its choices and probability scores.
+        model (optional), params_hash (optional), params_json (optional), run_id (optional)
+    Two overlays are drawn:
+      - Question/answer box at the top-right corner
+      - Run info/params box at the bottom-left corner
+    Both boxes use semi-transparent backgrounds.
     Returns the modified frame (numpy array).
     """
     try:
@@ -79,8 +83,37 @@ def _draw_result_on_frame(frame, questions_data):
     else:
         font = ImageFont.load_default()
 
-    # Build overlay lines for all questions
-    lines = []
+    # Separate metadata lines from question lines
+    meta_lines = []
+    question_lines = []
+
+    if questions_data:
+        first = questions_data[0]
+        run_id = first.get("run_id")
+        model = first.get("model", "")
+        params_hash = first.get("params_hash", "")
+        params_json = first.get("params_json", "{}")
+
+        if run_id is not None:
+            meta_lines.append(f"run:{run_id}")
+        if model:
+            meta_lines.append(f"model:{model}")
+        if params_hash:
+            meta_lines.append(f"params:{params_hash}")
+        if params_json and params_json != "{}":
+            try:
+                pj = json.loads(params_json) if isinstance(params_json, str) else params_json
+                parts = []
+                for k, v in pj.items():
+                    s = f"{k}={v}"
+                    if len(s) > 40:
+                        s = s[:37] + "..."
+                    parts.append(s)
+                params_str = " ".join(parts)
+                if params_str:
+                    meta_lines.append(f"cfg:{params_str}")
+            except (json.JSONDecodeError, TypeError):
+                pass
 
     for q_idx, q in enumerate(questions_data):
         q_name = q.get("question_name", "")
@@ -89,7 +122,6 @@ def _draw_result_on_frame(frame, questions_data):
         confidence = q.get("confidence")
         probs_json = q.get("probabilities_json")
 
-        # Parse probabilities for this question
         probs = {}
         if probs_json:
             try:
@@ -97,64 +129,95 @@ def _draw_result_on_frame(frame, questions_data):
             except (json.JSONDecodeError, TypeError):
                 probs = {}
 
-        if q_idx > 0 or lines:
-            lines.append("")  # blank separator between questions (and after metadata)
+        if q_idx > 0 or question_lines:
+            question_lines.append("")  # blank separator between questions
 
-        # Question name in YELLOW
-        lines.append(f"{q_name}")
+        question_lines.append(f"{q_name}")
         if top_choice:
             conf_str = f" conf:{confidence:.0%}" if confidence is not None else ""
-            lines.append(f"> {top_choice} ({top_prob:.0%}){conf_str}")
+            question_lines.append(f"> {top_choice} ({top_prob:.0%}){conf_str}")
         for choice, prob in sorted(probs.items(), key=lambda x: x[1], reverse=True):
             if choice == top_choice:
                 continue
-            lines.append(f"  {choice} ({prob:.0%})")
+            question_lines.append(f"  {choice} ({prob:.0%})")
 
-    if not lines:
+    if not question_lines and not meta_lines:
         return frame
 
-    # Calculate text block size
-    line_heights = []
-    for line in lines:
-        bbox = draw.textbbox((0, 0), line, font=font)
-        line_heights.append(bbox[3] - bbox[1] + 3)
-
-    total_height = sum(line_heights) + 14
     padding = 6
-    max_line_width = max(draw.textbbox((0, 0), line, font=font)[2] for line in lines)
-    box_width = max_line_width + padding * 2
-    box_height = total_height + padding * 2
 
-    # Position: top-right corner
-    x = pil_img.width - box_width - 10
-    y = 10
+    # --- Draw question/answer box (top-right) ---
+    if question_lines:
+        line_heights = []
+        for line in question_lines:
+            bbox = draw.textbbox((0, 0), line, font=font)
+            line_heights.append(bbox[3] - bbox[1] + 3)
 
-    # Draw semi-transparent background
-    bg = Image.new("RGBA", pil_img.size, (0, 0, 0, 0))
-    bg_draw = ImageDraw.Draw(bg)
-    bg_draw.rectangle(
-        [x, y, x + box_width, y + box_height],
-        fill=(0, 0, 0, 180),
-    )
-    pil_img = Image.alpha_composite(pil_img.convert("RGBA"), bg)
-    draw = ImageDraw.Draw(pil_img)
+        total_height = sum(line_heights) + 14
+        max_line_width = max(draw.textbbox((0, 0), line, font=font)[2] for line in question_lines)
+        box_width = max_line_width + padding * 2
+        box_height = total_height + padding * 2
 
-    # Draw text lines
-    text_y = y + padding
-    for i, line in enumerate(lines):
-        if line == "":
-            text_y += 4  # blank separator line
-            continue
-        is_top_choice = line.startswith("> ")
-        is_choice = line.startswith("  ")
-        if is_top_choice:
-            color = "#00FF00"  # green for top choice
-        elif is_choice:
-            color = "#AAAAAA"  # white for other choices
-        else:
-            color = "#FFFF00"  # yellow for question names
-        draw.text((x + padding, text_y), line, fill=color, font=font)
-        text_y += line_heights[i]
+        x = pil_img.width - box_width - 10
+        y = 10
+
+        bg = Image.new("RGBA", pil_img.size, (0, 0, 0, 0))
+        bg_draw = ImageDraw.Draw(bg)
+        bg_draw.rectangle(
+            [x, y, x + box_width, y + box_height],
+            fill=(0, 0, 0, 120),
+        )
+        pil_img = Image.alpha_composite(pil_img.convert("RGBA"), bg)
+        draw = ImageDraw.Draw(pil_img)
+
+        text_y = y + padding
+        for i, line in enumerate(question_lines):
+            if line == "":
+                text_y += 4
+                continue
+            is_top_choice = line.startswith("> ")
+            is_choice = line.startswith("  ")
+            if is_top_choice:
+                color = "#00FF00"
+            elif is_choice:
+                color = "#AAAAAA"
+            else:
+                color = "#FFFF00"
+            draw.text((x + padding, text_y), line, fill=color, font=font)
+            text_y += line_heights[i]
+
+    # --- Draw run info/params box (bottom-left) ---
+    if meta_lines:
+        line_heights = []
+        for line in meta_lines:
+            bbox = draw.textbbox((0, 0), line, font=font)
+            line_heights.append(bbox[3] - bbox[1] + 3)
+
+        total_height = sum(line_heights) + 14
+        max_line_width = max(draw.textbbox((0, 0), line, font=font)[2] for line in meta_lines)
+        box_width = max_line_width + padding * 2
+        box_height = total_height + padding * 2
+
+        x = 10
+        y = pil_img.height - box_height - 10
+
+        bg = Image.new("RGBA", pil_img.size, (0, 0, 0, 0))
+        bg_draw = ImageDraw.Draw(bg)
+        bg_draw.rectangle(
+            [x, y, x + box_width, y + box_height],
+            fill=(0, 0, 0, 120),
+        )
+        pil_img = Image.alpha_composite(pil_img.convert("RGBA"), bg)
+        draw = ImageDraw.Draw(pil_img)
+
+        text_y = y + padding
+        for i, line in enumerate(meta_lines):
+            if line == "":
+                text_y += 4
+                continue
+            color = "#999999"  # gray for run info/params
+            draw.text((x + padding, text_y), line, fill=color, font=font)
+            text_y += line_heights[i]
 
     # Convert back to numpy array (BGR)
     result = cv2.cvtColor(np.array(pil_img.convert("RGB")), cv2.COLOR_RGB2BGR)
@@ -1560,7 +1623,7 @@ def cmd_search(args):
     """Search cached frame answers by question name, choice, and probability.
 
     Usage:
-        scs search <video> [--list] [--top N] [--top-per-video N] [--merge-same-threshold SEC|-mst] [--merge-threshold SEC|-mt] [--model MODEL] [--run-id RUN_ID] [--save-frame DIR] [--stitch [PATH]] [--stitch-grid VIDEOS...] [--stitch-grid-output PATH] [--json|-j] [--cache PATH|-c]
+        scs search <video> [--list] [--top N] [--top-per-video N] [--merge-same-threshold SEC|-mst] [--merge-threshold SEC|-mt] [--model MODEL] [--run-id RUN_ID] [--save-frame DIR] [--stitch [PATH]] [--stitch-grid] [--stitch-grid-output PATH] [--json|-j] [--cache PATH|-c]
         scs search <video> [--activity walking] [--scene couple] [--prob 0.8] [--conf 0.7] [--rank walking 1]
 
     Named-argument filter syntax (AND logic, one question per flag):
@@ -1577,9 +1640,9 @@ def cmd_search(args):
         scs search video.mp4 --activity walking --rank walking 1
         scs search video.mp4 --list
 
-    --stitch-grid: stitch multiple videos into a 2x2 grid layout.
-        scs search --stitch-grid video1.mp4 video2.mp4 video3.mp4 video4.mp4
-        scs search --stitch-grid v1.mp4 v2.mp4 v3.mp4 v4.mp4 --stitch-grid-output output.mp4
+    --stitch-grid: use search results to create a 2x2 grid video.
+        scs search video.mp4 --q "activity=yes:prob>=0.8" --stitch-grid
+        scs search video.mp4 --q "activity=yes:prob>=0.8" --stitch-grid --stitch-grid-output my_grid.mp4
     """
     import re
     import cv2
@@ -2046,10 +2109,29 @@ def cmd_search(args):
 
         # Pre-fetch all question data for each frame (run_id, frame_index)
         frame_keys = set()
+        run_ids = set()
         for row in rows:
             fi = row.get("frame_index") or (row.get("frame_indices") or [None])[0]
             if fi is not None:
                 frame_keys.add((row.get("run_id"), fi))
+                if row.get("run_id") is not None:
+                    run_ids.add(row.get("run_id"))
+
+        # Fetch run metadata (model, params, etc.) for each run_id
+        run_meta = {}
+        if run_ids:
+            mplaceholders = ",".join(["?"] * len(run_ids))
+            mrows = cache_db.execute_sql(
+                f"SELECT id, model, params_hash, params_json, created_at FROM analysis_runs WHERE id IN ({mplaceholders})",
+                list(run_ids),
+            )
+            for mr in mrows:
+                run_meta[mr["id"]] = {
+                    "model": mr.get("model") or "",
+                    "params_hash": mr.get("params_hash") or "",
+                    "params_json": mr.get("params_json") or "{}",
+                    "created_at": mr.get("created_at") or "",
+                }
 
         all_questions_for_frame = {}
         if frame_keys:
@@ -2065,12 +2147,17 @@ def cmd_search(args):
             )
             for qr in qrows:
                 key = (qr["run_id"], qr["frame_index"])
+                meta = run_meta.get(qr["run_id"], {})
                 all_questions_for_frame.setdefault(key, []).append({
                     "question_name": qr["question_name"],
                     "top_choice": qr["top_choice"],
                     "top_probability": qr["top_probability"],
                     "confidence": qr["confidence"],
                     "probabilities_json": qr["probabilities_json"],
+                    "run_id": qr["run_id"],
+                    "model": meta.get("model", ""),
+                    "params_hash": meta.get("params_hash", ""),
+                    "params_json": meta.get("params_json", "{}"),
                 })
 
         os.makedirs(save_frame_dir, exist_ok=True)
@@ -2280,33 +2367,33 @@ def cmd_search(args):
         cache_db.close()
         sys.exit(0)
 
-    # ---- stitch-grid: 2x2 grid layout from multiple videos ----
+    # ---- stitch-grid: 2x2 grid layout from search results ----
     if getattr(args, "stitch_grid", None):
-        grid_videos = args.stitch_grid  # list of video paths (nargs="+")
-        output_path = getattr(args, "stitch_grid_output", None)
+        grid_output = getattr(args, "stitch_grid_output", None)
 
-        # Resolve video paths
-        resolved_videos, missing = _resolve_video_paths(grid_videos)
-        for m in missing:
-            print(f"Warning: no video matched input '{m}'", file=sys.stderr)
-
-        if not resolved_videos:
-            print("Error: no valid video sources for grid stitch.", file=sys.stderr)
-            cache_db.close()
-            sys.exit(1)
-
-        if not output_path:
-            base = os.path.splitext(os.path.basename(resolved_videos[0]))[0]
+        # Determine output path
+        if grid_output:
+            output_path = grid_output
+        else:
+            first_vid = list(by_video.keys())[0] if by_video else "search"
+            base = os.path.splitext(os.path.basename(first_vid))[0]
             output_path = f"{base}_grid.mp4"
 
         # Get FPS from first video
-        cap_first = cv2.VideoCapture(resolved_videos[0])
-        fps = cap_first.get(cv2.CAP_PROP_FPS)
-        if not fps or fps <= 0:
+        first_vid = list(by_video.keys())[0] if by_video else None
+        if first_vid and os.path.exists(first_vid):
+            cap_first = cv2.VideoCapture(first_vid)
+            fps = cap_first.get(cv2.CAP_PROP_FPS)
+            if not fps or fps <= 0:
+                fps = 30.0
+            cap_first.release()
+        else:
             fps = 30.0
-        cap_first.release()
 
-        success = _stitch_grid(resolved_videos, output_path, grid_cols=2, grid_rows=2, fps=fps)
+        # Get clip duration from config
+        clip_duration = cfg.get("clip_duration", 3) or 3
+
+        success = _stitch_grid_from_search(rows, by_video, output_path, grid_cols=2, grid_rows=2, fps=fps, clip_duration=clip_duration)
         cache_db.close()
         sys.exit(0 if success else 1)
 
@@ -2460,8 +2547,6 @@ def cmd_cache(args):
                         "DELETE FROM analysis_runs WHERE id = ?", (run_id,)
                     )
                 print(f"Deleted run: {run_id}", file=sys.stderr)
-                print(f"{_sql_with_params('DELETE FROM frame_answers WHERE run_id = ?', [run_id])}\n", file=sys.stderr)
-                print(f"{_sql_with_params('DELETE FROM analysis_runs WHERE id = ?', [run_id])}\n", file=sys.stderr)
                 cache_db.close()
                 sys.exit(0)
             else:
@@ -2595,117 +2680,155 @@ def _get_row_end_ts(row):
     return row.get("timestamp_seconds", 0)
 
 
-def _stitch_grid(videos, output_path, grid_cols=2, grid_rows=2, fps=30):
-    """Stitch multiple videos into a single video with a grid layout.
+def _stitch_grid_from_search(rows, by_video, output_path, grid_cols=2, grid_rows=2, fps=30, clip_duration=3):
+    """Stitch search results into a grid video.
 
-    Uses ffmpeg's hstack+vstack filters to arrange N videos in a grid.
-    If there are fewer videos than grid cells, the remaining cells
-    are filled with black.
+    Extracts clips from source videos at the search result timestamps,
+    then arranges them in a grid layout using ffmpeg's hstack+vstack filters.
 
     Args:
-        videos: list of video file paths (up to grid_cols * grid_rows)
+        rows: list of row dicts from search results (with source_video_path, frame_index, etc.)
+        by_video: dict mapping video_path -> list of row dicts (sorted by timestamp)
         output_path: path for the output video
         grid_cols: number of columns in the grid (default 2)
         grid_rows: number of rows in the grid (default 2)
         fps: frame rate for the output video (default 30)
+        clip_duration: duration of each clip in seconds (default 3)
     """
     import subprocess
-    import os
+    import tempfile
+    import shutil
 
     total_cells = grid_cols * grid_rows
-    actual_videos = list(videos)[:total_cells]
-    num_inputs = len(actual_videos)
 
-    # Probe first video for resolution to use as grid cell size
-    probe = subprocess.run(
-        ["ffprobe", "-v", "error",
-         "-select_streams", "v:0",
-         "-show_entries", "stream=width,height",
-         "-of", "csv=p=0", actual_videos[0]],
-        capture_output=True, text=True
-    )
-    parts = probe.stdout.strip().split(",")
-    if len(parts) == 2 and parts[0].isdigit() and parts[1].isdigit():
-        cell_w, cell_h = int(parts[0]), int(parts[1])
-    else:
-        cell_w, cell_h = 1920, 1080
+    # Collect all source videos from the search results
+    all_videos = list(by_video.keys())
+    if not all_videos:
+        print("Error: no videos found in search results for grid stitch.", file=sys.stderr)
+        return False
 
-    # Build ffmpeg command
-    cmd = ["ffmpeg", "-y"]
+    # Build sections from rows with isolated-frame-time padding
+    threshold = 1.0  # Default threshold for grouping
+    isolated_frame_time_sec = 3
+    all_sections_by_video = _build_stitch_sections(by_video, threshold, isolated_frame_time_sec)
 
-    # Add each video input
-    for v in actual_videos:
-        cmd.extend(["-i", v])
+    # Collect all clips from all videos, up to total_cells
+    tmpdir = tempfile.mkdtemp(prefix="scs_stitch_grid_")
+    clip_files = []
+    try:
+        for vid, sections in all_sections_by_video.items():
+            if not os.path.exists(vid):
+                print(f"Warning: video not found: {vid}", file=sys.stderr)
+                continue
+            for section in sections:
+                if len(clip_files) >= total_cells:
+                    break
+                # Use the first frame's timestamp as the clip start
+                first_row = section[0]
+                start_ts = first_row.get("timestamp_seconds") or first_row.get("start_timestamp") or 0
+                # Extract a clip of clip_duration starting from start_ts
+                seg_file = os.path.join(tmpdir, f"clip_{len(clip_files):02d}.mp4")
+                subprocess.run([
+                    "ffmpeg", "-y",
+                    "-ss", str(start_ts),
+                    "-i", vid,
+                    "-t", str(clip_duration),
+                    "-c:v", "libx264", "-preset", "fast", "-crf", "23",
+                    "-pix_fmt", "yuv420p",
+                    "-r", str(fps),
+                    "-an",
+                    seg_file,
+                ], capture_output=True)
+                if os.path.exists(seg_file) and os.path.getsize(seg_file) > 0:
+                    clip_files.append(seg_file)
+                if len(clip_files) >= total_cells:
+                    break
 
-    # Add black dummy inputs for remaining cells
-    # Probe the longest real video duration so black inputs match
-    max_dur = 0
-    for v in actual_videos:
-        dprobe = subprocess.run(
-            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
-             "-of", "default=noprint_wrappers=1:nokey=1", v],
+        if not clip_files:
+            print("Error: no clips could be extracted from search results.", file=sys.stderr)
+            return False
+
+        # Get resolution from first clip for grid cell size
+        probe = subprocess.run(
+            ["ffprobe", "-v", "error",
+             "-select_streams", "v:0",
+             "-show_entries", "stream=width,height",
+             "-of", "csv=p=0", clip_files[0]],
             capture_output=True, text=True
         )
-        try:
-            max_dur = max(max_dur, float(dprobe.stdout.strip()))
-        except (ValueError, TypeError):
-            pass
-
-    if num_inputs < total_cells:
-        for _ in range(total_cells - num_inputs):
-            cmd.extend(["-f", "lavfi", "-i", f"color=c=black:s={cell_w}x{cell_h}:d={max_dur}:r={fps}"])
-
-    # Build filter chain: scale each input, then hstack rows, then vstack rows
-    # Example for 2x2: [s0][s1]hstack[top]; [s2][s3]hstack[bottom]; [top][bottom]vstack
-    filter_parts = []
-    for i in range(total_cells):
-        filter_parts.append(f"[{i}:v]scale={cell_w}:{cell_h}[s{i}]")
-
-    # Build row-by-row hstack
-    for row in range(grid_rows):
-        row_start = row * grid_cols
-        row_labels = "".join(f"[s{row_start + c}]" for c in range(grid_cols))
-        row_out = f"[row{row}]"
-        if grid_cols == 1:
-            filter_parts.append(f"{row_labels}{row_out}copy{row_out}")
+        parts = probe.stdout.strip().split(",")
+        if len(parts) == 2 and parts[0].isdigit() and parts[1].isdigit():
+            cell_w, cell_h = int(parts[0]), int(parts[1])
         else:
-            filter_parts.append(f"{row_labels}hstack=inputs={grid_cols}{row_out}")
+            cell_w, cell_h = 1920, 1080
 
-    # Stack all rows vertically
-    row_labels = "".join(f"[row{r}]" for r in range(grid_rows))
-    if grid_rows == 1:
-        filter_parts.append(f"{row_labels}copy")
-    else:
-        filter_parts.append(f"{row_labels}vstack=inputs={grid_rows}")
+        # Pad with black clips if fewer than total_cells
+        if len(clip_files) < total_cells:
+            for _ in range(total_cells - len(clip_files)):
+                black_clip = os.path.join(tmpdir, f"black_{len(clip_files):02d}.mp4")
+                subprocess.run([
+                    "ffmpeg", "-y",
+                    "-f", "lavfi", "-i", f"color=c=black:s={cell_w}x{cell_h}:d={clip_duration}:r={fps}",
+                    "-c:v", "libx264", "-pix_fmt", "yuv420p", "-r", str(fps),
+                    black_clip,
+                ], capture_output=True)
+                clip_files.append(black_clip)
 
-    filter_str = ";".join(filter_parts)
+        # Build ffmpeg command for grid
+        cmd = ["ffmpeg", "-y"]
+        for c in clip_files:
+            cmd.extend(["-i", c])
 
-    cmd.extend(["-filter_complex", filter_str])
-    cmd.extend(["-c:v", "libx264", "-preset", "fast", "-crf", "23"])
-    cmd.extend(["-pix_fmt", "yuv420p", "-r", str(fps)])
-    cmd.append("-shortest")
-    cmd.append(output_path)
+        # Build filter chain: scale each input, then hstack rows, then vstack rows
+        filter_parts = []
+        for i in range(total_cells):
+            filter_parts.append(f"[{i}:v]scale={cell_w}:{cell_h}[s{i}]")
 
-    print(f"Grid stitch: {num_inputs} video(s) -> {grid_cols}x{grid_rows} grid ({cell_w}x{cell_h} per cell) -> {output_path}", file=sys.stderr)
-    for i, v in enumerate(actual_videos):
-        print(f"  panel {i}: {v}", file=sys.stderr)
+        # Build row-by-row hstack
+        for row in range(grid_rows):
+            row_start = row * grid_cols
+            row_labels = "".join(f"[s{row_start + c}]" for c in range(grid_cols))
+            row_out = f"[row{row}]"
+            if grid_cols == 1:
+                filter_parts.append(f"{row_labels}{row_out}copy{row_out}")
+            else:
+                filter_parts.append(f"{row_labels}hstack=inputs={grid_cols}{row_out}")
 
-    result = subprocess.run(cmd, capture_output=True, text=True)
-    if result.returncode != 0:
-        print(f"ffmpeg grid stitch error: {result.stderr[-500:]}", file=sys.stderr)
-        return False
+        # Stack all rows vertically
+        row_labels = "".join(f"[row{r}]" for r in range(grid_rows))
+        if grid_rows == 1:
+            filter_parts.append(f"{row_labels}copy")
+        else:
+            filter_parts.append(f"{row_labels}vstack=inputs={grid_rows}")
 
-    if os.path.exists(output_path):
-        dur = subprocess.run(
-            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
-             "-of", "default=noprint_wrappers=1:nokey=1", output_path],
-            capture_output=True, text=True
-        )
-        print(f"Stitched grid video: {output_path} (duration: {float(dur.stdout.strip()):.1f}s)", file=sys.stderr)
-        return True
-    else:
-        print(f"Error: output file not created: {output_path}", file=sys.stderr)
-        return False
+        filter_str = ";".join(filter_parts)
+
+        cmd.extend(["-filter_complex", filter_str])
+        cmd.extend(["-c:v", "libx264", "-preset", "fast", "-crf", "23"])
+        cmd.extend(["-pix_fmt", "yuv420p", "-r", str(fps)])
+        cmd.append("-shortest")
+        cmd.append(output_path)
+
+        print(f"Grid stitch: {len(clip_files)} clip(s) -> {grid_cols}x{grid_rows} grid -> {output_path}", file=sys.stderr)
+
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.returncode != 0:
+            print(f"ffmpeg grid stitch error: {result.stderr[-500:]}", file=sys.stderr)
+            return False
+
+        if os.path.exists(output_path):
+            dur = subprocess.run(
+                ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+                 "-of", "default=noprint_wrappers=1:nokey=1", output_path],
+                capture_output=True, text=True
+            )
+            print(f"Stitched grid video: {output_path} (duration: {float(dur.stdout.strip()):.1f}s)", file=sys.stderr)
+            return True
+        else:
+            print(f"Error: output file not created: {output_path}", file=sys.stderr)
+            return False
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
 
 
 def _build_stitch_sections(by_video, threshold_sec, isolated_padding_sec):
@@ -3231,10 +3354,29 @@ def cmd_isearch(args):
 
         # Pre-fetch all question data for each frame (run_id, frame_index)
         frame_keys = set()
+        run_ids = set()
         for row in rows:
             fi = row.get("frame_index")
             if fi is not None:
                 frame_keys.add((row.get("run_id"), fi))
+                if row.get("run_id") is not None:
+                    run_ids.add(row.get("run_id"))
+
+        # Fetch run metadata (model, params, etc.) for each run_id
+        run_meta = {}
+        if run_ids:
+            mplaceholders = ",".join(["?"] * len(run_ids))
+            mrows = cache_db.execute_sql(
+                f"SELECT id, model, params_hash, params_json, created_at FROM analysis_runs WHERE id IN ({mplaceholders})",
+                list(run_ids),
+            )
+            for mr in mrows:
+                run_meta[mr["id"]] = {
+                    "model": mr.get("model") or "",
+                    "params_hash": mr.get("params_hash") or "",
+                    "params_json": mr.get("params_json") or "{}",
+                    "created_at": mr.get("created_at") or "",
+                }
 
         all_questions_for_frame = {}
         if frame_keys:
@@ -3250,12 +3392,17 @@ def cmd_isearch(args):
             )
             for qr in qrows:
                 key = (qr["run_id"], qr["frame_index"])
+                meta = run_meta.get(qr["run_id"], {})
                 all_questions_for_frame.setdefault(key, []).append({
                     "question_name": qr["question_name"],
                     "top_choice": qr["top_choice"],
                     "top_probability": qr["top_probability"],
                     "confidence": qr["confidence"],
                     "probabilities_json": qr["probabilities_json"],
+                    "run_id": qr["run_id"],
+                    "model": meta.get("model", ""),
+                    "params_hash": meta.get("params_hash", ""),
+                    "params_json": meta.get("params_json", "{}"),
                 })
 
         os.makedirs(args.save_frame, exist_ok=True)
@@ -3350,33 +3497,33 @@ def cmd_isearch(args):
         else:
             print("(no rows)")
 
-    # ---- stitch-grid: 2x2 grid layout from multiple videos ----
+    # ---- stitch-grid: 2x2 grid layout from search results ----
     if getattr(args, "stitch_grid", None):
-        grid_videos = args.stitch_grid  # list of video paths (nargs="+")
-        output_path = getattr(args, "stitch_grid_output", None)
+        grid_output = getattr(args, "stitch_grid_output", None)
 
-        # Resolve video paths
-        resolved_videos, missing = _resolve_video_paths(grid_videos)
-        for m in missing:
-            print(f"Warning: no video matched input '{m}'", file=sys.stderr)
-
-        if not resolved_videos:
-            print("Error: no valid video sources for grid stitch.", file=sys.stderr)
-            cache_db.close()
-            sys.exit(1)
-
-        if not output_path:
-            base = os.path.splitext(os.path.basename(resolved_videos[0]))[0]
+        # Determine output path
+        if grid_output:
+            output_path = grid_output
+        else:
+            first_vid = list(by_video.keys())[0] if by_video else "search"
+            base = os.path.splitext(os.path.basename(first_vid))[0]
             output_path = f"{base}_grid.mp4"
 
         # Get FPS from first video
-        cap_first = cv2.VideoCapture(resolved_videos[0])
-        fps = cap_first.get(cv2.CAP_PROP_FPS)
-        if not fps or fps <= 0:
+        first_vid = list(by_video.keys())[0] if by_video else None
+        if first_vid and os.path.exists(first_vid):
+            cap_first = cv2.VideoCapture(first_vid)
+            fps = cap_first.get(cv2.CAP_PROP_FPS)
+            if not fps or fps <= 0:
+                fps = 30.0
+            cap_first.release()
+        else:
             fps = 30.0
-        cap_first.release()
 
-        success = _stitch_grid(resolved_videos, output_path, grid_cols=2, grid_rows=2, fps=fps)
+        # Get clip duration from config
+        clip_duration = cfg.get("clip_duration", 3) or 3
+
+        success = _stitch_grid_from_search(rows, by_video, output_path, grid_cols=2, grid_rows=2, fps=fps, clip_duration=clip_duration)
         cache_db.close()
         sys.exit(0 if success else 1)
 
@@ -3439,7 +3586,7 @@ def main():
     p_search.add_argument("--model", "-m", type=str, default=None, help="Filter results by decision model name (e.g., clef-flash:9b, d1:3b, perplexity/pplx-decider-v1.3)")
     p_search.add_argument("--run-id", "-ri", type=int, default=None, help="Filter results to a specific analysis run ID")
     p_search.add_argument("--stitch", "-st", nargs="?", const=True, default=None, metavar="PATH", help="Stitch matched frames into a single video using ffmpeg. Default threshold is 1 second unless --merge-same-threshold/-mst or --merge-threshold/-mt is provided.")
-    p_search.add_argument("--stitch-grid", "-sg", nargs="+", default=None, metavar="VIDEOS", help="Stitch multiple videos into a 2x2 grid layout (4 panels side by side). Provide up to 4 video file paths. Output goes to {first_video}_grid.mp4 by default, or use --stitch-grid-output to specify.")
+    p_search.add_argument("--stitch-grid", "-sg", nargs="?", const=True, default=None, metavar="PATH", help="Use search results to create a 2x2 grid video. Use --stitch-grid-output to specify output path.")
     p_search.add_argument("--stitch-grid-output", "-sg-o", type=str, default=None, metavar="PATH", help="Output path for --stitch-grid mode.")
     p_search.add_argument("--json", "-j", action="store_true", default=False, help="Output results as JSON array (for AI agents / programmatic use). Overrides table output on stdout. Merged ranges include start/end timestamps and frame lists.")
     p_search.set_defaults(func=cmd_search)
@@ -3459,7 +3606,7 @@ def main():
     p_isearch.add_argument("--model", "-m", type=str, default=None, help="Filter results by decision model name (e.g., clef-flash:9b, d1:3b, perplexity/pplx-decider-v1.3)")
     p_isearch.add_argument("--run-id", "-ri", type=int, default=None, help="Filter results to a specific analysis run ID")
     p_isearch.add_argument("--stitch", "-st", nargs="?", const=True, default=None, metavar="PATH", help="Stitch matched frames into a single video using ffmpeg. Default threshold is 1 second unless --merge-same-threshold/-mst or --merge-threshold/-mt is provided.")
-    p_isearch.add_argument("--stitch-grid", "-sg", nargs="+", default=None, metavar="VIDEOS", help="Stitch multiple videos into a 2x2 grid layout (4 panels side by side). Provide up to 4 video file paths.")
+    p_isearch.add_argument("--stitch-grid", "-sg", nargs="?", const=True, default=None, metavar="PATH", help="Use search results to create a 2x2 grid video.")
     p_isearch.add_argument("--stitch-grid-output", "-sg-o", type=str, default=None, metavar="PATH", help="Output path for --stitch-grid mode.")
     p_isearch.set_defaults(func=cmd_isearch)
 
