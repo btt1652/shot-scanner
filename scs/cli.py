@@ -2276,7 +2276,8 @@ def cmd_search(args):
                     duration = max(end_ts - start_ts, min_duration)
 
                     seg_file = os.path.join(tmpdir, f"clip_{vid_idx:04d}_{sec_idx:04d}.mp4")
-                    subprocess.run([
+                    print(f"  Extracting section {sec_idx} from {vid} (ts={start_ts:.1f}s, duration={duration:.1f}s)...", file=sys.stderr)
+                    result = subprocess.run([
                         "ffmpeg", "-y", "-loglevel", "verbose",
                         "-ss", str(start_ts),
                         "-i", vid,
@@ -2286,7 +2287,7 @@ def cmd_search(args):
                         "-r", str(fps),
                         "-an",
                         seg_file,
-                    ], capture_output=True)
+                    ])
                     if os.path.exists(seg_file) and os.path.getsize(seg_file) > 0:
                         clip_files.append(seg_file)
 
@@ -2303,14 +2304,15 @@ def cmd_search(args):
                         cf.write("file '" + cf_file + "'\n")
                 # Re-encode during concat so videos from different containers
                 # (different codecs/resolutions/fps) are handled correctly
-                subprocess.run([
+                print(f"  Concatenating {len(all_clip_files)} clip(s) into {output_path}...", file=sys.stderr)
+                result = subprocess.run([
                     "ffmpeg", "-y", "-loglevel", "verbose",
                     "-f", "concat", "-safe", "0", "-i", concat_file,
                     "-c:v", "libx264", "-preset", "fast", "-crf", "23",
                     "-pix_fmt", "yuv420p",
                     "-an",
                     output_path,
-                ], capture_output=True)
+                ])
                 print(f"Stitched {len(all_clip_files)} clip(s) from {len(all_sections_by_video)} video(s) -> {output_path}", file=sys.stderr)
             else:
                 print("No clips could be extracted from any video", file=sys.stderr)
@@ -2685,6 +2687,7 @@ def _stitch_grid_from_search(rows, by_video, output_path, grid_cols=2, grid_rows
                 end_ts = last_row.get("timestamp_seconds") or last_row.get("end_timestamp") or last_row.get("start_timestamp") or start_ts
                 duration = max(end_ts - start_ts, min_duration)
                 seg_file = os.path.join(tmpdir, f"clip_{len(clip_files):02d}.mp4")
+                print(f"  Extracting section {len(clip_files)} from {vid} (ts={start_ts:.1f}s, duration={duration:.1f}s)...", file=sys.stderr)
                 subprocess.run([
                     "ffmpeg", "-y", "-loglevel", "verbose",
                     "-ss", str(start_ts),
@@ -2695,7 +2698,7 @@ def _stitch_grid_from_search(rows, by_video, output_path, grid_cols=2, grid_rows
                     "-r", str(fps),
                     "-an",
                     seg_file,
-                ], capture_output=True)
+                ])
                 if os.path.exists(seg_file) and os.path.getsize(seg_file) > 0:
                     clip_files.append(seg_file)
                 if len(clip_files) >= total_cells:
@@ -2723,12 +2726,13 @@ def _stitch_grid_from_search(rows, by_video, output_path, grid_cols=2, grid_rows
         if len(clip_files) < total_cells:
             for _ in range(total_cells - len(clip_files)):
                 black_clip = os.path.join(tmpdir, f"black_{len(clip_files):02d}.mp4")
+                print(f"  Generating black filler clip {len(clip_files)}...", file=sys.stderr)
                 subprocess.run([
                     "ffmpeg", "-y", "-loglevel", "verbose",
                     "-f", "lavfi", "-i", f"color=c=black:s={cell_w}x{cell_h}:d=3:r={fps}",
                     "-c:v", "libx264", "-pix_fmt", "yuv420p", "-r", str(fps),
                     black_clip,
-                ], capture_output=True)
+                ])
                 clip_files.append(black_clip)
 
         # Build ffmpeg command for grid
@@ -2768,9 +2772,9 @@ def _stitch_grid_from_search(rows, by_video, output_path, grid_cols=2, grid_rows
 
         print(f"Grid stitch: {len(clip_files)} clip(s) -> {grid_cols}x{grid_rows} grid -> {output_path}", file=sys.stderr)
 
-        result = subprocess.run(cmd, capture_output=True, text=True)
+        result = subprocess.run(cmd)
         if result.returncode != 0:
-            print(f"ffmpeg grid stitch error: {result.stderr[-500:]}", file=sys.stderr)
+            print(f"ffmpeg grid stitch error: return code {result.returncode}", file=sys.stderr)
             return False
 
         if os.path.exists(output_path):
