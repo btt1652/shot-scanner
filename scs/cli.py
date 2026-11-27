@@ -2753,22 +2753,22 @@ def _stitch_grid_from_search(rows, by_video, output_path, grid_cols=2, grid_rows
                 print(f"  No clips for grid from {vid}", file=sys.stderr)
                 continue
 
+            # Get resolution from first clip
+            probe = subprocess.run(
+                ["ffprobe", "-v", "error",
+                 "-select_streams", "v:0",
+                 "-show_entries", "stream=width,height",
+                 "-of", "csv=p=0", vid_clip_files[0]],
+                capture_output=True, text=True
+            )
+            parts = probe.stdout.strip().split(",")
+            if len(parts) == 2 and parts[0].isdigit() and parts[1].isdigit():
+                cell_w, cell_h = int(parts[0]), int(parts[1])
+            else:
+                cell_w, cell_h = 1920, 1080
+
             # Pad with black clips if fewer than total_cells
             if len(vid_clip_files) < total_cells:
-                # Get resolution from first clip
-                probe = subprocess.run(
-                    ["ffprobe", "-v", "error",
-                     "-select_streams", "v:0",
-                     "-show_entries", "stream=width,height",
-                     "-of", "csv=p=0", vid_clip_files[0]],
-                    capture_output=True, text=True
-                )
-                parts = probe.stdout.strip().split(",")
-                if len(parts) == 2 and parts[0].isdigit() and parts[1].isdigit():
-                    cell_w, cell_h = int(parts[0]), int(parts[1])
-                else:
-                    cell_w, cell_h = 1920, 1080
-
                 for _ in range(total_cells - len(vid_clip_files)):
                     black_clip = os.path.join(tmpdir, f"grid_{vid_idx:02d}_black_{len(vid_clip_files):02d}.mp4")
                     print(f"  Generating black filler clip for {vid}...", file=sys.stderr)
