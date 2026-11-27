@@ -1626,6 +1626,8 @@ def cmd_search(args):
         scs search <video> [--list] [--top N] [--top-per-video N] [--merge-threshold SEC|-mt] [--model MODEL] [--run-id RUN_ID] [--save-frame DIR] [--stitch [PATH]] [--stitch-grid] [--stitch-grid-output PATH] [--json|-j] [--cache PATH|-c]
         scs search <video> [--activity walking] [--scene couple] [--prob 0.8] [--conf 0.7] [--rank walking 1]
 
+    --stitch: merge all matched frames from all videos into a single output video (default: stitched.mp4). Use --stitch <PATH> to specify a custom output path.
+
     Named-argument filter syntax (AND logic, one question per flag):
       --<question> <choice>              — match a specific choice for this question
       --prob <value>                     — top_probability >= value for the current question
@@ -2240,30 +2242,30 @@ def cmd_search(args):
         # Build sections from rows
         all_sections_by_video = _build_stitch_sections(by_video, threshold)
 
-        # Determine output paths
+        # Determine single output path for all videos
         if args.stitch and isinstance(args.stitch, str):
-            output_paths = [args.stitch]
+            output_path = args.stitch
         else:
-            output_paths = [f"{os.path.splitext(os.path.basename(vid))[0]}_stitched.mp4" for vid in by_video]
+            output_path = "stitched.mp4"
 
-        # Stitch each video
-        for vid_idx, (vid, sections) in enumerate(all_sections_by_video.items()):
-            if not os.path.exists(vid):
-                print(f"Warning: video not found: {vid}", file=sys.stderr)
-                continue
-            cap = cv2.VideoCapture(vid)
-            fps = cap.get(cv2.CAP_PROP_FPS)
-            if not fps or fps <= 0:
-                fps = 25.0
-            cap.release()
+        # Minimum duration per section from config (default 0.5s)
+        min_duration = cfg.get("stitch_min_duration", 0.5) or 0.5
 
+        # Collect all clip files from all videos into one temp dir
+        all_clip_files = []
+        tmpdir = tempfile.mkdtemp(prefix="scs_stitch_")
+        try:
+            for vid_idx, (vid, sections) in enumerate(all_sections_by_video.items()):
+                if not os.path.exists(vid):
+                    print(f"Warning: video not found: {vid}", file=sys.stderr)
+                    continue
+                cap = cv2.VideoCapture(vid)
+                fps = cap.get(cv2.CAP_PROP_FPS)
+                if not fps or fps <= 0:
+                    fps = 25.0
+                cap.release()
 
-            out_path = output_paths[min(vid_idx, len(output_paths)-1)]
-            # Minimum duration per section from config (default 0.5s)
-            min_duration = cfg.get("stitch_min_duration", 0.5) or 0.5
-            tmpdir = tempfile.mkdtemp(prefix="scs_stitch_")
-            clip_files = []
-            try:
+                clip_files = []
                 for sec_idx, section in enumerate(sections):
                     # Use the section's actual timestamp range
                     first_row = section[0]
@@ -2272,7 +2274,7 @@ def cmd_search(args):
                     end_ts = last_row.get("timestamp_seconds") or last_row.get("end_timestamp") or last_row.get("start_timestamp") or start_ts
                     duration = max(end_ts - start_ts, min_duration)
 
-                    seg_file = os.path.join(tmpdir, f"clip_{sec_idx:04d}.mp4")
+                    seg_file = os.path.join(tmpdir, f"clip_{vid_idx:04d}_{sec_idx:04d}.mp4")
                     subprocess.run([
                         "ffmpeg", "-y", "-loglevel", "verbose",
                         "-ss", str(start_ts),
@@ -2288,20 +2290,31 @@ def cmd_search(args):
                         clip_files.append(seg_file)
 
                 if clip_files:
-                    concat_file = os.path.join(tmpdir, "concat.txt")
-                    with open(concat_file, "w") as cf:
-                        for cf_file in clip_files:
-                            cf.write("file '" + cf_file + "'\n")
-                    subprocess.run([
-                        "ffmpeg", "-y", "-loglevel", "verbose",
-                        "-f", "concat", "-safe", "0", "-i", concat_file,
-                        "-c", "copy", out_path,
-                    ], capture_output=True)
-                    print(f"Stitched {vid} -> {out_path} ({len(clip_files)} section(s))", file=sys.stderr)
+                    all_clip_files.extend(clip_files)
+                    print(f"Extracted {len(clip_files)} clip(s) from {vid}", file=sys.stderr)
                 else:
                     print(f"No clips could be extracted from {vid}", file=sys.stderr)
-            finally:
-                shutil.rmtree(tmpdir)
+
+            if all_clip_files:
+                concat_file = os.path.join(tmpdir, "concat.txt")
+                with open(concat_file, "w") as cf:
+                    for cf_file in all_clip_files:
+                        cf.write("file '" + cf_file + "'\n")
+                # Re-encode during concat so videos from different containers
+                # (different codecs/resolutions/fps) are handled correctly
+                subprocess.run([
+                    "ffmpeg", "-y", "-loglevel", "verbose",
+                    "-f", "concat", "-safe", "0", "-i", concat_file,
+                    "-c:v", "libx264", "-preset", "fast", "-crf", "23",
+                    "-pix_fmt", "yuv420p",
+                    "-an",
+                    output_path,
+                ], capture_output=True)
+                print(f"Stitched {len(all_clip_files)} clip(s) from {len(all_sections_by_video)} video(s) -> {output_path}", file=sys.stderr)
+            else:
+                print("No clips could be extracted from any video", file=sys.stderr)
+        finally:
+            shutil.rmtree(tmpdir)
         cache_db.close()
         sys.exit(0)
 
@@ -3485,7 +3498,7 @@ def main():
     p_search.add_argument("--cache", "-c", type=str, default=None, help="Path to SQLite cache file (default: ./.cache.db)")
     p_search.add_argument("--model", "-m", type=str, default=None, help="Filter results by decision model name (e.g., clef-flash:9b, d1:3b, perplexity/pplx-decider-v1.3)")
     p_search.add_argument("--run-id", "-ri", type=int, default=None, help="Filter results to a specific analysis run ID")
-    p_search.add_argument("--stitch", "-st", nargs="?", const=True, default=None, metavar="PATH", help="Stitch matched frames into a single video using ffmpeg. Default threshold is 1 second unless --merge-threshold/-mt is provided.")
+    p_search.add_argument("--stitch", "-st", nargs="?", const=True, default=None, metavar="PATH", help="Stitch all matched frames from all videos into a single output video. Default output: stitched.mp4. Default threshold is 1 second unless --merge-threshold/-mt is provided.")
     p_search.add_argument("--stitch-grid", "-sg", nargs="?", const=True, default=None, metavar="PATH", help="Use search results to create a 2x2 grid video. Use --stitch-grid-output to specify output path.")
     p_search.add_argument("--stitch-grid-output", "-sg-o", type=str, default=None, metavar="PATH", help="Output path for --stitch-grid mode.")
     p_search.add_argument("--json", "-j", action="store_true", default=False, help="Output results as JSON array (for AI agents / programmatic use). Overrides table output on stdout. Merged ranges include start/end timestamps and frame lists.")
@@ -3505,7 +3518,7 @@ def main():
     p_isearch.add_argument("--cache", "-c", type=str, default=None, help="Path to SQLite cache file (default: ./.cache.db)")
     p_isearch.add_argument("--model", "-m", type=str, default=None, help="Filter results by decision model name (e.g., clef-flash:9b, d1:3b, perplexity/pplx-decider-v1.3)")
     p_isearch.add_argument("--run-id", "-ri", type=int, default=None, help="Filter results to a specific analysis run ID")
-    p_isearch.add_argument("--stitch", "-st", nargs="?", const=True, default=None, metavar="PATH", help="Stitch matched frames into a single video using ffmpeg. Default threshold is 1 second unless --merge-threshold/-mt is provided.")
+    p_isearch.add_argument("--stitch", "-st", nargs="?", const=True, default=None, metavar="PATH", help="Stitch all matched frames from all videos into a single output video. Default output: stitched.mp4. Default threshold is 1 second unless --merge-threshold/-mt is provided.")
     p_isearch.add_argument("--stitch-grid", "-sg", nargs="?", const=True, default=None, metavar="PATH", help="Use search results to create a 2x2 grid video.")
     p_isearch.add_argument("--stitch-grid-output", "-sg-o", type=str, default=None, metavar="PATH", help="Output path for --stitch-grid mode.")
     p_isearch.set_defaults(func=cmd_isearch)
