@@ -2189,13 +2189,35 @@ def cmd_search(args):
         cache_db.close()
         sys.exit(0)
 
+    # Build mapping run_id -> video_path and add source_video_path to each row
+    # Shared by both --stitch and --stitch-grid blocks
+    from collections import defaultdict
+    run_to_path = {}
+    for r in cache_db.execute_sql("SELECT ar.id AS run_id, v.video_path FROM analysis_runs ar JOIN videos v ON ar.video_id = v.id"):
+        run_to_path[r["run_id"]] = r["video_path"]
+    for row in rows:
+        run_id = row.get("run_id")
+        if run_id and run_id in run_to_path and "source_video_path" not in row:
+            row["source_video_path"] = run_to_path[run_id]
+
+    # Group rows by source video and sort by timestamp (handle ranges)
+    by_video = defaultdict(list)
+    for row in rows:
+        run_id = row.get("run_id")
+        vid = row.get("source_video_path")
+        if run_id and vid:
+            by_video[vid].append(row)
+
+    # Sort rows: use timestamp_seconds if available, otherwise start_timestamp
+    for vid in by_video:
+        by_video[vid].sort(key=lambda r: r.get("timestamp_seconds") or r.get("start_timestamp") or 0)
+
     if getattr(args, "stitch", False):
         # Stitch feature: use ffmpeg to merge matched frames into a single video
         import subprocess
         import os
         import shutil
         import tempfile
-        from collections import defaultdict
 
         cfg = load_config()
         
@@ -2212,27 +2234,6 @@ def cmd_search(args):
         
         if threshold <= 0:
             threshold = 1.0  # Default fallback
-
-        # Build mapping run_id -> video_path and add source_video_path to each row
-        run_to_path = {}
-        for r in cache_db.execute_sql("SELECT ar.id AS run_id, v.video_path FROM analysis_runs ar JOIN videos v ON ar.video_id = v.id"):
-            run_to_path[r["run_id"]] = r["video_path"]
-        for row in rows:
-            run_id = row.get("run_id")
-            if run_id and run_id in run_to_path and "source_video_path" not in row:
-                row["source_video_path"] = run_to_path[run_id]
-
-        # Group rows by source video and sort by timestamp (handle ranges)
-        by_video = defaultdict(list)
-        for row in rows:
-            run_id = row.get("run_id")
-            vid = row.get("source_video_path")
-            if run_id and vid:
-                by_video[vid].append(row)
-
-        # Sort rows: use timestamp_seconds if available, otherwise start_timestamp
-        for vid in by_video:
-            by_video[vid].sort(key=lambda r: r.get("timestamp_seconds") or r.get("start_timestamp") or 0)
 
         if not by_video:
             print("No matching frames to stitch.", file=sys.stderr)
@@ -3256,17 +3257,31 @@ def cmd_isearch(args):
 
     rows = sorted(rows, key=lambda r: (_result_timestamp(r), r.get("run_id") or 0))
 
+    # Build mapping run_id -> video_path and add source_video_path to each row
+    # Shared by --save-frame, --stitch, and --stitch-grid blocks
+    from collections import defaultdict
+    run_to_path = {}
+    for r in cache_db.execute_sql("SELECT ar.id AS run_id, v.video_path FROM analysis_runs ar JOIN videos v ON ar.video_id = v.id"):
+        run_to_path[r["run_id"]] = r["video_path"]
+    for row in rows:
+        run_id = row.get("run_id")
+        if run_id and run_id in run_to_path and "source_video_path" not in row:
+            row["source_video_path"] = run_to_path[run_id]
+
+    # Group rows by source video and sort by timestamp (handle ranges)
+    by_video = defaultdict(list)
+    for row in rows:
+        run_id = row.get("run_id")
+        vid = row.get("source_video_path")
+        if run_id and vid:
+            by_video[vid].append(row)
+
+    # Sort rows: use timestamp_seconds if available, otherwise start_timestamp
+    for vid in by_video:
+        by_video[vid].sort(key=lambda r: r.get("timestamp_seconds") or r.get("start_timestamp") or 0)
+
     # optional save-frame
     if args.save_frame:
-        from collections import defaultdict
-        run_to_path = {}
-        for r in cache_db.execute_sql("SELECT ar.id AS run_id, v.video_path FROM analysis_runs ar JOIN videos v ON ar.video_id = v.id"):
-            run_to_path[r["run_id"]] = r["video_path"]
-        by_video = defaultdict(list)
-        for row in rows:
-            run_id = row.get("run_id")
-            if run_id and run_id in run_to_path:
-                by_video[run_to_path[run_id]].append(row)
 
         # Pre-fetch all question data for each frame (run_id, frame_index)
         frame_keys = set()
